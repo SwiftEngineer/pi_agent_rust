@@ -2198,6 +2198,17 @@ impl Agent {
         on_event: &AgentEventHandler,
         new_messages: &mut Vec<Message>,
     ) -> Arc<ToolResultMessage> {
+        on_event(AgentEvent::ToolExecutionUpdate {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            args: tool_call.arguments.clone(),
+            partial_result: ToolOutput {
+                content: output.content.clone(),
+                details: output.details.clone(),
+                is_error,
+            },
+        });
+
         let tool_result = Arc::new(ToolResultMessage {
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
