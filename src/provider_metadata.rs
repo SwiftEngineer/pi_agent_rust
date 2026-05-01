@@ -1545,6 +1545,7 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
         display_name: Some("Azure OpenAI"),
         aliases: &[
             "azure",
+            "azure_openai",
             "azure-cognitive-services",
             "azure-openai-responses",
         ],
