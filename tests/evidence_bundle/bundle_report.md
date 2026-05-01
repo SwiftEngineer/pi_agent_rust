@@ -1,8 +1,8 @@
 # Unified CI Evidence Bundle
 
-> Generated: 2026-05-01T17:02:07Z
-> Git ref: 41c5a2fce
-> CI run: local-20260501T170207Z
+> Generated: 2026-05-01T17:46:30Z
+> Git ref: 9cd039762
+> CI run: local-20260501T174630Z
 > Verdict: **COMPLETE**
 
 ## Summary
@@ -39,7 +39,7 @@
 | Provider compatibility matrix | PASS | 753 | 375207 B | `tests/ext_conformance/reports/provider_compat` |
 | Sharded extension matrix reports | PASS | 12 | 280518 B | `tests/ext_conformance/reports/sharded` |
 | Extension journey report | PASS | 1 | 14742 B | `tests/ext_conformance/reports/journeys/journey_report.json` |
-| Auto-repair summary | PASS | 1 | 52577 B | `tests/ext_conformance/reports/auto_repair_summary.json` |
+| Auto-repair summary | PASS | 1 | 52578 B | `tests/ext_conformance/reports/auto_repair_summary.json` |
 
 ## E2e (1)
 

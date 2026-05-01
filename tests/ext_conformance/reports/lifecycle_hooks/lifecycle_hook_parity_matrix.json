@@ -58,7 +58,7 @@
       "observed": true
     }
   ],
-  "generated_at": "2026-05-01T17:08:40.209Z",
+  "generated_at": "2026-05-01T17:47:22.480Z",
   "ordering_trace": [
     "startup",
     "agent_start",
