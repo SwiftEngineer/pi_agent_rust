@@ -87,6 +87,10 @@ pub fn apply_piped_stdin(cli: &mut cli::Cli, stdin_content: Option<String>) {
 
 #[allow(clippy::missing_const_for_fn)]
 pub fn normalize_cli(cli: &mut cli::Cli) {
+    if cli.rpc && cli.mode.is_none() {
+        cli.mode = Some("rpc".to_string());
+    }
+
     if cli.print {
         cli.no_session = true;
     }
@@ -97,7 +101,11 @@ pub fn normalize_cli(cli: &mut cli::Cli) {
 }
 
 pub fn validate_rpc_args(cli: &cli::Cli) -> Result<()> {
-    if cli.mode.as_deref() == Some("rpc") && !cli.file_args().is_empty() {
+    let rpc_mode = cli.rpc || cli.mode.as_deref() == Some("rpc");
+    if cli.rpc && cli.print {
+        bail!("Error: RPC mode cannot be combined with --print");
+    }
+    if rpc_mode && !cli.file_args().is_empty() {
         bail!("Error: @file arguments are not supported in RPC mode");
     }
     Ok(())
@@ -1297,6 +1305,13 @@ mod tests {
             err.to_string()
                 .contains("@file arguments are not supported in RPC mode")
         );
+    }
+
+    #[test]
+    fn validate_rpc_args_allows_print_with_explicit_mode_rpc() {
+        let cli = cli::Cli::parse_from(["pi", "--mode", "rpc", "--print", "hello"]);
+
+        assert!(validate_rpc_args(&cli).is_ok());
     }
 
     #[test]

@@ -49,6 +49,7 @@ fn known_long_option(name: &str) -> Option<LongOptionSpec> {
         | "no-session"
         | "no-migrations"
         | "print"
+        | "rpc"
         | "acp"
         | "verbose"
         | "no-tools"
@@ -353,6 +354,10 @@ pub struct Cli {
     #[arg(short = 'p', long)]
     pub print: bool,
 
+    /// Start in RPC mode (alias for --mode rpc)
+    #[arg(long, conflicts_with_all = ["mode", "print"])]
+    pub rpc: bool,
+
     /// Start in ACP (Agent Client Protocol) mode for Zed editor integration.
     /// Reads JSON-RPC 2.0 requests from stdin and writes responses to stdout.
     #[arg(long)]
@@ -560,6 +565,18 @@ mod tests {
     fn parse_print_long_flag() {
         let cli = Cli::parse_from(["pi", "--print", "question"]);
         assert!(cli.print);
+    }
+
+    #[test]
+    fn parse_rpc_alias_sets_rpc_flag() {
+        let cli = Cli::parse_from(["pi", "--rpc"]);
+        assert!(cli.rpc);
+    }
+
+    #[test]
+    fn parse_rpc_alias_conflicts_with_print() {
+        let result = Cli::try_parse_from(["pi", "--rpc", "--print", "question"]);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -267,6 +267,9 @@ fn main_impl() -> Result<()> {
     // Named themes (without .json, /, ~) are validated later after resource loading.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     validate_theme_path_spec(cli.theme.as_deref(), &cwd)?;
+    if cli.rpc && cli.mode.is_none() {
+        cli.mode = Some("rpc".to_string());
+    }
 
     // Ultra-fast paths that don't need tracing or the async runtime.
     if let Some(command) = &cli.command {
@@ -482,7 +485,6 @@ fn main_impl() -> Result<()> {
 
     // Run the application
     let reactor = create_reactor()?;
-    let exit_after_runtime = cli.print || matches!(cli.mode.as_deref(), Some("text" | "json"));
     let runtime = RuntimeBuilder::multi_thread()
         .blocking_threads(1, 2)
         .enable_parking(false)
@@ -491,17 +493,16 @@ fn main_impl() -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let handle = runtime.handle();
     let result = runtime.block_on(run(cli, extension_flags, handle));
-    if exit_after_runtime {
-        match result {
-            Ok(()) => std::process::exit(0),
-            Err(err) => {
-                let exit_code = exit_code_for_error(&err);
-                print_error_with_hints(&err);
-                std::process::exit(exit_code);
-            }
+    // `run()` owns graceful application shutdown. Exiting here avoids waiting on
+    // runtime-owned background tasks after the CLI/TUI has already finished.
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            let exit_code = exit_code_for_error(&err);
+            print_error_with_hints(&err);
+            std::process::exit(exit_code);
         }
     }
-    result
 }
 
 fn print_error_with_hints(err: &anyhow::Error) {
@@ -970,8 +971,11 @@ async fn run(
             "text".to_string()
         }
     });
-    let startup_is_print_mode = startup_mode == "text" || startup_mode == "json";
-    if !startup_is_print_mode {
+    let startup_is_interactive = startup_mode == "interactive"
+        && cli.command.is_none()
+        && cli.export.is_none()
+        && cli.list_models.is_none();
+    if startup_is_interactive {
         spawn_session_index_maintenance();
     }
     let package_manager = PackageManager::new(cwd.clone());
