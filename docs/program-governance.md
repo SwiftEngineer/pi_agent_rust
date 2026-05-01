@@ -257,6 +257,112 @@ Next provider rollup checkpoint: `2026-02-13` (UTC), focused on `bd-3uqg.3.8.4` 
 
 ---
 
+## Incapacity Playbook
+
+This playbook covers maintainer unavailability, account compromise, or a
+release-blocking emergency where the primary maintainer cannot operate the
+repository directly. It is intentionally procedural and does not store secrets,
+private contact details, recovery phrases, or personal account material in this
+repository.
+
+### Activation Criteria
+
+Use this path only when at least one condition is true:
+
+1. The primary maintainer is unreachable for 72 hours and a Critical/High
+   security fix, installer breakage, or release-blocking regression must ship.
+2. The primary maintainer explicitly delegates emergency control in writing.
+3. The GitHub or crates.io account appears compromised and normal release
+   authority must be suspended while credentials are rotated.
+
+### Repo Ownership Escalation
+
+| Step | Action | Evidence |
+|------|--------|----------|
+| 1 | Open an emergency tracking bead with label `operations` and link the triggering incident. | `br show <id> --json` |
+| 2 | Confirm the activating condition with the out-of-band maintainer contact roster stored outside this repo. | Emergency log entry, not committed |
+| 3 | Have the designated emergency repo admin accept temporary operational ownership. | GitHub organization or repo audit log |
+| 4 | Freeze non-emergency merges until CI, release tags, and installer distribution are verified. | Branch ruleset/audit-log snapshot |
+| 5 | Record every action in the emergency bead and in release notes if a user-visible build ships. | Bead comments, CHANGELOG entry |
+
+The private roster must identify at least two emergency contacts: one GitHub
+repository administrator and one release/secrets operator. If either role is
+vacant, the weekly governance review must file a P1 operations bead.
+
+### Secrets Recovery and Rotation
+
+No secret value belongs in this repo. The emergency operator should recover or
+rotate credentials from the private secrets manager/escrow only after the
+activation criteria are met.
+
+| Secret or authority | Recovery/rotation action | Verification |
+|---------------------|--------------------------|--------------|
+| GitHub repository/admin access | Rotate compromised credentials, review SSH/GPG keys, revoke unknown tokens, and confirm branch rulesets still protect `main`. | GitHub security log + ruleset snapshot |
+| `CARGO_REGISTRY_TOKEN` | Revoke the old crates.io token, issue a least-privilege replacement, and update the Actions secret. | `Publish` workflow dry-run or pre-release tag |
+| Release workflow authority | Verify `.github/workflows/release.yml` permissions still use GitHub-scoped release rights only. | Workflow run log |
+| Installer artifact integrity | Regenerate release assets, `SHA256SUMS`, and Sigstore/checksum evidence before advising users to install. | GitHub Release artifact list + checksum proof |
+| Local signing or recovery material | Rotate outside Git, then document only the rotation event and operator identity. | Private escrow audit log |
+
+After rotation, invalidate all emergency session tokens, remove temporary
+administrators, and capture a final audit-log snapshot before returning to
+normal governance.
+
+### Emergency Release Process
+
+1. Rebase on latest `main` and keep the patch scoped to the emergency.
+2. Run the mandatory local gates from [AGENTS.md](../AGENTS.md), including
+   `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`,
+   `cargo fmt --check`, and `./scripts/reconcile_beads_ledger.sh`.
+3. Cut a pre-release tag first when time allows: `vX.Y.Z-rc.N`.
+4. Verify the `Publish` and `Release (GitHub binaries)` workflows in
+   [releasing.md](releasing.md), including installer regression and checksum
+   artifacts.
+5. Promote to the final SemVer tag only after the release artifact path and
+   installer path both pass smoke tests.
+6. Document the reason for emergency authority in `CHANGELOG.md` and the
+   emergency bead.
+
+If a Critical/High vulnerability is actively exploitable, the emergency repo
+admin may bypass the normal monthly cadence, but may not bypass branch
+protection, code review evidence, or release artifact verification.
+
+### Branch-Protection Authority
+
+Only the primary maintainer or the designated emergency repo admin may change
+branch protection, required checks, release workflow permissions, or tag
+protection. During an emergency, any such change requires:
+
+1. A linked emergency bead.
+2. A second human or agent review recorded in the bead.
+3. A before/after snapshot of the GitHub ruleset or workflow permission diff.
+4. Immediate restoration of the stricter rule after the emergency release.
+
+Branch protection must never be relaxed to make unrelated work mergeable during
+an incapacity event.
+
+### Tabletop Dry Run
+
+Run this review quarterly or after any release-process change:
+
+1. Pick a hypothetical Critical installer regression.
+2. Identify the emergency repo admin and release/secrets operator from the
+   private roster without exposing their contact details in Git.
+3. Walk through credential rotation for `CARGO_REGISTRY_TOKEN` as a dry run:
+   do not rotate unless there is a real incident, but verify the owner and
+   storage location are known.
+4. Trigger or inspect a non-publishing release rehearsal, preferably a
+   pre-release tag or workflow dry run.
+5. Confirm the installer path verifies `SHA256SUMS` and does not require
+   `--no-verify` in published instructions.
+6. File beads for any missing role, stale secret owner, failing workflow, or
+   ambiguous branch-protection authority.
+
+The tabletop outcome is pass only when every role is named in private escrow,
+the release workflow can be rehearsed without publishing a final release, and
+no unresolved Critical/High operations gap remains untracked.
+
+---
+
 ## Incident Response
 
 ### Conformance Regression on Main
