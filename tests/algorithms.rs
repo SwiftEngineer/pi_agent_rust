@@ -4,5 +4,8 @@ mod ess_gate;
 #[path = "algorithms/runtime_risk_ledger.rs"]
 mod runtime_risk_ledger;
 
+#[path = "algorithms/oco_regret_rollback.rs"]
+mod oco_regret_rollback;
+
 #[path = "algorithms/shadow_dual_backoff.rs"]
 mod shadow_dual_backoff;
