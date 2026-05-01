@@ -2822,7 +2822,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         cmd: &str,
         payload: &serde_json::Value,
     ) -> HostcallOutcome {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::mpsc;
 
@@ -2896,7 +2896,8 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
             thread::spawn(move || {
                 let result = (|| -> std::result::Result<(), String> {
-                    let mut command = Command::new(&cmd);
+                    let mut command = crate::tools::command_with_default_sigpipe_in_dir(&cmd, &cwd)
+                        .map_err(|err| err.to_string())?;
                     command
                         .args(&args)
                         .stdin(Stdio::null())
@@ -3060,7 +3061,8 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
         thread::spawn(move || {
             let result: std::result::Result<serde_json::Value, String> = (|| {
-                let mut command = Command::new(&cmd);
+                let mut command = crate::tools::command_with_default_sigpipe_in_dir(&cmd, &cwd)
+                    .map_err(|err| err.to_string())?;
                 command
                     .args(&args)
                     .stdin(Stdio::null())
@@ -3200,6 +3202,11 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                 let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
                 let code = exit_status_code(status);
+                if (code == 126 || code == 127)
+                    && stderr.contains(crate::tools::SIGPIPE_TRAMPOLINE_EXEC_FAILURE_PREFIX)
+                {
+                    return Err(stderr.trim().to_string());
+                }
 
                 Ok(serde_json::json!({
                     "stdout": stdout,

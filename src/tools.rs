@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1948,7 +1949,8 @@ pub(crate) async fn run_bash_command(
         "sh"
     });
 
-    let mut cmd = Command::new(shell);
+    let mut cmd = command_with_default_sigpipe_in_dir(shell, cwd)
+        .map_err(|e| Error::tool("bash", format!("Failed to prepare shell: {e}")))?;
     cmd.arg("-c")
         .arg(&command)
         .current_dir(cwd)
@@ -3684,7 +3686,8 @@ impl Tool for GrepTool {
             )
         })?;
 
-        let mut child = Command::new(rg_cmd)
+        let mut child = command_with_default_sigpipe(rg_cmd)
+            .map_err(|e| Error::tool("grep", format!("Failed to prepare ripgrep: {e}")))?
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -4127,7 +4130,8 @@ impl Tool for FindTool {
         args.push(input.pattern.clone());
         args.push(search_path.display().to_string());
 
-        let mut child = Command::new(fd_cmd)
+        let mut child = command_with_default_sigpipe_in_dir(fd_cmd, &self.cwd)
+            .map_err(|e| Error::tool("find", format!("Failed to prepare fd: {e}")))?
             .args(args)
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
@@ -5176,6 +5180,119 @@ fn collect_process_tree(
     }
 }
 
+/// Build a child command whose Unix process image starts with SIGPIPE restored
+/// to the platform default, without using `Command::pre_exec`.
+///
+/// Rust binaries ignore SIGPIPE by default, and POSIX inherits that disposition
+/// across `exec(2)`. The tiny `/bin/sh` trampoline resets PIPE and then `exec`s
+/// the requested program, preserving argv, cwd, stdio, and the process id that
+/// later becomes the isolated process-group leader.
+pub(crate) const SIGPIPE_TRAMPOLINE_EXEC_FAILURE_PREFIX: &str = "pi-sigpipe-reset: exec failed:";
+
+pub(crate) fn command_with_default_sigpipe(program: impl AsRef<OsStr>) -> std::io::Result<Command> {
+    command_with_default_sigpipe_for_cwd(program.as_ref(), None)
+}
+
+/// Variant of [`command_with_default_sigpipe`] for commands that will run with
+/// `current_dir(cwd)`. This preserves relative `./program` lookup semantics.
+pub(crate) fn command_with_default_sigpipe_in_dir(
+    program: impl AsRef<OsStr>,
+    cwd: &Path,
+) -> std::io::Result<Command> {
+    command_with_default_sigpipe_for_cwd(program.as_ref(), Some(cwd))
+}
+
+#[cfg(unix)]
+fn command_with_default_sigpipe_for_cwd(
+    program: &OsStr,
+    cwd: Option<&Path>,
+) -> std::io::Result<Command> {
+    let program = resolve_executable_for_shell_trampoline(program, cwd)?;
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(
+            "trap - PIPE\n\
+             exec \"$@\"\n\
+             status=$?\n\
+             printf 'pi-sigpipe-reset: exec failed: %s\\n' \"$1\" >&2\n\
+             exit \"$status\"",
+        )
+        .arg("pi-sigpipe-reset")
+        .arg(program);
+    Ok(command)
+}
+
+#[cfg(not(unix))]
+fn command_with_default_sigpipe_for_cwd(
+    program: &OsStr,
+    _cwd: Option<&Path>,
+) -> std::io::Result<Command> {
+    Ok(Command::new(program))
+}
+
+#[cfg(unix)]
+fn resolve_executable_for_shell_trampoline(
+    program: &OsStr,
+    cwd: Option<&Path>,
+) -> std::io::Result<OsString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn executable_candidate(path: &Path) -> std::io::Result<bool> {
+        let metadata = std::fs::metadata(path)?;
+        Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+
+    fn absolutize_candidate(path: &Path, cwd: Option<&Path>) -> std::io::Result<PathBuf> {
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+
+        let base = std::env::current_dir()?;
+        Ok(cwd.map_or_else(|| base.join(path), |cwd| base.join(cwd).join(path)))
+    }
+
+    if program.as_bytes().contains(&b'/') {
+        let path = Path::new(program);
+        let candidate = absolutize_candidate(path, cwd)?;
+        if executable_candidate(&candidate)? {
+            return Ok(candidate.into_os_string());
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("not an executable file: {}", candidate.display()),
+        ));
+    }
+
+    let mut permission_denied = false;
+    let paths = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/bin:/usr/bin"));
+    for dir in std::env::split_paths(&paths) {
+        let candidate = absolutize_candidate(&dir.join(program), cwd)?;
+        match executable_candidate(&candidate) {
+            Ok(true) => return Ok(candidate.into_os_string()),
+            Ok(false) => permission_denied = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                permission_denied = true;
+            }
+            Err(_) => {}
+        }
+    }
+
+    if permission_denied {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("command is not executable: {}", program.to_string_lossy()),
+        ))
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("command not found: {}", program.to_string_lossy()),
+        ))
+    }
+}
+
 /// Detach a child process from pi's controlling terminal.
 pub(crate) fn isolate_command_process_group(command: &mut Command) {
     #[cfg(unix)]
@@ -6092,6 +6209,59 @@ mod tests {
 
         assert!(result.truncated);
         assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_command_with_default_sigpipe_restores_pipe_disposition() {
+        let output = command_with_default_sigpipe("sh")
+            .expect("prepare sigpipe disposition probe")
+            .args([
+                "-c",
+                "while read name value _; do [ \"$name\" = SigIgn: ] && { printf '%s' \"$value\"; exit 0; }; done < /proc/$$/status",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .expect("spawn sigpipe disposition probe");
+
+        assert!(output.status.success(), "probe failed: {output:?}");
+        let sigign = String::from_utf8(output.stdout).expect("SigIgn should be utf8");
+        let ignored_mask =
+            u64::from_str_radix(sigign.trim(), 16).expect("SigIgn should be a hex mask");
+        let sigpipe_bit = 1_u64 << (13 - 1);
+        assert_eq!(
+            ignored_mask & sigpipe_bit,
+            0,
+            "child should not inherit ignored SIGPIPE: SigIgn={sigign}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_with_default_sigpipe_in_dir_resolves_relative_program_after_cwd() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let script = tmp.path().join("relative-probe");
+        std::fs::write(&script, "#!/bin/sh\nprintf cwd-relative-ok\n").expect("write script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("stat script")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make script executable");
+
+        let output = command_with_default_sigpipe_in_dir("./relative-probe", tmp.path())
+            .expect("prepare relative executable")
+            .current_dir(tmp.path())
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .expect("spawn relative executable");
+
+        assert!(output.status.success(), "probe failed: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("probe stdout should be utf8"),
+            "cwd-relative-ok"
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -16287,7 +16287,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                               timeout_ms: Opt<f64>,
                               max_buffer: Opt<f64>|
                               -> rquickjs::Result<String> {
-                            use std::process::{Command, Stdio};
+                            use std::process::Stdio;
                             use std::time::{Duration, Instant};
 
                             tracing::debug!(
@@ -16416,7 +16416,11 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     }
                                 }
 
-                                let mut command = Command::new(&cmd);
+                                let mut command = crate::tools::command_with_default_sigpipe_in_dir(
+                                    &cmd,
+                                    Path::new(&working_dir),
+                                )
+                                .map_err(|e| e.to_string())?;
                                 command
                                     .args(&args)
                                     .current_dir(&working_dir)
@@ -16522,6 +16526,13 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
                                 let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
                                 let code = status.code();
+                                let trampoline_exec_failed = matches!(code, Some(126 | 127))
+                                    && stderr.contains(crate::tools::SIGPIPE_TRAMPOLINE_EXEC_FAILURE_PREFIX);
+                                let error = if trampoline_exec_failed {
+                                    Some(stderr.trim().to_string())
+                                } else {
+                                    limit_error
+                                };
 
                                 Ok(serde_json::json!({
                                     "stdout": stdout,
@@ -16529,7 +16540,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     "status": code,
                                     "killed": killed,
                                     "pid": pid,
-                                    "error": limit_error
+                                    "error": error
                                 }))
                             })(
                             );
