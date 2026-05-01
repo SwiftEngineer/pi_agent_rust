@@ -96,22 +96,21 @@ jobs:
             env_extra: ""
 
     # Conditional: run matrix entries matching the current trigger.
-    # PR → fast-*, nightly schedule → full-*, Saturday schedule → weekly-*, dispatch → profile input.
-    if: >-
-      (github.event_name == 'pull_request' && contains(matrix.if_event, 'pull_request')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *' && contains(matrix.if_event, 'nightly')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * 6' && contains(matrix.if_event, 'weekly')) ||
-      (github.event_name == 'workflow_dispatch' && (
-        inputs.profile == 'auto' ||
-        (inputs.profile == 'fast' && contains(matrix.if_event, 'pull_request')) ||
-        (inputs.profile == 'full' && contains(matrix.if_event, 'nightly')) ||
-        (inputs.profile == 'weekly' && contains(matrix.if_event, 'weekly'))
-      ))
+    # PR -> fast-*, nightly schedule -> full-*, Saturday schedule -> weekly-*,
+    # dispatch -> profile input. This cannot live in jobs.<job_id>.if because
+    # GitHub evaluates job if conditions before matrix expansion.
+    env:
+      SHOULD_RUN: ${{ (github.event_name == 'pull_request' && contains(matrix.if_event, 'pull_request')) || (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *' && contains(matrix.if_event, 'nightly')) || (github.event_name == 'schedule' && github.event.schedule == '0 2 * * 6' && contains(matrix.if_event, 'weekly')) || (github.event_name == 'workflow_dispatch' && (inputs.profile == 'auto' || (inputs.profile == 'fast' && contains(matrix.if_event, 'pull_request')) || (inputs.profile == 'full' && contains(matrix.if_event, 'nightly')) || (inputs.profile == 'weekly' && contains(matrix.if_event, 'weekly')))) }}
 
     name: "conformance (${{ matrix.name }})"
 
     steps:
+      - name: Skip unmatched profile
+        if: env.SHOULD_RUN != 'true'
+        run: echo "Skipping ${{ matrix.name }} for event/profile selection"
+
       - name: Free disk space
+        if: env.SHOULD_RUN == 'true'
         working-directory: /
         run: |
           set -euxo pipefail
@@ -127,11 +126,13 @@ jobs:
           df -h /
 
       - name: Checkout pi_agent_rust
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v4
         with:
           path: pi_agent_rust
 
       - name: Checkout asupersync
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/asupersync
@@ -139,6 +140,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout rich_rust
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/rich_rust
@@ -146,6 +148,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout charmed_rust
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/charmed_rust
@@ -153,6 +156,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout sqlmodel_rust
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/sqlmodel_rust
@@ -160,6 +164,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install system deps (fd, rg, xcb) [linux]
+        if: env.SHOULD_RUN == 'true'
         run: |
           set -euxo pipefail
           sudo apt-get update
@@ -167,11 +172,13 @@ jobs:
           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 
       - name: Install Rust toolchain (nightly)
+        if: env.SHOULD_RUN == 'true'
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
 
       - name: Cargo cache
+        if: env.SHOULD_RUN == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -183,21 +190,25 @@ jobs:
           restore-keys: conformance-${{ runner.os }}-
 
       - name: Install Bun
+        if: env.SHOULD_RUN == 'true'
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.3.8"
 
       - name: Install pi-mono dependencies
+        if: env.SHOULD_RUN == 'true'
         working-directory: pi_agent_rust/legacy_pi_mono_code/pi-mono
         run: npm ci
 
       - name: Symlink bun for conformance tests
+        if: env.SHOULD_RUN == 'true'
         run: |
           set -euxo pipefail
           sudo mkdir -p /home/ubuntu/.bun/bin
           sudo ln -sf "$(command -v bun)" /home/ubuntu/.bun/bin/bun
 
       - name: "Run: ${{ matrix.name }}"
+        if: env.SHOULD_RUN == 'true'
         env:
           PI_OFFICIAL_MAX: ${{ matrix.env_extra == 'PI_OFFICIAL_MAX=5' && '5' || '' }}
           PI_CONFORMANCE_MAX_RETRIES: ${{ contains(matrix.if_event, 'nightly') && '2' || '0' }}
@@ -212,7 +223,7 @@ jobs:
           fi
 
       - name: Upload conformance logs
-        if: always()
+        if: always() && env.SHOULD_RUN == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: conformance-${{ matrix.name }}-${{ github.sha }}

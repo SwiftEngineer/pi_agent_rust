@@ -41,8 +41,8 @@ jobs:
             exit 1
           fi
 
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Publish to crates.io
@@ -50,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: ${{ !contains(needs.plan.outputs.tag, '-') }}
+    env:
+      HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     defaults:
       run:
         working-directory: pi_agent_rust
@@ -112,17 +114,17 @@ jobs:
         run: cargo publish --dry-run --locked
 
       - name: Publish to crates.io
-        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
 
       - name: Summary
         run: |
-          echo "## Crates.io Publish" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [[ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]]; then
-            echo "Published pi v${{ needs.plan.outputs.version }} to crates.io" >> $GITHUB_STEP_SUMMARY
+          echo "## Crates.io Publish" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$HAS_CARGO_REGISTRY_TOKEN" == "true" ]]; then
+            echo "Published pi v${{ needs.plan.outputs.version }} to crates.io" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Skipped - CARGO_REGISTRY_TOKEN not configured" >> $GITHUB_STEP_SUMMARY
+            echo "Skipped - CARGO_REGISTRY_TOKEN not configured" >> "$GITHUB_STEP_SUMMARY"
           fi
