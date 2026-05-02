@@ -1,8 +1,8 @@
 {
   "schema": "pi.ci.evidence_bundle.v1",
-  "generated_at": "2026-05-01T17:46:30.487Z",
-  "git_ref": "9cd039762",
-  "ci_run_id": "local-20260501T174630Z",
+  "generated_at": "2026-05-02T00:53:22.917Z",
+  "git_ref": "c21e340d4",
+  "ci_run_id": "local-20260502T005322Z",
   "sections": [
     {
       "id": "conformance_summary",
@@ -13,7 +13,7 @@
       "schema": "pi.ext.conformance_summary.v2",
       "summary": {
         "fail": 0,
-        "generated_at": "2026-05-01T17:40:49Z",
+        "generated_at": "2026-05-02T00:10:15Z",
         "pass": 60,
         "pass_rate_pct": 100.0,
         "total": 224
@@ -179,7 +179,7 @@
       "artifact_path": "tests/ext_conformance/reports/auto_repair_summary.json",
       "schema": "pi.ext.auto_repair_summary.v1",
       "file_count": 1,
-      "total_bytes": 52578
+      "total_bytes": 52577
     },
     {
       "id": "e2e_results",
@@ -348,8 +348,8 @@
       "artifact_path": "tests/ext_conformance/reports/gate/must_pass_gate_verdict.json | tests/ext_conformance/reports/conformance_summary.json | tests/perf/reports/stress_triage.json",
       "schema": "pi.perf3x.lineage_contract.v1",
       "summary": {
-        "artifact_span_minutes": 859,
-        "conformance_generated_at": "2026-05-01T17:40:49+00:00",
+        "artifact_span_minutes": 1249,
+        "conformance_generated_at": "2026-05-02T00:10:15+00:00",
         "correlation_id": "local-20260501T0316",
         "max_allowed_span_days": 14,
         "must_pass_generated_at": "2026-05-01T03:20:54.460+00:00",
@@ -366,7 +366,7 @@
     "missing_sections": 0,
     "invalid_sections": 0,
     "total_artifacts": 2003,
-    "total_bytes": 185374340,
+    "total_bytes": 185374339,
     "verdict": "complete"
   }
 }
