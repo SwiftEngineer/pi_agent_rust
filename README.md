@@ -1772,7 +1772,7 @@ Concrete engineering work in this codebase includes:
 | Adaptive control loops | Regime-shift detection (CUSUM/BOCPD), budget controllers, VOI-based experiment planner, mean-field load controller, off-policy evaluation gates | Lets runtime behavior adapt to workload shifts without blind tuning |
 | Fast-path safety | Shadow dual-execution sampling with automatic rollback/backoff on divergence | Prevents speed work from silently changing semantics |
 | Trace-level optimization | Hostcall superinstruction compiler + tier-2 trace-JIT path | Fuses repeated opcode traces and lowers repeated dispatch overhead |
-| Tool execution strategy | Dynamic read-only tool classification + parallel tool execution paths | Increases throughput when multiple tool calls can safely run together |
+| Tool execution strategy | Effect-compatible tool classification + barrier-aware parallel execution paths | Increases throughput when multiple tool calls can safely run together without reordering mutating tools |
 | Session write path | Write-behind autosave queue, durability modes, incremental append, checkpointed rewrite strategy, single-buffer append serialization | Keeps interaction fast while still supporting stronger durability when needed |
 | Session index path | Async coalesced index updates, pending-drain hot-path tuning, and reduced allocation/boxing overhead | Keeps resume/discovery metadata updates off the interactive hot path |
 | Session resume path | Session Store V2 sidecar (segmented log + offset index), O(index+tail) open path, stale-sidecar detection, migration/rollback tooling | Avoids full-file rescans on large histories and improves recovery behavior |

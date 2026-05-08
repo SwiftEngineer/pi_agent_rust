@@ -40,7 +40,7 @@ use crate::model::{
 use crate::models::{ModelEntry, ModelRegistry, model_requires_configured_credential};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::session::{AutosaveFlushTrigger, Session, SessionHandle};
-use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
+use crate::tools::{Tool, ToolEffects, ToolOutput, ToolRegistry, ToolUpdate};
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
 use asupersync::sync::{Mutex, Notify};
 use async_trait::async_trait;
@@ -59,9 +59,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
-const MIN_READ_ONLY_TOOL_PARALLELISM: usize = 8;
-const MAX_AUTO_READ_ONLY_TOOL_PARALLELISM: usize = 64;
-const MAX_CONFIGURED_READ_ONLY_TOOL_PARALLELISM: usize = 256;
+const MIN_COMPATIBLE_TOOL_PARALLELISM: usize = 8;
+const MAX_AUTO_COMPATIBLE_TOOL_PARALLELISM: usize = 64;
+const MAX_CONFIGURED_COMPATIBLE_TOOL_PARALLELISM: usize = 256;
 /// Maximum messages in steering queue to prevent unbounded growth
 const MAX_STEERING_QUEUE_SIZE: usize = 100;
 /// Maximum messages in follow-up queue to prevent unbounded growth
@@ -69,15 +69,15 @@ const MAX_FOLLOW_UP_QUEUE_SIZE: usize = 100;
 /// Maximum messages in agent history to prevent unbounded growth
 const MAX_AGENT_MESSAGES: usize = 10_000;
 
-fn read_only_tool_parallelism_limit() -> usize {
+fn compatible_tool_parallelism_limit() -> usize {
     static LIMIT: OnceLock<usize> = OnceLock::new();
     *LIMIT.get_or_init(|| {
         let host_parallelism = std::thread::available_parallelism()
-            .map_or(MIN_READ_ONLY_TOOL_PARALLELISM, |parallelism| {
+            .map_or(MIN_COMPATIBLE_TOOL_PARALLELISM, |parallelism| {
                 parallelism.get()
             });
-        resolve_read_only_tool_parallelism(
-            std::env::var("PI_MAX_CONCURRENT_READ_ONLY_TOOLS")
+        resolve_compatible_tool_parallelism(
+            std::env::var("PI_MAX_CONCURRENT_COMPATIBLE_TOOLS")
                 .ok()
                 .as_deref(),
             host_parallelism,
@@ -85,13 +85,13 @@ fn read_only_tool_parallelism_limit() -> usize {
     })
 }
 
-fn resolve_read_only_tool_parallelism(
+fn resolve_compatible_tool_parallelism(
     raw_override: Option<&str>,
     host_parallelism: usize,
 ) -> usize {
     let host_default = host_parallelism.clamp(
-        MIN_READ_ONLY_TOOL_PARALLELISM,
-        MAX_AUTO_READ_ONLY_TOOL_PARALLELISM,
+        MIN_COMPATIBLE_TOOL_PARALLELISM,
+        MAX_AUTO_COMPATIBLE_TOOL_PARALLELISM,
     );
 
     let Some(raw) = raw_override.map(str::trim).filter(|raw| !raw.is_empty()) else {
@@ -102,20 +102,53 @@ fn resolve_read_only_tool_parallelism(
         Ok(0) => {
             warn!(
                 value = raw,
-                "Ignoring PI_MAX_CONCURRENT_READ_ONLY_TOOLS=0; using host-scaled default"
+                "Ignoring PI_MAX_CONCURRENT_COMPATIBLE_TOOLS=0; using host-scaled default"
             );
             host_default
         }
-        Ok(limit) => limit.clamp(1, MAX_CONFIGURED_READ_ONLY_TOOL_PARALLELISM),
+        Ok(limit) => limit.clamp(1, MAX_CONFIGURED_COMPATIBLE_TOOL_PARALLELISM),
         Err(err) => {
             warn!(
                 value = raw,
                 error = %err,
-                "Ignoring invalid PI_MAX_CONCURRENT_READ_ONLY_TOOLS; using host-scaled default"
+                "Ignoring invalid PI_MAX_CONCURRENT_COMPATIBLE_TOOLS; using host-scaled default"
             );
             host_default
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolEffectBatch {
+    start: usize,
+    end: usize,
+}
+
+fn plan_tool_effect_batches(effects: &[ToolEffects]) -> Vec<ToolEffectBatch> {
+    let Some((&first_effects, remaining_effects)) = effects.split_first() else {
+        return Vec::new();
+    };
+
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut active_effects = first_effects;
+
+    for (offset, candidate_effects) in remaining_effects.iter().copied().enumerate() {
+        let index = offset + 1;
+        if active_effects.compatible_with(candidate_effects) {
+            active_effects = active_effects.union(candidate_effects);
+        } else {
+            batches.push(ToolEffectBatch { start, end: index });
+            start = index;
+            active_effects = candidate_effects;
+        }
+    }
+
+    batches.push(ToolEffectBatch {
+        start,
+        end: effects.len(),
+    });
+    batches
 }
 
 // ============================================================================
@@ -2144,13 +2177,13 @@ impl Agent {
         Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
     }
 
-    async fn execute_parallel_batch(
+    async fn execute_tool_batch(
         &self,
         batch: Vec<(usize, ToolCall)>,
         on_event: AgentEventHandler,
         abort: Option<AbortSignal>,
     ) -> Vec<(usize, (ToolOutput, bool))> {
-        let parallelism = read_only_tool_parallelism_limit();
+        let parallelism = compatible_tool_parallelism_limit();
         let futures = batch.into_iter().map(|(idx, tc)| {
             let on_event = Arc::clone(&on_event);
             async move { (idx, self.execute_tool_owned(tc, on_event).await) }
@@ -2197,126 +2230,54 @@ impl Agent {
             });
         }
 
-        // Phase 2: Execute tools with safety barriers.
-        let mut pending_parallel: Vec<(usize, ToolCall)> = Vec::new();
+        // Phase 2: Execute tools in contiguous compatible-effect batches.
+        let effect_plan = tool_calls
+            .iter()
+            .map(|tool_call| {
+                self.tools
+                    .get(&tool_call.name)
+                    .map_or_else(ToolEffects::write, Tool::effects)
+            })
+            .collect::<Vec<_>>();
+        let effect_batches = plan_tool_effect_batches(&effect_plan);
         let mut recorded_results: Vec<Option<Arc<ToolResultMessage>>> =
             vec![None; tool_calls.len()];
 
-        // Iterate through tools. If read-only, buffer. If unsafe, flush buffer then run unsafe.
-        for (index, tool_call) in tool_calls.iter().enumerate() {
+        for effect_batch in effect_batches {
             if abort.as_ref().is_some_and(AbortSignal::is_aborted) {
                 break;
             }
 
-            let is_read_only =
-                matches!(self.tools.get(&tool_call.name), Some(tool) if tool.is_read_only());
-
-            if is_read_only {
-                pending_parallel.push((index, tool_call.clone()));
-            } else {
-                // Check steering BEFORE flushing parallel or running unsafe.
-                let steering = self.drain_steering_messages().await;
-                if !steering.is_empty() {
-                    steering_messages = Some(steering);
-                    break;
-                }
-
-                // Barrier: flush parallel buffer first
-                if !pending_parallel.is_empty() {
-                    let batch = std::mem::take(&mut pending_parallel);
-                    let mut results = self
-                        .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
-                        .await;
-                    results.sort_by_key(|(idx, _)| *idx);
-                    for (idx, (output, is_error)) in results {
-                        recorded_results[idx] = Some(self.record_tool_result(
-                            &tool_calls[idx],
-                            output,
-                            is_error,
-                            &on_event,
-                            new_messages,
-                        ));
-                    }
-                }
-
-                if abort.as_ref().is_some_and(AbortSignal::is_aborted) {
-                    break;
-                }
-
-                // Execute unsafe tool sequentially
-                // Check steering AGAIN before the potentially expensive unsafe tool
-                let steering = self.drain_steering_messages().await;
-                if !steering.is_empty() {
-                    steering_messages = Some(steering);
-                    break;
-                }
-
-                // Race tool execution against the abort signal so that a
-                // long-running (or hanging) tool is cancelled promptly.
-                if let Some(signal) = abort.as_ref() {
-                    let maybe_result = {
-                        use futures::future::{Either, select};
-                        let tool_fut = self
-                            .execute_tool(tool_call.clone(), Arc::clone(&on_event))
-                            .fuse();
-                        let abort_fut = signal.wait().fuse();
-                        futures::pin_mut!(tool_fut, abort_fut);
-                        match select(tool_fut, abort_fut).await {
-                            Either::Left((result, _)) => Some(result),
-                            Either::Right(_) => None,
-                        }
-                    };
-                    let Some((output, is_error)) = maybe_result else {
-                        // Abort fired; leave this slot unrecorded so Phase 3
-                        // emits the aborted tool-result marker in order.
-                        break;
-                    };
-                    recorded_results[index] = Some(self.record_tool_result(
-                        tool_call,
-                        output,
-                        is_error,
-                        &on_event,
-                        new_messages,
-                    ));
-                } else {
-                    let (output, is_error) = self
-                        .execute_tool(tool_call.clone(), Arc::clone(&on_event))
-                        .await;
-                    recorded_results[index] = Some(self.record_tool_result(
-                        tool_call,
-                        output,
-                        is_error,
-                        &on_event,
-                        new_messages,
-                    ));
-                }
-            }
-        }
-
-        // Flush remaining parallel tools
-        if !pending_parallel.is_empty()
-            && !abort.as_ref().is_some_and(AbortSignal::is_aborted)
-            && steering_messages.is_none()
-        {
-            let batch = std::mem::take(&mut pending_parallel);
-            // Check steering one last time before final flush
             let steering = self.drain_steering_messages().await;
-            if steering.is_empty() {
-                let mut results = self
-                    .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
-                    .await;
-                results.sort_by_key(|(idx, _)| *idx);
-                for (idx, (output, is_error)) in results {
-                    recorded_results[idx] = Some(self.record_tool_result(
-                        &tool_calls[idx],
+            if !steering.is_empty() {
+                steering_messages = Some(steering);
+                break;
+            }
+
+            let batch_len = effect_batch.end.saturating_sub(effect_batch.start);
+            let batch = tool_calls
+                .iter()
+                .cloned()
+                .enumerate()
+                .skip(effect_batch.start)
+                .take(batch_len)
+                .collect();
+            let mut batch_results = self
+                .execute_tool_batch(batch, Arc::clone(&on_event), abort.clone())
+                .await;
+            batch_results.sort_by_key(|(idx, _)| *idx);
+            for (idx, (output, is_error)) in batch_results {
+                if let (Some(tool_call), Some(recorded_result)) =
+                    (tool_calls.get(idx), recorded_results.get_mut(idx))
+                {
+                    *recorded_result = Some(self.record_tool_result(
+                        tool_call,
                         output,
                         is_error,
                         &on_event,
                         new_messages,
                     ));
                 }
-            } else {
-                steering_messages = Some(steering);
             }
         }
 
@@ -2333,7 +2294,7 @@ impl Agent {
 
             // If a result was recorded during execution, keep outcome ordering
             // without re-emitting lifecycle events or duplicating transcript entries.
-            if let Some(tool_result) = recorded_results[index].take() {
+            if let Some(tool_result) = recorded_results.get_mut(index).and_then(Option::take) {
                 results.push(tool_result);
             } else if steering_messages.is_some() {
                 // Skipped due to steering.
@@ -3026,37 +2987,95 @@ mod message_queue_tests {
 }
 
 #[cfg(test)]
-mod read_only_tool_parallelism_tests {
+mod compatible_tool_parallelism_tests {
     use super::*;
 
     #[test]
-    fn read_only_tool_parallelism_preserves_historical_floor() {
-        assert_eq!(resolve_read_only_tool_parallelism(None, 1), 8);
-        assert_eq!(resolve_read_only_tool_parallelism(None, 8), 8);
+    fn compatible_tool_parallelism_preserves_historical_floor() {
+        assert_eq!(resolve_compatible_tool_parallelism(None, 1), 8);
+        assert_eq!(resolve_compatible_tool_parallelism(None, 8), 8);
     }
 
     #[test]
-    fn read_only_tool_parallelism_scales_on_many_core_hosts() {
-        assert_eq!(resolve_read_only_tool_parallelism(None, 32), 32);
-        assert_eq!(resolve_read_only_tool_parallelism(None, 64), 64);
-        assert_eq!(resolve_read_only_tool_parallelism(None, 128), 64);
+    fn compatible_tool_parallelism_scales_on_many_core_hosts() {
+        assert_eq!(resolve_compatible_tool_parallelism(None, 32), 32);
+        assert_eq!(resolve_compatible_tool_parallelism(None, 64), 64);
+        assert_eq!(resolve_compatible_tool_parallelism(None, 128), 64);
     }
 
     #[test]
-    fn read_only_tool_parallelism_accepts_bounded_override() {
-        assert_eq!(resolve_read_only_tool_parallelism(Some("16"), 4), 16);
-        assert_eq!(resolve_read_only_tool_parallelism(Some("512"), 64), 256);
-        assert_eq!(resolve_read_only_tool_parallelism(Some("1"), 64), 1);
+    fn compatible_tool_parallelism_accepts_bounded_override() {
+        assert_eq!(resolve_compatible_tool_parallelism(Some("16"), 4), 16);
+        assert_eq!(resolve_compatible_tool_parallelism(Some("512"), 64), 256);
+        assert_eq!(resolve_compatible_tool_parallelism(Some("1"), 64), 1);
     }
 
     #[test]
-    fn read_only_tool_parallelism_ignores_invalid_override() {
+    fn compatible_tool_parallelism_ignores_invalid_override() {
         assert_eq!(
-            resolve_read_only_tool_parallelism(Some("not-a-number"), 24),
+            resolve_compatible_tool_parallelism(Some("not-a-number"), 24),
             24
         );
-        assert_eq!(resolve_read_only_tool_parallelism(Some("0"), 24), 24);
-        assert_eq!(resolve_read_only_tool_parallelism(Some(" "), 24), 24);
+        assert_eq!(resolve_compatible_tool_parallelism(Some("0"), 24), 24);
+        assert_eq!(resolve_compatible_tool_parallelism(Some(" "), 24), 24);
+    }
+}
+
+#[cfg(test)]
+mod tool_effect_batch_planning_tests {
+    use super::*;
+
+    fn batch_ranges(effects: &[ToolEffects]) -> Vec<(usize, usize)> {
+        plan_tool_effect_batches(effects)
+            .into_iter()
+            .map(|batch| (batch.start, batch.end))
+            .collect()
+    }
+
+    #[test]
+    fn read_and_network_effects_share_compatible_batch() {
+        let ranges = batch_ranges(&[
+            ToolEffects::read(),
+            ToolEffects::network(),
+            ToolEffects::read(),
+        ]);
+
+        assert_eq!(ranges, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn write_effect_creates_deterministic_barrier() {
+        let ranges = batch_ranges(&[
+            ToolEffects::read(),
+            ToolEffects::read(),
+            ToolEffects::write(),
+            ToolEffects::read(),
+        ]);
+
+        assert_eq!(ranges, vec![(0, 2), (2, 3), (3, 4)]);
+    }
+
+    #[test]
+    fn append_and_process_effects_remain_serialized() {
+        let ranges = batch_ranges(&[
+            ToolEffects::append(),
+            ToolEffects::append(),
+            ToolEffects::process(),
+            ToolEffects::read(),
+        ]);
+
+        assert_eq!(ranges, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+    }
+
+    #[test]
+    fn combined_process_write_effect_is_exclusive() {
+        let ranges = batch_ranges(&[
+            ToolEffects::read(),
+            ToolEffects::process().union(ToolEffects::write()),
+            ToolEffects::network(),
+        ]);
+
+        assert_eq!(ranges, vec![(0, 1), (1, 2), (2, 3)]);
     }
 }
 

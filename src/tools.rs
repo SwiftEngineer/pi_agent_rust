@@ -32,6 +32,75 @@ use uuid::Uuid;
 // Tool Trait
 // ============================================================================
 
+/// Coarse side-effect declaration for tool scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolEffects {
+    bits: u8,
+}
+
+impl ToolEffects {
+    const READ: u8 = 1 << 0;
+    const WRITE: u8 = 1 << 1;
+    const APPEND: u8 = 1 << 2;
+    const NETWORK: u8 = 1 << 3;
+    const PROCESS: u8 = 1 << 4;
+    const BARRIER: u8 = Self::WRITE | Self::APPEND | Self::PROCESS;
+
+    /// Tool reads local state without mutating it.
+    #[must_use]
+    pub const fn read() -> Self {
+        Self { bits: Self::READ }
+    }
+
+    /// Tool may create, replace, or otherwise mutate local state.
+    #[must_use]
+    pub const fn write() -> Self {
+        Self { bits: Self::WRITE }
+    }
+
+    /// Tool appends to existing local state.
+    #[must_use]
+    pub const fn append() -> Self {
+        Self { bits: Self::APPEND }
+    }
+
+    /// Tool performs network I/O but does not mutate local state.
+    #[must_use]
+    pub const fn network() -> Self {
+        Self {
+            bits: Self::NETWORK,
+        }
+    }
+
+    /// Tool starts a local process. This is treated as a scheduling barrier.
+    #[must_use]
+    pub const fn process() -> Self {
+        Self {
+            bits: Self::PROCESS,
+        }
+    }
+
+    /// Combine multiple effect declarations for a single tool or batch.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+        }
+    }
+
+    /// Whether this effect set can run in a compatible concurrent batch.
+    #[must_use]
+    pub const fn parallel_safe(self) -> bool {
+        self.bits != 0 && self.bits & Self::BARRIER == 0
+    }
+
+    /// Whether two effect sets can share a concurrent batch.
+    #[must_use]
+    pub const fn compatible_with(self, other: Self) -> bool {
+        self.parallel_safe() && other.parallel_safe()
+    }
+}
+
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -59,11 +128,12 @@ pub trait Tool: Send + Sync {
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput>;
 
-    /// Whether the tool is read-only and safe to execute in parallel with other read-only tools.
+    /// Declare the coarse side effects used by the agent scheduler.
     ///
-    /// Defaults to `false` (safe/sequential).
-    fn is_read_only(&self) -> bool {
-        false
+    /// Defaults to local write effects so undeclared tools are serialized fail-closed.
+    #[must_use]
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
@@ -1489,8 +1559,8 @@ impl Tool for ReadTool {
         })
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2327,6 +2397,10 @@ impl Tool for BashTool {
             },
             "required": ["command"]
         })
+    }
+
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::process().union(ToolEffects::write())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3625,8 +3699,8 @@ impl Tool for GrepTool {
         })
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4102,8 +4176,8 @@ impl Tool for FindTool {
         })
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4446,8 +4520,8 @@ impl Tool for LsTool {
         })
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 
     async fn execute(
