@@ -618,6 +618,113 @@ fn truncate_string_to_bytes_from_end(s: &str, max_bytes: usize) -> String {
         .unwrap_or_default()
 }
 
+struct HeadTruncatingLineWriter {
+    content: String,
+    max_bytes: usize,
+    total_lines: usize,
+    total_bytes: usize,
+    output_lines: usize,
+    truncated: bool,
+    last_line_partial: bool,
+    first_line_exceeds_limit: bool,
+}
+
+impl HeadTruncatingLineWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            content: String::with_capacity(max_bytes.min(8192)),
+            max_bytes,
+            total_lines: 0,
+            total_bytes: 0,
+            output_lines: 0,
+            truncated: false,
+            last_line_partial: false,
+            first_line_exceeds_limit: false,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        debug_assert!(!line.contains('\n'));
+
+        let line_index = self.total_lines;
+        let separator_len = usize::from(line_index > 0);
+        let piece_bytes = separator_len.saturating_add(line.len());
+        self.total_lines = self.total_lines.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(piece_bytes);
+
+        if self.truncated {
+            return;
+        }
+
+        if self.max_bytes == 0 {
+            self.truncated = true;
+            self.first_line_exceeds_limit = line_index == 0 && !line.is_empty();
+            return;
+        }
+
+        let remaining = self.max_bytes.saturating_sub(self.content.len());
+        if piece_bytes <= remaining {
+            if separator_len > 0 {
+                self.content.push('\n');
+            }
+            self.content.push_str(line);
+            self.output_lines = self.output_lines.saturating_add(1);
+            return;
+        }
+
+        self.truncated = true;
+        if line_index == 0 && line.len() > self.max_bytes {
+            self.first_line_exceeds_limit = true;
+        }
+
+        let line_budget = if separator_len > 0 {
+            if remaining == 0 {
+                return;
+            }
+            self.content.push('\n');
+            remaining - 1
+        } else {
+            remaining
+        };
+
+        let valid_bytes = utf8_prefix_len(line, line_budget);
+        if valid_bytes > 0 {
+            self.content.push_str(&line[..valid_bytes]);
+            self.output_lines = self.output_lines.saturating_add(1);
+            self.last_line_partial = valid_bytes < line.len();
+        }
+    }
+
+    fn finish(self) -> TruncationResult {
+        let output_bytes = self.content.len();
+        TruncationResult {
+            content: self.content,
+            truncated: self.truncated,
+            truncated_by: if self.truncated {
+                Some(TruncatedBy::Bytes)
+            } else {
+                None
+            },
+            total_lines: self.total_lines,
+            total_bytes: self.total_bytes,
+            output_lines: self.output_lines,
+            output_bytes,
+            last_line_partial: self.last_line_partial,
+            first_line_exceeds_limit: self.first_line_exceeds_limit,
+            max_lines: usize::MAX,
+            max_bytes: self.max_bytes,
+        }
+    }
+}
+
+fn utf8_prefix_len(s: &str, max_bytes: usize) -> usize {
+    let mut valid_bytes = max_bytes.min(s.len());
+    while valid_bytes > 0 && !s.is_char_boundary(valid_bytes) {
+        valid_bytes -= 1;
+    }
+    valid_bytes
+}
+
 /// Format a byte count into a human-readable string with appropriate unit suffix.
 #[allow(clippy::cast_precision_loss)]
 fn format_size(bytes: usize) -> String {
@@ -3977,7 +4084,7 @@ impl Tool for GrepTool {
         }
 
         let mut file_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
-        let mut output_lines: Vec<String> = Vec::new();
+        let mut output_builder = HeadTruncatingLineWriter::new(DEFAULT_MAX_BYTES);
         let mut lines_truncated = false;
 
         // Group matches by file to merge overlapping context windows
@@ -4002,7 +4109,7 @@ impl Tool for GrepTool {
 
             if lines.is_empty() {
                 if let Some(first_match) = match_lines.first() {
-                    output_lines.push(format!(
+                    output_builder.push_line(&format!(
                         "{relative_path}:{first_match}: (unable to read file or too large)"
                     ));
                 }
@@ -4036,7 +4143,7 @@ impl Tool for GrepTool {
 
             for (i, (start, end)) in blocks.into_iter().enumerate() {
                 if i > 0 {
-                    output_lines.push("--".to_string());
+                    output_builder.push_line("--");
                 }
                 for current in start..=end {
                     let line_text = lines.get(current - 1).map_or("", String::as_str);
@@ -4050,22 +4157,25 @@ impl Tool for GrepTool {
                         let line_idx = current - 1; // 0-indexed for hashline
                         let tag = format_hashline_tag(line_idx, &sanitized);
                         if match_lines.binary_search(&current).is_ok() {
-                            output_lines.push(format!("{relative_path}:{tag}: {}", truncated.text));
+                            output_builder
+                                .push_line(&format!("{relative_path}:{tag}: {}", truncated.text));
                         } else {
-                            output_lines.push(format!("{relative_path}-{tag}- {}", truncated.text));
+                            output_builder
+                                .push_line(&format!("{relative_path}-{tag}- {}", truncated.text));
                         }
                     } else if match_lines.binary_search(&current).is_ok() {
-                        output_lines.push(format!("{relative_path}:{current}: {}", truncated.text));
+                        output_builder
+                            .push_line(&format!("{relative_path}:{current}: {}", truncated.text));
                     } else {
-                        output_lines.push(format!("{relative_path}-{current}- {}", truncated.text));
+                        output_builder
+                            .push_line(&format!("{relative_path}-{current}- {}", truncated.text));
                     }
                 }
             }
         }
 
-        // Apply byte truncation (no line limit since we already have match limit).
-        let raw_output = output_lines.join("\n");
-        let mut truncation = truncate_head(raw_output, usize::MAX, DEFAULT_MAX_BYTES);
+        // Apply byte truncation while writing, avoiding a second joined copy.
+        let mut truncation = output_builder.finish();
 
         let mut output = std::mem::take(&mut truncation.content);
         let mut notices: Vec<String> = Vec::new();
@@ -4406,9 +4516,7 @@ impl Tool for FindTool {
             })
         });
 
-        let mut relativized: Vec<String> = entries.into_iter().map(|entry| entry.rel).collect();
-
-        if relativized.is_empty() {
+        if entries.is_empty() {
             return Ok(ToolOutput {
                 content: vec![ContentBlock::Text(TextContent::new(
                     "No files found matching pattern",
@@ -4418,12 +4526,12 @@ impl Tool for FindTool {
             });
         }
 
-        let result_limit_reached = relativized.len() > effective_limit;
-        if result_limit_reached {
-            relativized.truncate(effective_limit);
+        let result_limit_reached = entries.len() > effective_limit;
+        let mut output_builder = HeadTruncatingLineWriter::new(DEFAULT_MAX_BYTES);
+        for entry in entries.into_iter().take(effective_limit) {
+            output_builder.push_line(&entry.rel);
         }
-        let raw_output = relativized.join("\n");
-        let mut truncation = truncate_head(raw_output, usize::MAX, DEFAULT_MAX_BYTES);
+        let mut truncation = output_builder.finish();
 
         let mut result_output = std::mem::take(&mut truncation.content);
         let mut notices: Vec<String> = Vec::new();
@@ -4598,22 +4706,24 @@ impl Tool for LsTool {
         // Sort alphabetically (case-insensitive).
         entries.sort_by_cached_key(|(a, _)| a.to_lowercase());
 
-        let mut results: Vec<String> = Vec::new();
+        let mut output_builder = HeadTruncatingLineWriter::new(DEFAULT_MAX_BYTES);
+        let mut emitted_entries = 0usize;
         let mut entry_limit_reached = false;
 
         for (entry, is_dir) in entries {
-            if results.len() >= effective_limit {
+            if emitted_entries >= effective_limit {
                 entry_limit_reached = true;
                 break;
             }
             if is_dir {
-                results.push(format!("{entry}/"));
+                output_builder.push_line(&format!("{entry}/"));
             } else {
-                results.push(entry);
+                output_builder.push_line(&entry);
             }
+            emitted_entries = emitted_entries.saturating_add(1);
         }
 
-        if results.is_empty() {
+        if emitted_entries == 0 {
             return Ok(ToolOutput {
                 content: vec![ContentBlock::Text(TextContent::new("(empty directory)"))],
                 details: None,
@@ -4621,9 +4731,8 @@ impl Tool for LsTool {
             });
         }
 
-        // Apply byte truncation (no line limit since we already have entry limit).
-        let raw_output = results.join("\n");
-        let mut truncation = truncate_head(raw_output, usize::MAX, DEFAULT_MAX_BYTES);
+        // Apply byte truncation while writing, avoiding a second joined copy.
+        let mut truncation = output_builder.finish();
 
         let mut output = std::mem::take(&mut truncation.content);
         let mut details_map = serde_json::Map::new();
@@ -6253,6 +6362,60 @@ mod tests {
         assert_eq!(result.truncated_by, Some(TruncatedBy::Lines));
         assert_eq!(result.total_lines, 5);
         assert_eq!(result.output_lines, 3);
+    }
+
+    fn assert_same_head_truncation(actual: &TruncationResult, expected: &TruncationResult) {
+        assert_eq!(actual.content, expected.content);
+        assert_eq!(actual.truncated, expected.truncated);
+        assert_eq!(actual.truncated_by, expected.truncated_by);
+        assert_eq!(actual.total_lines, expected.total_lines);
+        assert_eq!(actual.total_bytes, expected.total_bytes);
+        assert_eq!(actual.output_lines, expected.output_lines);
+        assert_eq!(actual.output_bytes, expected.output_bytes);
+        assert_eq!(actual.last_line_partial, expected.last_line_partial);
+        assert_eq!(
+            actual.first_line_exceeds_limit,
+            expected.first_line_exceeds_limit
+        );
+        assert_eq!(actual.max_lines, expected.max_lines);
+        assert_eq!(actual.max_bytes, expected.max_bytes);
+    }
+
+    fn write_lines_with_builder(lines: &[&str], max_bytes: usize) -> TruncationResult {
+        let mut writer = HeadTruncatingLineWriter::new(max_bytes);
+        for line in lines {
+            writer.push_line(line);
+        }
+        writer.finish()
+    }
+
+    #[test]
+    fn head_truncating_line_writer_matches_join_without_truncation() {
+        let lines = ["alpha", "beta", "gamma"];
+        let expected = truncate_head(lines.join("\n"), usize::MAX, 1000);
+        let actual = write_lines_with_builder(&lines, 1000);
+
+        assert_same_head_truncation(&actual, &expected);
+    }
+
+    #[test]
+    fn head_truncating_line_writer_matches_join_at_byte_boundary() {
+        let lines = ["alpha", "beta", "gamma"];
+        let expected = truncate_head(lines.join("\n"), usize::MAX, 8);
+        let actual = write_lines_with_builder(&lines, 8);
+
+        assert_same_head_truncation(&actual, &expected);
+        assert_eq!(actual.content, "alpha\nbe");
+    }
+
+    #[test]
+    fn head_truncating_line_writer_preserves_utf8_boundary_and_order() {
+        let lines = ["alpha", "βeta", "gamma"];
+        let expected = truncate_head(lines.join("\n"), usize::MAX, 8);
+        let actual = write_lines_with_builder(&lines, 8);
+
+        assert_same_head_truncation(&actual, &expected);
+        assert_eq!(actual.content, "alpha\nβ");
     }
 
     #[test]
