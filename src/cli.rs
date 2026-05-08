@@ -109,11 +109,12 @@ fn short_flag_expects_value(token: &str) -> bool {
     }
 
     let body = &token[1..];
-    body.find('e').is_some_and(|index| index == body.len() - 1)
+    body.find('e')
+        .is_some_and(|index| index.eq(&(body.len() - 1)))
 }
 
 fn is_negative_numeric_token(token: &str) -> bool {
-    if !token.starts_with('-') || token == "-" || token.starts_with("--") {
+    if !token.starts_with('-') || token.eq("-") || token.starts_with("--") {
         return false;
     }
     token.parse::<i64>().is_ok() || token.parse::<f64>().is_ok_and(f64::is_finite)
@@ -132,7 +133,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
     let mut index = 1usize;
     while index < raw_args.len() {
         let token = &raw_args[index];
-        if token == "--" {
+        if token.eq("--") {
             filtered.extend(raw_args[index..].iter().cloned());
             break;
         }
@@ -159,7 +160,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
                 } else if spec.takes_value && !has_inline_value && spec.optional_value {
                     let has_value = raw_args
                         .get(index + 1)
-                        .is_some_and(|next| !next.starts_with('-') || next == "-");
+                        .is_some_and(|next| !next.starts_with('-') || next.eq("-"));
                     expecting_value = has_value;
                 }
                 index += 1;
@@ -179,9 +180,9 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
             if value.is_none() {
                 let next = raw_args.get(index + 1);
                 if let Some(next) = next {
-                    if next != "--"
+                    if next.ne("--")
                         && (!next.starts_with('-')
-                            || next == "-"
+                            || next.eq("-")
                             || is_negative_numeric_token(next))
                     {
                         value = Some(next.clone());
@@ -196,7 +197,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
             index += 1;
             continue;
         }
-        if token == "-e" {
+        if token.eq("-e") {
             filtered.push(token.clone());
             expecting_value = true;
             index += 1;
@@ -734,77 +735,76 @@ mod tests {
     // ── 4. Subcommand parsing ────────────────────────────────────────
 
     #[test]
-    fn parse_install_subcommand() {
+    fn parse_install_subcommand() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "install", "npm:@org/pkg"]);
-        match cli.command {
-            Some(Commands::Install { source, local }) => {
-                assert_eq!(source, "npm:@org/pkg");
-                assert!(!local);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Install { source, local }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(source, "npm:@org/pkg");
+        assert!(!local);
+        Ok(())
     }
 
     #[test]
-    fn parse_install_local_flag() {
+    fn parse_install_local_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "install", "--local", "git:https://example.com"]);
-        match cli.command {
-            Some(Commands::Install { source, local }) => {
-                assert_eq!(source, "git:https://example.com");
-                assert!(local);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Install { source, local }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(source, "git:https://example.com");
+        assert!(local);
+        Ok(())
     }
 
     #[test]
-    fn parse_install_local_short_flag() {
+    fn parse_install_local_short_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "install", "-l", "./local-ext"]);
-        match cli.command {
-            Some(Commands::Install { local, .. }) => assert!(local),
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Install { local, .. }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(local);
+        Ok(())
     }
 
     #[test]
-    fn parse_remove_subcommand() {
+    fn parse_remove_subcommand() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "remove", "npm:pkg"]);
-        match cli.command {
-            Some(Commands::Remove { source, local }) => {
-                assert_eq!(source, "npm:pkg");
-                assert!(!local);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Remove { source, local }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(source, "npm:pkg");
+        assert!(!local);
+        Ok(())
     }
 
     #[test]
-    fn parse_remove_local_flag() {
+    fn parse_remove_local_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "remove", "--local", "npm:pkg"]);
-        match cli.command {
-            Some(Commands::Remove { local, .. }) => assert!(local),
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Remove { local, .. }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(local);
+        Ok(())
     }
 
     #[test]
-    fn parse_update_with_source() {
+    fn parse_update_with_source() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "update", "npm:pkg"]);
-        match cli.command {
-            Some(Commands::Update { source }) => {
-                assert_eq!(source.as_deref(), Some("npm:pkg"));
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Update { source }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(source.as_deref(), Some("npm:pkg"));
+        Ok(())
     }
 
     #[test]
-    fn parse_update_all() {
+    fn parse_update_all() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "update"]);
-        match cli.command {
-            Some(Commands::Update { source }) => assert!(source.is_none()),
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Update { source }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(source.is_none());
+        Ok(())
     }
 
     #[test]
@@ -814,55 +814,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_subcommand() {
+    fn parse_config_subcommand() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "config"]);
-        match cli.command {
-            Some(Commands::Config { show, paths, json }) => {
-                assert!(!show);
-                assert!(!paths);
-                assert!(!json);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Config { show, paths, json }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(!show);
+        assert!(!paths);
+        assert!(!json);
+        Ok(())
     }
 
     #[test]
-    fn parse_config_show_flag() {
+    fn parse_config_show_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "config", "--show"]);
-        match cli.command {
-            Some(Commands::Config { show, paths, json }) => {
-                assert!(show);
-                assert!(!paths);
-                assert!(!json);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Config { show, paths, json }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(show);
+        assert!(!paths);
+        assert!(!json);
+        Ok(())
     }
 
     #[test]
-    fn parse_config_paths_flag() {
+    fn parse_config_paths_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "config", "--paths"]);
-        match cli.command {
-            Some(Commands::Config { show, paths, json }) => {
-                assert!(!show);
-                assert!(paths);
-                assert!(!json);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Config { show, paths, json }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(!show);
+        assert!(paths);
+        assert!(!json);
+        Ok(())
     }
 
     #[test]
-    fn parse_config_json_flag() {
+    fn parse_config_json_flag() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "config", "--json"]);
-        match cli.command {
-            Some(Commands::Config { show, paths, json }) => {
-                assert!(!show);
-                assert!(!paths);
-                assert!(json);
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Config { show, paths, json }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert!(!show);
+        assert!(!paths);
+        assert!(json);
+        Ok(())
     }
 
     #[test]
@@ -872,14 +868,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_info_subcommand() {
+    fn parse_info_subcommand() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "info", "auto-commit-on-exit"]);
-        match cli.command {
-            Some(Commands::Info { name }) => {
-                assert_eq!(name, "auto-commit-on-exit");
-            }
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Commands::Info { name }) = cli.command else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(name, "auto-commit-on-exit");
+        Ok(())
     }
 
     #[test]
@@ -904,12 +899,13 @@ mod tests {
     }
 
     #[test]
-    fn list_models_with_pattern() {
+    fn list_models_with_pattern() -> Result<(), String> {
         let cli = Cli::parse_from(["pi", "--list-models", "claude*"]);
-        match cli.list_models {
-            Some(Some(ref pat)) => assert_eq!(pat, "claude*"),
-            other => panic!("unexpected command: {:?}", other),
-        }
+        let Some(Some(ref pat)) = cli.list_models else {
+            return Err(format!("unexpected list_models: {:?}", cli.list_models));
+        };
+        assert_eq!(pat, "claude*");
+        Ok(())
     }
 
     // ── 5b. --list-providers (bool) ────────────────────────────────────

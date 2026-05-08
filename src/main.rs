@@ -177,7 +177,7 @@ async fn resolve_selection_with_auth(
                         let canonical_provider =
                             pi::provider_metadata::canonical_provider_id(provider)
                                 .unwrap_or(provider.as_str());
-                        if canonical_provider == "sap-ai-core" {
+                        if canonical_provider.eq("sap-ai-core") {
                             if let Some(token) = pi::auth::exchange_sap_access_token(auth).await? {
                                 return Ok(Some((selection, Some(token))));
                             }
@@ -240,7 +240,7 @@ fn build_extension_bootstrap_selection(
 }
 
 fn context_window_tokens_for_entry(entry: &ModelEntry) -> u32 {
-    if entry.model.context_window == 0 {
+    if entry.model.context_window.eq(&0) {
         tracing::warn!(
             "Model {} reported context_window=0; falling back to default compaction window",
             entry.model.id
@@ -416,7 +416,7 @@ fn main_impl() -> Result<()> {
                 let mut models = registry.available_models();
                 models.sort_by(|a, b| {
                     let provider_cmp = a.model.provider.cmp(&b.model.provider);
-                    if provider_cmp == std::cmp::Ordering::Equal {
+                    if matches!(provider_cmp, std::cmp::Ordering::Equal) {
                         a.model.id.cmp(&b.model.id)
                     } else {
                         provider_cmp
@@ -446,7 +446,7 @@ fn main_impl() -> Result<()> {
         }
     }
 
-    if cli.command.is_none() && !cli.acp && cli.mode.as_deref() != Some("rpc") {
+    if cli.command.is_none() && !cli.acp && cli.mode.as_deref().is_none_or(|mode| mode.ne("rpc")) {
         let stdin_content = read_piped_stdin()?;
         pi::app::apply_piped_stdin(&mut cli, stdin_content);
     }
@@ -465,7 +465,7 @@ fn main_impl() -> Result<()> {
         }
     });
     if cli.command.is_none()
-        && early_mode == "text"
+        && early_mode.eq("text")
         && cli.export.is_none()
         && cli.file_args().is_empty()
         && cli
@@ -716,7 +716,7 @@ fn extension_policy_migration_guardrails(
 ) -> serde_json::Value {
     serde_json::json!({
         "default_profile": "permissive",
-        "active_default_profile": resolved.profile_source == "default" && resolved.effective_profile == "permissive",
+        "active_default_profile": resolved.profile_source.eq("default") && resolved.effective_profile.eq("permissive"),
         "profile_source": resolved.profile_source,
         "permissive_by_default_reason": "Fresh installs favor extension compatibility and custom UI out of the box.",
         "override_cli": {
@@ -976,7 +976,7 @@ async fn run(
             "text".to_string()
         }
     });
-    let startup_is_interactive = startup_mode == "interactive"
+    let startup_is_interactive = startup_mode.eq("interactive")
         && cli.command.is_none()
         && cli.export.is_none()
         && cli.list_models.is_none();
@@ -1056,7 +1056,7 @@ async fn run(
         .resolve_extension_policy_with_metadata(cli.extension_policy.as_deref())
         .policy;
     let prewarm_repair = config.resolve_repair_policy_with_metadata(cli.repair_policy.as_deref());
-    let prewarm_repair_mode = if prewarm_repair.source == "default" {
+    let prewarm_repair_mode = if prewarm_repair.source.eq("default") {
         pi::extensions::RepairPolicyMode::AutoStrict
     } else {
         prewarm_repair.effective_mode
@@ -1218,11 +1218,11 @@ async fn run(
             "text".to_string()
         }
     });
-    let is_print_mode = mode == "text" || mode == "json";
+    let is_print_mode = mode.eq("text") || mode.eq("json");
     if is_print_mode {
         cli.no_session = true;
     }
-    if mode == "text" && initial.is_none() && messages.is_empty() {
+    if mode.eq("text") && initial.is_none() && messages.is_empty() {
         bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
     }
 
@@ -1375,7 +1375,7 @@ async fn run(
             config.resolve_extension_policy_with_metadata(cli.extension_policy.as_deref());
         let resolved_repair_policy =
             config.resolve_repair_policy_with_metadata(cli.repair_policy.as_deref());
-        let effective_repair_policy = if resolved_repair_policy.source == "default" {
+        let effective_repair_policy = if resolved_repair_policy.source.eq("default") {
             // Compatibility-first default for extension-heavy workloads:
             // if the user did not choose a repair policy explicitly, prefer
             // aggressive deterministic repairs while capability policy stays enforced.
@@ -1578,7 +1578,7 @@ async fn run(
     // Clone session handle for shutdown flush (ensures autosave queue is drained).
     let session_handle = Arc::clone(&agent_session.session);
 
-    let result = if mode == "rpc" {
+    let result = if mode.eq("rpc") {
         let available_models = rpc_available_models(&model_registry, cli.api_key.as_deref());
         let rpc_scoped_models = selection
             .scoped_models
@@ -1743,7 +1743,7 @@ async fn handle_package_install(manager: &PackageManager, source: &str, local: b
     let resolved_source = manager.resolve_install_source_alias(source);
     manager.install(&resolved_source, scope).await?;
     manager.add_package_source(&resolved_source, scope).await?;
-    if resolved_source == source {
+    if resolved_source.eq(source) {
         println!("Installed {source}");
     } else {
         println!("Installed {source} (resolved to {resolved_source})");
@@ -1760,7 +1760,7 @@ fn handle_package_install_blocking(
     let resolved_source = manager.resolve_install_source_alias(source);
     manager.install_blocking(&resolved_source, scope)?;
     manager.add_package_source_blocking(&resolved_source, scope)?;
-    if resolved_source == source {
+    if resolved_source.eq(source) {
         println!("Installed {source}");
     } else {
         println!("Installed {source} (resolved to {resolved_source})");
@@ -1775,7 +1775,7 @@ async fn handle_package_remove(manager: &PackageManager, source: &str, local: bo
     manager
         .remove_package_source(&resolved_source, scope)
         .await?;
-    if resolved_source == source {
+    if resolved_source.eq(source) {
         println!("Removed {source}");
     } else {
         println!("Removed {source} (resolved to {resolved_source})");
@@ -1792,7 +1792,7 @@ fn handle_package_remove_blocking(
     let resolved_source = manager.resolve_install_source_alias(source);
     manager.remove_blocking(&resolved_source, scope)?;
     manager.remove_package_source_blocking(&resolved_source, scope)?;
-    if resolved_source == source {
+    if resolved_source.eq(source) {
         println!("Removed {source}");
     } else {
         println!("Removed {source} (resolved to {resolved_source})");
@@ -1815,7 +1815,7 @@ async fn handle_package_update(manager: &PackageManager, source: Option<String>)
         let identity = manager.package_identity(&resolved_source);
         let mut matched = false;
         for entry in entries {
-            if manager.package_identity(&entry.source) != identity {
+            if manager.package_identity(&entry.source).ne(&identity) {
                 continue;
             }
             matched = true;
@@ -1826,7 +1826,7 @@ async fn handle_package_update(manager: &PackageManager, source: Option<String>)
                 "Package source not found: {source}"
             )));
         }
-        if resolved_source == source {
+        if resolved_source.eq(source) {
             println!("Updated {source}");
         } else {
             println!("Updated {source} (resolved to {resolved_source})");
@@ -1864,7 +1864,7 @@ fn handle_package_update_blocking(manager: &PackageManager, source: Option<&str>
         let identity = manager.package_identity(&resolved_source);
         let mut matched = false;
         for entry in entries {
-            if manager.package_identity(&entry.source) != identity {
+            if manager.package_identity(&entry.source).ne(&identity) {
                 continue;
             }
             matched = true;
@@ -1875,7 +1875,7 @@ fn handle_package_update_blocking(manager: &PackageManager, source: Option<&str>
                 "Package source not found: {source}"
             )));
         }
-        if resolved_source == source {
+        if resolved_source.eq(source) {
             println!("Updated {source}");
         } else {
             println!("Updated {source} (resolved to {resolved_source})");
@@ -2078,7 +2078,7 @@ fn collect_search_hits(
     limit: usize,
     query: &str,
 ) -> Vec<pi::extension_index::ExtensionSearchHit> {
-    if limit == 0 {
+    if limit.eq(&0) {
         return Vec::new();
     }
 
@@ -2091,12 +2091,12 @@ fn collect_search_hits(
             hit.entry
                 .tags
                 .iter()
-                .any(|t| t.to_ascii_lowercase() == tag_lower)
+                .any(|t| t.to_ascii_lowercase().eq(&tag_lower))
         });
     }
 
     // Sort by name if requested (relevance is the default from search())
-    if sort == "name" {
+    if sort.eq("name") {
         hits.sort_by(|a, b| {
             a.entry
                 .name
@@ -2174,7 +2174,7 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
     }
 
     let count = hits.len();
-    let noun = if count == 1 {
+    let noun = if count.eq(&1) {
         "extension"
     } else {
         "extensions"
@@ -2229,7 +2229,7 @@ fn find_index_entry_by_name_or_id<'a>(
 
     if hits
         .get(1)
-        .is_some_and(|next_hit| next_hit.score == best_hit.score)
+        .is_some_and(|next_hit| next_hit.score.eq(&best_hit.score))
     {
         return ExtensionInfoLookup::Ambiguous;
     }
@@ -2237,7 +2237,7 @@ fn find_index_entry_by_name_or_id<'a>(
     index
         .entries
         .iter()
-        .find(|entry| entry.id == best_hit.entry.id)
+        .find(|entry| entry.id.eq(&best_hit.entry.id))
         .map_or(ExtensionInfoLookup::NotFound, ExtensionInfoLookup::Found)
 }
 
@@ -2252,7 +2252,7 @@ fn print_extension_info(entry: &pi::extension_index::ExtensionIndexEntry) {
     println!("  │ {title}{:padding$}│", "");
 
     // ID (if different from name)
-    if entry.id != entry.name {
+    if entry.id.ne(&entry.name) {
         let id_line = format!("id: {}", entry.id);
         let padding = width.saturating_sub(id_line.len() + 1);
         println!("  │ {id_line}{:padding$}│", "");
@@ -2549,7 +2549,7 @@ impl ConfigUiApp {
         let mut cursor = 0usize;
         for (pkg_idx, pkg) in self.packages.iter().enumerate() {
             for (res_idx, _) in pkg.resources.iter().enumerate() {
-                if cursor == self.selected {
+                if cursor.eq(&self.selected) {
                     return Some((pkg_idx, res_idx));
                 }
                 cursor = cursor.saturating_add(1);
@@ -2560,7 +2560,7 @@ impl ConfigUiApp {
 
     fn move_selection(&mut self, delta: isize) {
         let total = self.selectable_count();
-        if total == 0 {
+        if total.eq(&0) {
             self.selected = 0;
             return;
         }
@@ -2607,12 +2607,12 @@ impl ConfigUiApp {
             match key.key_type {
                 KeyType::Up => self.move_selection(-1),
                 KeyType::Down => self.move_selection(1),
-                KeyType::Runes if key.runes == ['k'] => self.move_selection(-1),
-                KeyType::Runes if key.runes == ['j'] => self.move_selection(1),
+                KeyType::Runes if key.runes.eq(&['k']) => self.move_selection(-1),
+                KeyType::Runes if key.runes.eq(&['j']) => self.move_selection(1),
                 KeyType::Space => self.toggle_selected(),
                 KeyType::Enter => return Some(self.finish(true)),
                 KeyType::Esc | KeyType::CtrlC => return Some(self.finish(false)),
-                KeyType::Runes if key.runes == ['q'] => return Some(self.finish(false)),
+                KeyType::Runes if key.runes.eq(&['q']) => return Some(self.finish(false)),
                 _ => {}
             }
         }
@@ -2640,7 +2640,7 @@ impl ConfigUiApp {
             }
 
             for resource in &package.resources {
-                let selected = cursor == self.selected;
+                let selected = cursor.eq(&self.selected);
                 let marker = if resource.enabled { "x" } else { " " };
                 let prefix = if selected { ">" } else { " " };
                 let _ = writeln!(
@@ -2709,7 +2709,7 @@ fn merge_resolved_resources(
     lookup: &mut std::collections::HashMap<String, usize>,
 ) {
     for resource in resources {
-        if resource.metadata.origin != ResourceOrigin::Package {
+        if !matches!(resource.metadata.origin, ResourceOrigin::Package) {
             continue;
         }
 
@@ -2749,7 +2749,7 @@ fn sort_and_dedupe_package_resources(packages: &mut [ConfigPackageState]) {
         for resource in std::mem::take(&mut package.resources) {
             if let Some(existing) = deduped
                 .iter_mut()
-                .find(|r| r.kind == resource.kind && r.path == resource.path)
+                .find(|r| r.kind.eq(&resource.kind) && r.path.eq(&resource.path))
             {
                 existing.enabled = existing.enabled || resource.enabled;
             } else {
@@ -3068,7 +3068,7 @@ fn persist_package_toggles_with_roots(
             let kind_resources = package
                 .resources
                 .iter()
-                .filter(|resource| resource.kind == kind)
+                .filter(|resource| resource.kind.eq(&kind))
                 .collect::<Vec<_>>();
             if kind_resources.is_empty() {
                 continue;
@@ -3246,7 +3246,7 @@ fn handle_session_migrate(path: &str, dry_run: bool) -> Result<()> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             let p = entry.path();
-            if p.extension().is_some_and(|e| e == "jsonl") {
+            if p.extension().is_some_and(|e| e.eq("jsonl")) {
                 files.push(p);
             }
         }
@@ -3383,7 +3383,7 @@ fn handle_doctor(
     }
 
     // Exit with code 1 if any failures (useful for CI)
-    if report.overall == pi::doctor::Severity::Fail {
+    if matches!(report.overall, pi::doctor::Severity::Fail) {
         std::process::exit(1);
     }
 
@@ -3416,7 +3416,7 @@ fn list_models(registry: &ModelRegistry, pattern: Option<&str>) {
 
     models.sort_by(|a, b| {
         let provider_cmp = a.model.provider.cmp(&b.model.provider);
-        if provider_cmp == std::cmp::Ordering::Equal {
+        if matches!(provider_cmp, std::cmp::Ordering::Equal) {
             a.model.id.cmp(&b.model.id)
         } else {
             provider_cmp
@@ -3749,7 +3749,7 @@ fn provider_choice_from_token(token: &str) -> Option<ProviderChoice> {
                             choice.kind,
                             SetupCredentialKind::OAuthPkce | SetupCredentialKind::OAuthDeviceFlow
                         ))
-                        || (wants_key && choice.kind == SetupCredentialKind::ApiKey))
+                        || (wants_key && matches!(choice.kind, SetupCredentialKind::ApiKey)))
             })
         {
             return Some(found);
@@ -3768,7 +3768,7 @@ fn provider_choice_from_token(token: &str) -> Option<ProviderChoice> {
 
     // Try exact match against listed labels.
     for choice in PROVIDER_CHOICES {
-        if normalized == choice.label.to_ascii_lowercase() {
+        if normalized.eq(&choice.label.to_ascii_lowercase()) {
             return Some(*choice);
         }
     }
@@ -3833,8 +3833,9 @@ async fn run_first_time_setup(
 
     console.print_markup("[bold]Choose a provider:[/]\n");
     for (idx, provider) in PROVIDER_CHOICES.iter().enumerate() {
-        let is_default = provider_hint
-            .is_some_and(|hint| hint.provider == provider.provider && hint.kind == provider.kind);
+        let is_default = provider_hint.is_some_and(|hint| {
+            hint.provider.eq(provider.provider) && hint.kind.eq(&provider.kind)
+        });
         let default_marker = if is_default { " [dim](default)[/]" } else { "" };
         let method = match provider.kind {
             SetupCredentialKind::ApiKey => "API key",
@@ -3887,17 +3888,17 @@ async fn run_first_time_setup(
             }
             continue;
         }
-        if normalized == custom_num || normalized == "custom" || normalized == "models" {
+        if normalized.eq(&custom_num) || normalized.eq("custom") || normalized.eq("models") {
             console.render_info(&format!(
                 "Create models.json at {} and restart Pi.",
                 models_path.display()
             ));
             return Ok(false);
         }
-        if normalized == exit_num
-            || normalized == "q"
-            || normalized == "quit"
-            || normalized == "exit"
+        if normalized.eq(&exit_num)
+            || normalized.eq("q")
+            || normalized.eq("quit")
+            || normalized.eq("exit")
         {
             console.render_warning("Setup cancelled.");
             return Ok(false);
@@ -3940,7 +3941,7 @@ async fn run_first_time_setup(
                 }
             };
 
-            if start.provider == "anthropic" {
+            if start.provider.eq("anthropic") {
                 console.render_warning(
                     "Anthropic OAuth (Claude Code consumer account) is no longer recommended.\n\
 Using consumer OAuth tokens outside the official client may violate Anthropic's consumer Terms of Service and can\n\
@@ -4058,7 +4059,7 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
             }
         }
         SetupCredentialKind::OAuthDeviceFlow => {
-            if provider.provider != "kimi-for-coding" {
+            if provider.provider.ne("kimi-for-coding") {
                 console.render_warning(&format!(
                     "Device-flow login not supported for {} in this setup flow. Start Pi and run /login {} instead.",
                     provider.provider, provider.provider
@@ -4127,11 +4128,15 @@ Code expires in {} seconds.\n",
     auth.save_async().await?;
 
     // Make the next startup attempt use the credential we just created.
-    if cli.provider.as_deref() != Some(provider.provider) {
+    if cli
+        .provider
+        .as_deref()
+        .is_none_or(|selected| selected.ne(provider.provider))
+    {
         cli.provider = Some(provider.provider.to_string());
         cli.model = None;
     }
-    if provider.provider == "openai-codex" {
+    if provider.provider.eq("openai-codex") {
         cli.model = Some("gpt-5.5".to_string());
     }
 
@@ -4321,7 +4326,7 @@ fn prompt_line(prompt: &str) -> Result<Option<String>> {
     io::stdout().flush()?;
     let mut input = String::new();
     let bytes = io::stdin().read_line(&mut input)?;
-    if bytes == 0 {
+    if bytes.eq(&0) {
         return Ok(None);
     }
     Ok(Some(input.trim().to_string()))
@@ -4442,11 +4447,11 @@ async fn run_print_mode(
     runtime_handle: RuntimeHandle,
     config: &Config,
 ) -> Result<()> {
-    if mode != "text" && mode != "json" {
+    if mode.ne("text") && mode.ne("json") {
         bail!("Unknown mode: {mode}");
     }
 
-    if mode == "json" {
+    if mode.eq("json") {
         let cx = pi::agent_cx::AgentCx::for_request();
         let session = session
             .session
@@ -4456,7 +4461,7 @@ async fn run_print_mode(
         println!("{}", serde_json::to_string(&session.header)?);
     }
     if initial.is_none() && messages.is_empty() {
-        if mode == "json" {
+        if mode.eq("json") {
             io::stdout().flush()?;
             return Ok(());
         }
@@ -4465,8 +4470,8 @@ async fn run_print_mode(
 
     let text_stream_state = Arc::new(StdMutex::new(PrintTextStreamState::default()));
     let extensions = session.extensions.as_ref().map(|r| r.manager().clone());
-    let emit_json_events = mode == "json";
-    let stream_text_events = mode == "text";
+    let emit_json_events = mode.eq("json");
+    let stream_text_events = mode.eq("text");
     let runtime_for_events = runtime_handle.clone();
     let text_stream_state_for_events = Arc::clone(&text_stream_state);
     let make_event_handler = move || {
@@ -4517,7 +4522,7 @@ async fn run_print_mode(
         .collect::<Vec<_>>();
 
     if initial.is_none() && messages.is_empty() {
-        if mode == "json" {
+        if mode.eq("json") {
             io::stdout().flush()?;
             return Ok(());
         }
@@ -4526,7 +4531,7 @@ async fn run_print_mode(
 
     let retry_enabled = config.retry_enabled();
     let max_retries = config.retry_max_retries();
-    let is_json = mode == "json";
+    let is_json = mode.eq("json");
     let mut sent_prompts = 0usize;
 
     if let Some(initial) = initial {
@@ -4545,7 +4550,7 @@ async fn run_print_mode(
         )
         .await?;
         sent_prompts = sent_prompts.saturating_add(1);
-        if mode == "text" {
+        if mode.eq("text") {
             finish_print_text_response(
                 &message,
                 snapshot_print_text_stream_state(&text_stream_state),
@@ -4569,7 +4574,7 @@ async fn run_print_mode(
         )
         .await?;
         sent_prompts = sent_prompts.saturating_add(1);
-        if mode == "text" {
+        if mode.eq("text") {
             finish_print_text_response(
                 &response,
                 snapshot_print_text_stream_state(&text_stream_state),
@@ -4578,8 +4583,8 @@ async fn run_print_mode(
         }
     }
 
-    if sent_prompts == 0 {
-        if mode == "json" {
+    if sent_prompts.eq(&0) {
+        if mode.eq("json") {
             io::stdout().flush()?;
             return Ok(());
         }
@@ -4792,7 +4797,7 @@ where
 
     loop {
         match current_result {
-            Ok(msg) if msg.stop_reason == StopReason::Aborted => {
+            Ok(msg) if matches!(msg.stop_reason, StopReason::Aborted) => {
                 if retry_count > 0 && is_json {
                     emit_json_event(&AgentEvent::AutoRetryEnd {
                         success: false,
@@ -5005,14 +5010,14 @@ fn read_piped_stdin() -> Result<Option<String>> {
 
 fn format_token_count(count: u32) -> String {
     if count >= 1_000_000 {
-        if count % 1_000_000 == 0 {
+        if (count % 1_000_000).eq(&0) {
             format!("{}M", count / 1_000_000)
         } else {
             let millions = f64::from(count) / 1_000_000.0;
             format!("{millions:.1}M")
         }
     } else if count >= 1_000 {
-        if count % 1_000 == 0 {
+        if (count % 1_000).eq(&0) {
             format!("{}K", count / 1_000)
         } else {
             let thousands = f64::from(count) / 1_000.0;
@@ -5030,7 +5035,7 @@ fn fuzzy_match(pattern: &str, value: &str) -> bool {
         .filter(|c| !c.is_whitespace());
     let mut haystack = value.chars().flat_map(char::to_lowercase);
     for ch in needle.by_ref() {
-        if !haystack.by_ref().any(|h| h == ch) {
+        if !haystack.by_ref().any(|h| h.eq(&ch)) {
             return false;
         }
     }
@@ -5046,10 +5051,10 @@ fn fuzzy_match_model_id(pattern: &str, provider: &str, model_id: &str) -> bool {
     let mut model_chars = model_id.chars().flat_map(char::to_lowercase);
 
     for ch in needle.by_ref() {
-        if provider_chars.by_ref().any(|h| h == ch) {
+        if provider_chars.by_ref().any(|h| h.eq(&ch)) {
             continue;
         }
-        if model_chars.by_ref().any(|h| h == ch) {
+        if model_chars.by_ref().any(|h| h.eq(&ch)) {
             continue;
         }
         return false;
@@ -5233,9 +5238,9 @@ mod tests {
 
         let without_cli_key = rpc_available_models(&registry, None);
         assert!(
-            without_cli_key
-                .iter()
-                .all(|entry| !(entry.model.provider == "openai" && entry.model.id == "gpt-4o")),
+            without_cli_key.iter().all(|entry| {
+                !(entry.model.provider.eq("openai") && entry.model.id.eq("gpt-4o"))
+            }),
             "OpenAI models should remain hidden without configured credentials"
         );
 
@@ -5243,7 +5248,7 @@ mod tests {
         assert!(
             with_cli_key
                 .iter()
-                .any(|entry| entry.model.provider == "openai" && entry.model.id == "gpt-4o"),
+                .any(|entry| entry.model.provider.eq("openai") && entry.model.id.eq("gpt-4o")),
             "CLI API-key override should expose remote models to RPC model switching"
         );
     }
@@ -5257,9 +5262,9 @@ mod tests {
 
         let available_models = rpc_available_models(&registry, Some("   "));
         assert!(
-            available_models
-                .iter()
-                .all(|entry| !(entry.model.provider == "openai" && entry.model.id == "gpt-4o")),
+            available_models.iter().all(|entry| {
+                !(entry.model.provider.eq("openai") && entry.model.id.eq("gpt-4o"))
+            }),
             "Blank CLI API-key values should not expose remote models"
         );
     }
@@ -5477,7 +5482,7 @@ mod tests {
     }
 
     #[test]
-    fn find_index_entry_by_name_or_id_returns_unique_fuzzy_hit() {
+    fn find_index_entry_by_name_or_id_returns_unique_fuzzy_hit() -> Result<(), String> {
         let index = test_extension_index(vec![
             test_extension_entry("npm/foo-helper", "foo-helper"),
             test_extension_entry("npm/bar-helper", "bar-helper"),
@@ -5485,11 +5490,14 @@ mod tests {
 
         match find_index_entry_by_name_or_id(&index, "foo") {
             ExtensionInfoLookup::Found(entry) => assert_eq!(entry.id, "npm/foo-helper"),
-            ExtensionInfoLookup::NotFound => panic!("expected unique fuzzy match, got NotFound"),
+            ExtensionInfoLookup::NotFound => {
+                return Err("expected unique fuzzy match, got NotFound".to_string());
+            }
             ExtensionInfoLookup::Ambiguous => {
-                panic!("expected unique fuzzy match, got Ambiguous")
+                return Err("expected unique fuzzy match, got Ambiguous".to_string());
             }
         }
+        Ok(())
     }
 
     #[test]
