@@ -125,6 +125,16 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn duration_micros_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn record_global_latency(counter: &crate::session_metrics::TimingCounter, duration: Duration) {
+    if crate::session_metrics::global().enabled() {
+        counter.record(duration_micros_saturating(duration));
+    }
+}
+
 /// Nearest-rank tail percentile summary for a latency sample set.
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +145,8 @@ pub struct LatencyPercentiles {
     pub p95_ms: u64,
     /// P99 latency, in milliseconds.
     pub p99_ms: u64,
+    /// P99.9 latency, in milliseconds.
+    pub p999_ms: u64,
 }
 
 impl LatencyPercentiles {
@@ -143,6 +155,7 @@ impl LatencyPercentiles {
             p50_ms: percentile_nearest_rank(samples, 50),
             p95_ms: percentile_nearest_rank(samples, 95),
             p99_ms: percentile_nearest_rank(samples, 99),
+            p999_ms: percentile_nearest_rank_per_mille(samples, 999),
         }
     }
 }
@@ -242,6 +255,22 @@ fn percentile_nearest_rank(samples: &[u64], percentile: usize) -> u64 {
     sorted[rank]
 }
 
+fn percentile_nearest_rank_per_mille(samples: &[u64], permille: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let len = sorted.len();
+    let rank = permille
+        .saturating_mul(len)
+        .div_ceil(1000)
+        .saturating_sub(1)
+        .min(len.saturating_sub(1));
+    sorted[rank]
+}
+
 fn dominant_latency_component(
     provider_streaming: &LatencyComponentBreakdown,
     local_tools: &LatencyComponentBreakdown,
@@ -305,6 +334,8 @@ fn record_provider_streaming_latency(latency: &SharedTurnLatencyAccumulator, dur
             .provider_streaming_ms
             .push(duration_millis_saturating(duration));
     }
+    let metrics = crate::session_metrics::global();
+    record_global_latency(&metrics.provider_streaming, duration);
 }
 
 fn record_local_tool_latency(latency: &SharedTurnLatencyAccumulator, duration: Duration) {
@@ -313,6 +344,8 @@ fn record_local_tool_latency(latency: &SharedTurnLatencyAccumulator, duration: D
             .local_tool_ms
             .push(duration_millis_saturating(duration));
     }
+    let metrics = crate::session_metrics::global();
+    record_global_latency(&metrics.local_tools, duration);
 }
 
 fn record_extension_hostcall_latency(latency: &SharedTurnLatencyAccumulator, duration: Duration) {
@@ -321,6 +354,8 @@ fn record_extension_hostcall_latency(latency: &SharedTurnLatencyAccumulator, dur
             .extension_hostcall_ms
             .push(duration_millis_saturating(duration));
     }
+    let metrics = crate::session_metrics::global();
+    record_global_latency(&metrics.extension_hostcalls, duration);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4706,6 +4741,7 @@ mod extensions_integration_tests {
         assert_eq!(breakdown.provider_streaming.tail_percentiles.p50_ms, 20);
         assert_eq!(breakdown.provider_streaming.tail_percentiles.p95_ms, 30);
         assert_eq!(breakdown.provider_streaming.tail_percentiles.p99_ms, 30);
+        assert_eq!(breakdown.provider_streaming.tail_percentiles.p999_ms, 30);
         assert_eq!(breakdown.local_tools.duration_ms, 45);
         assert_eq!(breakdown.extension_hostcalls.duration_ms, 2);
         assert_eq!(breakdown.persistence.duration_ms, 0);

@@ -27,6 +27,7 @@ from typing import Any
 RUNPACK_SCHEMA = "pi.swarm.operator_runpack.v1"
 RUNPACK_CONTRACT_SCHEMA = "pi.swarm.operator_runpack_contract.v1"
 SAFETY_SCORECARD_SCHEMA = "pi.swarm.safety_scorecard.v1"
+TAIL_LATENCY_SCHEMA = "pi.operator_tail_latency.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
@@ -275,7 +276,7 @@ def load_git_status(path: Path | None) -> SourcePayload:
 
 
 def source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
-    return [
+    sources = [
         load_json_source("doctor_swarm", args.doctor_json),
         load_json_source(
             "claim_readiness",
@@ -296,6 +297,15 @@ def source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
         load_json_source("beads", args.beads_json),
         load_git_status(args.git_status_file),
     ]
+    if args.tail_latency_json is not None:
+        sources.append(
+            load_json_source(
+                "tail_latency",
+                args.tail_latency_json,
+                expected_schema=TAIL_LATENCY_SCHEMA,
+            )
+        )
+    return sources
 
 
 def bounded(items: list[Any], max_items: int) -> list[Any]:
@@ -372,6 +382,42 @@ def summarize_claim_readiness(source: SourcePayload, max_items: int) -> dict[str
         "stale_claims": payload.get("stale_claims", {}).get("summary")
         if isinstance(payload.get("stale_claims"), dict)
         else None,
+    }
+
+
+def summarize_tail_latency(source: SourcePayload, max_items: int) -> dict[str, Any]:
+    payload = source.payload
+    if not isinstance(payload, dict):
+        return {"status": source.status}
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, list):
+        metrics = []
+    summarized_metrics: list[dict[str, Any]] = []
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        snapshot = metric.get("snapshot") if isinstance(metric.get("snapshot"), dict) else {}
+        tail = snapshot.get("tail") if isinstance(snapshot.get("tail"), dict) else {}
+        summarized_metrics.append(
+            {
+                "id": metric.get("id"),
+                "label": metric.get("label"),
+                "count": snapshot.get("count"),
+                "sample_count": tail.get("sample_count"),
+                "p95_us": tail.get("p95_us"),
+                "p99_us": tail.get("p99_us"),
+                "p999_us": tail.get("p999_us"),
+                "max_us": snapshot.get("max_us"),
+            }
+        )
+    return {
+        "status": source.status,
+        "schema": payload.get("schema"),
+        "purpose": payload.get("purpose"),
+        "telemetry_enabled": payload.get("telemetry_enabled"),
+        "sample_window": payload.get("sample_window"),
+        "redaction_summary": payload.get("redaction_summary"),
+        "metrics": bounded(summarized_metrics, max_items),
     }
 
 
@@ -890,6 +936,11 @@ def build_runpack(args: argparse.Namespace) -> dict[str, Any]:
         "smoke_harness": smoke_summary,
         "redaction_summary": redaction.to_json(),
     }
+    if "tail_latency" in by_id:
+        runpack["tail_latency"] = summarize_tail_latency(
+            by_id["tail_latency"],
+            args.max_items,
+        )
     runpack["swarm_scale_safety_scorecard"] = build_swarm_scale_safety_scorecard(runpack)
     runpack["status"] = derive_status(runpack)
     runpack["operator_next_actions"] = operator_next_actions(runpack)
@@ -954,6 +1005,12 @@ def render_markdown(runpack: dict[str, Any]) -> str:
     lines.append(f"- Evidence readiness: `{runpack['evidence_readiness'].get('overall_status')}`")
     lines.append(f"- Git dirty: `{runpack['git_state'].get('dirty')}`")
     lines.append(f"- Activity saturated: `{runpack['activity_digest'].get('saturated')}`")
+    if isinstance(runpack.get("tail_latency"), dict):
+        tail_latency = runpack["tail_latency"]
+        lines.append(
+            f"- Tail latency telemetry: `{tail_latency.get('telemetry_enabled')}` "
+            f"({len(tail_latency.get('metrics') or [])} metrics)"
+        )
     scorecard = runpack["swarm_scale_safety_scorecard"]
     lines.extend(["", "## Safety Scorecard"])
     lines.append(
@@ -1255,6 +1312,7 @@ def run_self_test() -> int:
         cargo_admission_json=cargo_path,
         beads_json=beads_path,
         git_status_file=git_path,
+        tail_latency_json=None,
         out_json=workspace / "runpack.json",
         out_md=workspace / "runpack.md",
         generated_at=generated_at,
@@ -1309,6 +1367,46 @@ def run_self_test() -> int:
             assert "malformed JSON" in str(exc)
         else:
             raise AssertionError("malformed provided source should fail closed")
+        tail_latency_path = write_json(
+            workspace / "tail-latency.json",
+            {
+                "schema": TAIL_LATENCY_SCHEMA,
+                "purpose": "operator_observability_not_release_performance_claim",
+                "telemetry_enabled": True,
+                "sample_window": 512,
+                "redaction_summary": {
+                    "redacted_count": 0,
+                    "fields": [],
+                    "policy": "timing_only_no_prompt_or_tool_payload_fields",
+                },
+                "metrics": [
+                    {
+                        "id": "provider_streaming",
+                        "label": "Provider streaming",
+                        "snapshot": {
+                            "count": 3,
+                            "total_us": 600,
+                            "max_us": 300,
+                            "avg_us": 200,
+                            "tail": {
+                                "sample_window": 512,
+                                "sample_count": 3,
+                                "p95_us": 300,
+                                "p99_us": 300,
+                                "p999_us": 300,
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+        tail_args = argparse.Namespace(**{**vars(args), "tail_latency_json": tail_latency_path})
+        tail_runpack = build_runpack(tail_args)
+        assert tail_runpack["tail_latency"]["schema"] == TAIL_LATENCY_SCHEMA
+        assert tail_runpack["tail_latency"]["redaction_summary"]["policy"] == (
+            "timing_only_no_prompt_or_tool_payload_fields"
+        )
+        assert tail_runpack["tail_latency"]["metrics"][0]["p999_us"] == 300
     except (AssertionError, RunpackError) as exc:
         print(f"SELF-TEST FAIL: {exc}")
         return 2
@@ -1326,6 +1424,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cargo-admission-json", type=Path, help="JSON or JSONL from cargo_headroom.sh --admit-only")
     parser.add_argument("--beads-json", type=Path, help="JSON from `br list --json` or `br list --status=in_progress --json`")
     parser.add_argument("--git-status-file", type=Path, help="captured `git status --porcelain` output")
+    parser.add_argument("--tail-latency-json", type=Path, help="pi.operator_tail_latency.v1 JSON from PI_PERF_TELEMETRY")
     parser.add_argument("--out-json", type=Path, help="write runpack JSON; refuses to overwrite")
     parser.add_argument("--out-md", type=Path, help="write runpack Markdown; refuses to overwrite")
     parser.add_argument("--generated-at", help="override generated timestamp for deterministic tests")

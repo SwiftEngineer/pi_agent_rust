@@ -57,6 +57,10 @@ impl FrameTimingStats {
         if !self.enabled {
             return;
         }
+        let metrics = crate::session_metrics::global();
+        if metrics.enabled() {
+            metrics.tui_render.record(elapsed_us);
+        }
         let mut times = self.frame_times_us.borrow_mut();
         if times.len() >= FRAME_TIMING_WINDOW {
             times.pop_front();
@@ -78,6 +82,10 @@ impl FrameTimingStats {
         if !self.enabled {
             return;
         }
+        let metrics = crate::session_metrics::global();
+        if metrics.enabled() {
+            metrics.tui_content_build.record(elapsed_us);
+        }
         let mut times = self.content_build_times_us.borrow_mut();
         if times.len() >= FRAME_TIMING_WINDOW {
             times.pop_front();
@@ -88,6 +96,10 @@ impl FrameTimingStats {
     pub(super) fn record_viewport_sync(&self, elapsed_us: u64) {
         if !self.enabled {
             return;
+        }
+        let metrics = crate::session_metrics::global();
+        if metrics.enabled() {
+            metrics.tui_viewport_sync.record(elapsed_us);
         }
         let mut times = self.viewport_sync_times_us.borrow_mut();
         if times.len() >= FRAME_TIMING_WINDOW {
@@ -100,6 +112,10 @@ impl FrameTimingStats {
         if !self.enabled {
             return;
         }
+        let metrics = crate::session_metrics::global();
+        if metrics.enabled() {
+            metrics.tui_update.record(elapsed_us);
+        }
         if self.update_times_us.len() >= FRAME_TIMING_WINDOW {
             self.update_times_us.pop_front();
         }
@@ -110,9 +126,9 @@ impl FrameTimingStats {
         Self::percentiles(&self.frame_times_us.borrow()).2
     }
 
-    pub(super) fn percentiles(times: &VecDeque<u64>) -> (u64, u64, u64) {
+    pub(super) fn percentiles(times: &VecDeque<u64>) -> (u64, u64, u64, u64) {
         if times.is_empty() {
-            return (0, 0, 0);
+            return (0, 0, 0, 0);
         }
         let mut sorted: Vec<u64> = times.iter().copied().collect();
         sorted.sort_unstable();
@@ -120,7 +136,8 @@ impl FrameTimingStats {
         let p50 = sorted[len / 2];
         let p95 = sorted[(len * 95 / 100).min(len - 1)];
         let p99 = sorted[(len * 99 / 100).min(len - 1)];
-        (p50, p95, p99)
+        let p999 = sorted[(len * 999 / 1000).min(len - 1)];
+        (p50, p95, p99, p999)
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -138,19 +155,22 @@ impl FrameTimingStats {
             .filter(|&&t| t > FRAME_BUDGET_US)
             .count();
         tracing::debug!(
-            "[perf] frame p50={:.1}ms p95={:.1}ms p99={:.1}ms | \
-             content p50={:.1}ms p95={:.1}ms p99={:.1}ms | \
-             viewport p50={:.1}ms p95={:.1}ms p99={:.1}ms | \
+            "[perf] frame p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
+             content p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
+             viewport p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
              budget_exceeded={recent_exceeded}/{window} (total={exceeded}/{total})",
             frame.0 as f64 / 1000.0,
             frame.1 as f64 / 1000.0,
             frame.2 as f64 / 1000.0,
+            frame.3 as f64 / 1000.0,
             content.0 as f64 / 1000.0,
             content.1 as f64 / 1000.0,
             content.2 as f64 / 1000.0,
+            content.3 as f64 / 1000.0,
             viewport.0 as f64 / 1000.0,
             viewport.1 as f64 / 1000.0,
             viewport.2 as f64 / 1000.0,
+            viewport.3 as f64 / 1000.0,
         );
     }
 
@@ -167,23 +187,27 @@ impl FrameTimingStats {
         let exceeded = self.budget_exceeded_count.get();
         format!(
             "Frame timing (last {FRAME_TIMING_WINDOW} frames):\n  \
-             view()   p50={:.1}ms  p95={:.1}ms  p99={:.1}ms\n  \
-             content  p50={:.1}ms  p95={:.1}ms  p99={:.1}ms\n  \
-             viewport p50={:.1}ms  p95={:.1}ms  p99={:.1}ms\n  \
-             update() p50={:.1}ms  p95={:.1}ms  p99={:.1}ms\n  \
+             view()   p50={:.1}ms  p95={:.1}ms  p99={:.1}ms  p999={:.1}ms\n  \
+             content  p50={:.1}ms  p95={:.1}ms  p99={:.1}ms  p999={:.1}ms\n  \
+             viewport p50={:.1}ms  p95={:.1}ms  p99={:.1}ms  p999={:.1}ms\n  \
+             update() p50={:.1}ms  p95={:.1}ms  p99={:.1}ms  p999={:.1}ms\n  \
              Budget exceeded: {exceeded}/{total} frames (>{:.1}ms)",
             frame.0 as f64 / 1000.0,
             frame.1 as f64 / 1000.0,
             frame.2 as f64 / 1000.0,
+            frame.3 as f64 / 1000.0,
             content.0 as f64 / 1000.0,
             content.1 as f64 / 1000.0,
             content.2 as f64 / 1000.0,
+            content.3 as f64 / 1000.0,
             viewport.0 as f64 / 1000.0,
             viewport.1 as f64 / 1000.0,
             viewport.2 as f64 / 1000.0,
+            viewport.3 as f64 / 1000.0,
             update.0 as f64 / 1000.0,
             update.1 as f64 / 1000.0,
             update.2 as f64 / 1000.0,
+            update.3 as f64 / 1000.0,
             FRAME_BUDGET_US as f64 / 1000.0,
         )
     }
@@ -1087,14 +1111,17 @@ mod tests {
     #[test]
     fn frame_timing_percentiles_empty() {
         let empty = VecDeque::new();
-        assert_eq!(FrameTimingStats::percentiles(&empty), (0, 0, 0));
+        assert_eq!(FrameTimingStats::percentiles(&empty), (0, 0, 0, 0));
     }
 
     #[test]
     fn frame_timing_percentiles_single_value() {
         let mut times = VecDeque::new();
         times.push_back(5000);
-        assert_eq!(FrameTimingStats::percentiles(&times), (5000, 5000, 5000));
+        assert_eq!(
+            FrameTimingStats::percentiles(&times),
+            (5000, 5000, 5000, 5000)
+        );
     }
 
     #[test]
@@ -1103,10 +1130,11 @@ mod tests {
         for i in 1..=100 {
             times.push_back(i * 1000);
         }
-        let (p50, p95, p99) = FrameTimingStats::percentiles(&times);
+        let (p50, p95, p99, p999) = FrameTimingStats::percentiles(&times);
         assert_eq!(p50, 51_000);
         assert_eq!(p95, 96_000);
         assert_eq!(p99, 100_000);
+        assert_eq!(p999, 100_000);
     }
 
     #[test]
@@ -1126,6 +1154,7 @@ mod tests {
         assert!(summary.contains("content"));
         assert!(summary.contains("viewport"));
         assert!(summary.contains("update()"));
+        assert!(summary.contains("p999"));
         assert!(summary.contains("Budget exceeded"));
     }
 
@@ -1332,7 +1361,7 @@ mod tests {
             let result = messages[next_idx..]
                 .iter()
                 .enumerate()
-                .find(|(_, m)| m.role == MessageRole::Tool && !m.collapsed)
+                .find(|(_, m)| matches!(m.role, MessageRole::Tool) && !m.collapsed)
                 .map(|(i, _)| next_idx + i);
             match result {
                 Some(idx) => {

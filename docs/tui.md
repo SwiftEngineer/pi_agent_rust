@@ -35,6 +35,19 @@ Displays session statistics and status.
 | **Toggle Thinking** | `Ctrl+T` | Hide/show thinking blocks to reduce noise. |
 | **Scroll History** | `PageUp` / `PageDown` | Scroll conversation view. |
 
+## Operator Telemetry
+
+Setting `PI_PERF_TELEMETRY=1` enables bounded in-process timing samples for
+operator diagnosis during long swarm runs. The samples are timing-only: they do
+not include prompts, tool arguments, provider payloads, transcript text, or
+credentials. Runtime summaries use the `pi.operator_tail_latency.v1` schema and
+include p95, p99, and p999 windows for provider streaming, local tools,
+extension hostcalls, session append/index work, and TUI render phases.
+
+This telemetry is an operator handoff aid, not release performance evidence.
+Release-facing speed claims still require the measured artifacts and freshness
+gates under `tests/perf/reports/`, `docs/evidence/`, and the perf SLI contract.
+
 ## Navigation & Overlays
 
 ### Keyboard shortcuts (`/hotkeys`)

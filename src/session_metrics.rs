@@ -22,9 +22,48 @@
 //! - `Session::save()` JSONL path: queue wait, serialization, IO, persist
 //! - `Session::append_*()`: in-memory append timing
 
-use std::sync::OnceLock;
+use serde::Serialize;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+
+pub const OPERATOR_TAIL_LATENCY_SCHEMA_V1: &str = "pi.operator_tail_latency.v1";
+pub const TIMING_SAMPLE_WINDOW: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TailLatencySnapshot {
+    pub sample_window: usize,
+    pub sample_count: usize,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+}
+
+impl TailLatencySnapshot {
+    const fn empty(sample_window: usize) -> Self {
+        Self {
+            sample_window,
+            sample_count: 0,
+            p95_us: 0,
+            p99_us: 0,
+            p999_us: 0,
+        }
+    }
+}
+
+fn percentile_permille(sorted: &[u64], permille: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let index = sorted
+        .len()
+        .saturating_mul(permille)
+        .checked_div(1000)
+        .unwrap_or(0)
+        .min(sorted.len().saturating_sub(1));
+    sorted[index]
+}
 
 // ---------------------------------------------------------------------------
 // TimingCounter
@@ -42,6 +81,7 @@ pub struct TimingCounter {
     count: AtomicU64,
     total_us: AtomicU64,
     max_us: AtomicU64,
+    recent_us: Mutex<VecDeque<u64>>,
 }
 
 impl TimingCounter {
@@ -50,6 +90,7 @@ impl TimingCounter {
             count: AtomicU64::new(0),
             total_us: AtomicU64::new(0),
             max_us: AtomicU64::new(0),
+            recent_us: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -58,6 +99,13 @@ impl TimingCounter {
     pub fn record(&self, elapsed_us: u64) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.total_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        {
+            let mut recent = self.recent_us.lock().unwrap_or_else(|err| err.into_inner());
+            if recent.len() >= TIMING_SAMPLE_WINDOW {
+                recent.pop_front();
+            }
+            recent.push_back(elapsed_us);
+        }
         // Relaxed CAS loop for max — bounded to one retry on contention.
         let mut current = self.max_us.load(Ordering::Relaxed);
         while elapsed_us > current {
@@ -78,11 +126,28 @@ impl TimingCounter {
         let count = self.count.load(Ordering::Relaxed);
         let total_us = self.total_us.load(Ordering::Relaxed);
         let max_us = self.max_us.load(Ordering::Relaxed);
+        let tail = {
+            let recent = self.recent_us.lock().unwrap_or_else(|err| err.into_inner());
+            let mut sorted: Vec<u64> = recent.iter().copied().collect();
+            sorted.sort_unstable();
+            if sorted.is_empty() {
+                TailLatencySnapshot::empty(TIMING_SAMPLE_WINDOW)
+            } else {
+                TailLatencySnapshot {
+                    sample_window: TIMING_SAMPLE_WINDOW,
+                    sample_count: sorted.len(),
+                    p95_us: percentile_permille(&sorted, 950),
+                    p99_us: percentile_permille(&sorted, 990),
+                    p999_us: percentile_permille(&sorted, 999),
+                }
+            }
+        };
         TimingSnapshot {
             count,
             total_us,
             max_us,
             avg_us: total_us.checked_div(count).unwrap_or(0),
+            tail,
         }
     }
 
@@ -91,16 +156,21 @@ impl TimingCounter {
         self.count.store(0, Ordering::Relaxed);
         self.total_us.store(0, Ordering::Relaxed);
         self.max_us.store(0, Ordering::Relaxed);
+        self.recent_us
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
     }
 }
 
 /// Point-in-time snapshot of a [`TimingCounter`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TimingSnapshot {
     pub count: u64,
     pub total_us: u64,
     pub max_us: u64,
     pub avg_us: u64,
+    pub tail: TailLatencySnapshot,
 }
 
 impl std::fmt::Display for TimingSnapshot {
@@ -111,9 +181,12 @@ impl std::fmt::Display for TimingSnapshot {
         } else {
             write!(
                 f,
-                "n={} avg={:.1}ms max={:.1}ms total={:.1}ms",
+                "n={} avg={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms max={:.1}ms total={:.1}ms",
                 self.count,
                 self.avg_us as f64 / 1000.0,
+                self.tail.p95_us as f64 / 1000.0,
+                self.tail.p99_us as f64 / 1000.0,
+                self.tail.p999_us as f64 / 1000.0,
                 self.max_us as f64 / 1000.0,
                 self.total_us as f64 / 1000.0,
             )
@@ -166,7 +239,7 @@ impl ByteCounter {
 }
 
 /// Point-in-time snapshot of a [`ByteCounter`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ByteSnapshot {
     pub count: u64,
     pub total_bytes: u64,
@@ -244,6 +317,22 @@ pub struct SessionMetrics {
     // -- In-memory append (session.rs — future integration) --
     /// Time for `Session::append_message()` and similar in-memory ops.
     pub append: TimingCounter,
+
+    // -- Agent/TUI hot paths (agent.rs, interactive/perf.rs) --
+    /// Provider stream setup and drain latency across long-running turns.
+    pub provider_streaming: TimingCounter,
+    /// Built-in/local tool execution latency.
+    pub local_tools: TimingCounter,
+    /// Extension event and hostcall dispatch latency around tool activity.
+    pub extension_hostcalls: TimingCounter,
+    /// Full TUI view rendering latency.
+    pub tui_render: TimingCounter,
+    /// Conversation content build latency inside TUI rendering.
+    pub tui_content_build: TimingCounter,
+    /// Conversation viewport sync latency.
+    pub tui_viewport_sync: TimingCounter,
+    /// Bubbletea update() latency.
+    pub tui_update: TimingCounter,
 }
 
 impl SessionMetrics {
@@ -266,6 +355,13 @@ impl SessionMetrics {
             index_list: TimingCounter::new(),
             index_reindex: TimingCounter::new(),
             append: TimingCounter::new(),
+            provider_streaming: TimingCounter::new(),
+            local_tools: TimingCounter::new(),
+            extension_hostcalls: TimingCounter::new(),
+            tui_render: TimingCounter::new(),
+            tui_content_build: TimingCounter::new(),
+            tui_viewport_sync: TimingCounter::new(),
+            tui_update: TimingCounter::new(),
         }
     }
 
@@ -330,6 +426,13 @@ impl SessionMetrics {
         self.index_list.reset();
         self.index_reindex.reset();
         self.append.reset();
+        self.provider_streaming.reset();
+        self.local_tools.reset();
+        self.extension_hostcalls.reset();
+        self.tui_render.reset();
+        self.tui_content_build.reset();
+        self.tui_viewport_sync.reset();
+        self.tui_update.reset();
     }
 
     /// Produce a structured snapshot of all metrics.
@@ -352,6 +455,13 @@ impl SessionMetrics {
             index_list: self.index_list.snapshot(),
             index_reindex: self.index_reindex.snapshot(),
             append: self.append.snapshot(),
+            provider_streaming: self.provider_streaming.snapshot(),
+            local_tools: self.local_tools.snapshot(),
+            extension_hostcalls: self.extension_hostcalls.snapshot(),
+            tui_render: self.tui_render.snapshot(),
+            tui_content_build: self.tui_content_build.snapshot(),
+            tui_viewport_sync: self.tui_viewport_sync.snapshot(),
+            tui_update: self.tui_update.snapshot(),
         }
     }
 
@@ -378,7 +488,14 @@ impl SessionMetrics {
              Index upsert:     {}\n  \
              Index list:       {}\n  \
              Index reindex:    {}\n  \
-             Append:           {}",
+             Append:           {}\n  \
+             Provider stream:  {}\n  \
+             Local tools:      {}\n  \
+             Extension calls:  {}\n  \
+             TUI render:       {}\n  \
+             TUI content:      {}\n  \
+             TUI viewport:     {}\n  \
+             TUI update:       {}",
             s.jsonl_save,
             s.jsonl_serialize,
             s.jsonl_io,
@@ -395,6 +512,13 @@ impl SessionMetrics {
             s.index_list,
             s.index_reindex,
             s.append,
+            s.provider_streaming,
+            s.local_tools,
+            s.extension_hostcalls,
+            s.tui_render,
+            s.tui_content_build,
+            s.tui_viewport_sync,
+            s.tui_update,
         )
     }
 
@@ -404,6 +528,12 @@ impl SessionMetrics {
             tracing::debug!("{}", self.summary());
         }
     }
+
+    /// Produce a redaction-safe JSON-serializable tail-latency report for
+    /// operator handoff tools. The report contains timing counters only.
+    pub fn operator_tail_latency_report(&self) -> OperatorTailLatencyReport {
+        self.snapshot().operator_tail_latency_report()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +541,7 @@ impl SessionMetrics {
 // ---------------------------------------------------------------------------
 
 /// Complete point-in-time snapshot of all session metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MetricsSnapshot {
     pub enabled: bool,
     pub jsonl_save: TimingSnapshot,
@@ -430,6 +560,105 @@ pub struct MetricsSnapshot {
     pub index_list: TimingSnapshot,
     pub index_reindex: TimingSnapshot,
     pub append: TimingSnapshot,
+    pub provider_streaming: TimingSnapshot,
+    pub local_tools: TimingSnapshot,
+    pub extension_hostcalls: TimingSnapshot,
+    pub tui_render: TimingSnapshot,
+    pub tui_content_build: TimingSnapshot,
+    pub tui_viewport_sync: TimingSnapshot,
+    pub tui_update: TimingSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TailLatencyMetric {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub snapshot: TimingSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TailLatencyRedactionSummary {
+    pub redacted_count: u64,
+    pub fields: Vec<&'static str>,
+    pub policy: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OperatorTailLatencyReport {
+    pub schema: &'static str,
+    pub purpose: &'static str,
+    pub telemetry_enabled: bool,
+    pub sample_window: usize,
+    pub redaction_summary: TailLatencyRedactionSummary,
+    pub metrics: Vec<TailLatencyMetric>,
+}
+
+impl MetricsSnapshot {
+    pub fn operator_tail_latency_report(&self) -> OperatorTailLatencyReport {
+        OperatorTailLatencyReport {
+            schema: OPERATOR_TAIL_LATENCY_SCHEMA_V1,
+            purpose: "operator_observability_not_release_performance_claim",
+            telemetry_enabled: self.enabled,
+            sample_window: TIMING_SAMPLE_WINDOW,
+            redaction_summary: TailLatencyRedactionSummary {
+                redacted_count: 0,
+                fields: Vec::new(),
+                policy: "timing_only_no_prompt_or_tool_payload_fields",
+            },
+            metrics: vec![
+                TailLatencyMetric {
+                    id: "provider_streaming",
+                    label: "Provider streaming",
+                    snapshot: self.provider_streaming,
+                },
+                TailLatencyMetric {
+                    id: "local_tools",
+                    label: "Local tools",
+                    snapshot: self.local_tools,
+                },
+                TailLatencyMetric {
+                    id: "extension_hostcalls",
+                    label: "Extension hostcalls",
+                    snapshot: self.extension_hostcalls,
+                },
+                TailLatencyMetric {
+                    id: "session_append",
+                    label: "Session append",
+                    snapshot: self.append,
+                },
+                TailLatencyMetric {
+                    id: "session_index_upsert",
+                    label: "Session index upsert",
+                    snapshot: self.index_upsert,
+                },
+                TailLatencyMetric {
+                    id: "session_index_list",
+                    label: "Session index list",
+                    snapshot: self.index_list,
+                },
+                TailLatencyMetric {
+                    id: "tui_render",
+                    label: "TUI render",
+                    snapshot: self.tui_render,
+                },
+                TailLatencyMetric {
+                    id: "tui_content_build",
+                    label: "TUI content build",
+                    snapshot: self.tui_content_build,
+                },
+                TailLatencyMetric {
+                    id: "tui_viewport_sync",
+                    label: "TUI viewport sync",
+                    snapshot: self.tui_viewport_sync,
+                },
+                TailLatencyMetric {
+                    id: "tui_update",
+                    label: "TUI update",
+                    snapshot: self.tui_update,
+                },
+            ],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +762,10 @@ mod tests {
         assert_eq!(snap.total_us, 600);
         assert_eq!(snap.max_us, 300);
         assert_eq!(snap.avg_us, 200);
+        assert_eq!(snap.tail.sample_count, 3);
+        assert_eq!(snap.tail.p95_us, 300);
+        assert_eq!(snap.tail.p99_us, 300);
+        assert_eq!(snap.tail.p999_us, 300);
     }
 
     #[test]
@@ -554,6 +787,21 @@ mod tests {
         assert_eq!(snap.count, 0);
         assert_eq!(snap.total_us, 0);
         assert_eq!(snap.max_us, 0);
+        assert_eq!(snap.tail.sample_count, 0);
+    }
+
+    #[test]
+    fn timing_counter_keeps_bounded_tail_window() {
+        let counter = TimingCounter::new();
+        for i in 0..(TIMING_SAMPLE_WINDOW as u64 + 8) {
+            counter.record(i);
+        }
+        let snap = counter.snapshot();
+        assert_eq!(snap.count, TIMING_SAMPLE_WINDOW as u64 + 8);
+        assert_eq!(snap.tail.sample_count, TIMING_SAMPLE_WINDOW);
+        assert_eq!(snap.tail.sample_window, TIMING_SAMPLE_WINDOW);
+        assert!(snap.tail.p999_us <= snap.max_us);
+        assert!(snap.tail.p95_us >= 8);
     }
 
     #[test]
@@ -747,6 +995,41 @@ mod tests {
         assert!(summary.contains("Index list:"));
         assert!(summary.contains("Index reindex:"));
         assert!(summary.contains("Append:"));
+        assert!(summary.contains("Provider stream:"));
+        assert!(summary.contains("Local tools:"));
+        assert!(summary.contains("Extension calls:"));
+        assert!(summary.contains("TUI render:"));
+    }
+
+    #[test]
+    fn operator_tail_latency_report_is_redaction_safe_and_stable() {
+        let metrics = SessionMetrics::new();
+        metrics.enable();
+        metrics.provider_streaming.record(1_000);
+        metrics.local_tools.record(2_000);
+        metrics.extension_hostcalls.record(3_000);
+        metrics.tui_render.record(4_000);
+
+        let report = metrics.operator_tail_latency_report();
+        assert_eq!(report.schema, OPERATOR_TAIL_LATENCY_SCHEMA_V1);
+        assert_eq!(
+            report.purpose,
+            "operator_observability_not_release_performance_claim"
+        );
+        assert!(report.telemetry_enabled);
+        assert_eq!(report.sample_window, TIMING_SAMPLE_WINDOW);
+        assert_eq!(report.redaction_summary.redacted_count, 0);
+        assert_eq!(
+            report.redaction_summary.policy,
+            "timing_only_no_prompt_or_tool_payload_fields"
+        );
+        let metric_ids: Vec<&str> = report.metrics.iter().map(|metric| metric.id).collect();
+        assert!(metric_ids.contains(&"provider_streaming"));
+        assert!(metric_ids.contains(&"local_tools"));
+        assert!(metric_ids.contains(&"extension_hostcalls"));
+        assert!(metric_ids.contains(&"session_append"));
+        assert!(metric_ids.contains(&"session_index_upsert"));
+        assert!(metric_ids.contains(&"tui_render"));
     }
 
     #[test]
@@ -756,6 +1039,7 @@ mod tests {
             total_us: 0,
             max_us: 0,
             avg_us: 0,
+            tail: TailLatencySnapshot::empty(TIMING_SAMPLE_WINDOW),
         };
         assert_eq!(format!("{snap}"), "n=0");
     }
@@ -767,10 +1051,20 @@ mod tests {
             total_us: 6000,
             max_us: 3000,
             avg_us: 2000,
+            tail: TailLatencySnapshot {
+                sample_window: TIMING_SAMPLE_WINDOW,
+                sample_count: 3,
+                p95_us: 3000,
+                p99_us: 3000,
+                p999_us: 3000,
+            },
         };
         let display = format!("{snap}");
         assert!(display.contains("n=3"));
         assert!(display.contains("avg=2.0ms"));
+        assert!(display.contains("p95=3.0ms"));
+        assert!(display.contains("p99=3.0ms"));
+        assert!(display.contains("p999=3.0ms"));
         assert!(display.contains("max=3.0ms"));
         assert!(display.contains("total=6.0ms"));
     }
@@ -952,6 +1246,7 @@ mod tests {
                     total_us: 0,
                     max_us: 0,
                     avg_us: 0,
+                    tail: TailLatencySnapshot::empty(TIMING_SAMPLE_WINDOW),
                 };
                 assert_eq!(format!("{snap}"), "n=0");
             }
@@ -968,6 +1263,13 @@ mod tests {
                     total_us,
                     max_us,
                     avg_us: total_us / count,
+                    tail: TailLatencySnapshot {
+                        sample_window: TIMING_SAMPLE_WINDOW,
+                        sample_count: 1,
+                        p95_us: max_us,
+                        p99_us: max_us,
+                        p999_us: max_us,
+                    },
                 };
                 let display = format!("{snap}");
                 assert!(display.contains(&format!("n={count}")));

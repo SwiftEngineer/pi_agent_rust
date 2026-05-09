@@ -259,6 +259,10 @@ fn json_parity_turn_end_latency_breakdown_schema() {
         breakdown["providerStreaming"]["tailPercentiles"]["p99Ms"],
         90
     );
+    assert_eq!(
+        breakdown["providerStreaming"]["tailPercentiles"]["p999Ms"],
+        90
+    );
     assert_eq!(breakdown["localTools"]["durationMs"], 45);
     assert_eq!(breakdown["extensionHostcalls"]["samples"], 1);
     assert_eq!(breakdown["persistence"]["durationMs"], 15);
