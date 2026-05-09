@@ -142,6 +142,7 @@
   "operator_next_actions": [
     "Review stale in-progress Beads before assigning more work",
     "Treat cargo/RCH admission as blocked or degraded before heavy builds",
+    "Back off heavy cargo validation until the RCH queue forecast recovers",
     "Use activity-digest saturation evidence to narrow or redirect the swarm",
     "Account for dirty files before using the runpack as handoff evidence"
   ],
@@ -151,7 +152,21 @@
     "cargo_target_dir": "/data/tmp/pi_agent_rust_cargo/test/target",
     "command_class": "heavy",
     "decision": "backoff",
-    "reason": "rch_unavailable",
+    "queue_forecast": {
+      "active_builds": 8,
+      "estimated_wait_seconds": 240,
+      "queue_depth": 4,
+      "queued_builds": 4,
+      "reason": "queue_saturated",
+      "recommended_action": "backoff",
+      "slot_pressure": "saturated",
+      "slots_available": 0,
+      "slots_total": 8,
+      "status": "ok",
+      "workers_healthy": 1,
+      "workers_total": 8
+    },
+    "reason": "rch_queue_saturated",
     "requested_runner": "auto",
     "resolved_runner": "none",
     "status": "ok",
@@ -229,7 +244,7 @@
       "path": "[WORKSPACE]/cargo.json",
       "schema": "pi.cargo_headroom.admission.v1",
       "sha256": "[SHA256]",
-      "size_bytes": 346,
+      "size_bytes": 764,
       "status": "ok"
     },
     {

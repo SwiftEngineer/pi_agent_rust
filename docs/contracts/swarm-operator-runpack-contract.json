@@ -34,6 +34,7 @@
     "beads.stale",
     "agent_mail.build_slots",
     "rch_admission.decision",
+    "rch_admission.queue_forecast.recommended_action",
     "evidence_readiness.overall_status",
     "git_state.dirty",
     "activity_digest.evidence_pointers",
@@ -52,6 +53,7 @@
   "required_next_action_fragments": [
     "Review stale in-progress Beads",
     "Treat cargo/RCH admission",
+    "Back off heavy cargo validation",
     "Use activity-digest saturation evidence",
     "Account for dirty files"
   ],

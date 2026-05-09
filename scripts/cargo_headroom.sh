@@ -45,6 +45,7 @@ die() {
 RUNNER="${PI_CARGO_RUNNER:-rch}"
 MIN_FREE_MB="${PI_CARGO_HEADROOM_MIN_FREE_MB:-24576}"
 MIN_INODE_FREE_PCT="${PI_CARGO_HEADROOM_MIN_FREE_INODE_PCT:-5}"
+RCH_QUEUE_FORECAST_MAX_AGE_SECS="${PI_RCH_QUEUE_FORECAST_MAX_AGE_SECS:-120}"
 DEFAULT_BUILD_ROOT="/data/tmp/pi_agent_rust"
 if [[ -e "$DEFAULT_BUILD_ROOT" ]]; then
     if DEFAULT_BUILD_ROOT_REAL="$(cd "$DEFAULT_BUILD_ROOT" && pwd -P 2>/dev/null)"; then
@@ -189,6 +190,12 @@ json_escape() {
     printf '%s' "$value"
 }
 
+forecast_not_checked() {
+    printf '{"schema":"pi.cargo_headroom.rch_queue_forecast.v1","status":"not_checked","recommended_action":"run","reason":"not_checked","slot_pressure":"unknown","queue_depth":null,"active_builds":null,"queued_builds":null,"slots_available":null,"slots_total":null,"workers_healthy":null,"workers_total":null,"estimated_wait_seconds":null}'
+}
+
+RCH_QUEUE_FORECAST_JSON="$(forecast_not_checked)"
+
 cargo_command_string() {
     local out="" arg
     for arg in "$@"; do
@@ -198,6 +205,23 @@ cargo_command_string() {
         out+="$arg"
     done
     printf '%s' "$out"
+}
+
+json_field() {
+    local json="$1"
+    local field="$2"
+    RCH_JSON="$json" RCH_FIELD="$field" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ["RCH_JSON"])
+except json.JSONDecodeError:
+    print("")
+else:
+    value = payload.get(os.environ["RCH_FIELD"])
+    print("" if value is None else value)
+PY
 }
 
 is_safe_local_command() {
@@ -210,6 +234,180 @@ is_safe_local_command() {
     esac
 
     return 1
+}
+
+build_rch_queue_forecast() {
+    if ! command -v rch >/dev/null 2>&1; then
+        printf '{"schema":"pi.cargo_headroom.rch_queue_forecast.v1","status":"unavailable","recommended_action":"backoff","reason":"rch_not_found","slot_pressure":"unknown","queue_depth":null,"active_builds":null,"queued_builds":null,"slots_available":null,"slots_total":null,"workers_healthy":null,"workers_total":null,"estimated_wait_seconds":null}'
+        return 0
+    fi
+
+    local raw
+    if ! raw="$(rch queue --json 2>&1)"; then
+        RCH_QUEUE_RAW="$raw" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+    "status": "unavailable",
+    "recommended_action": "backoff",
+    "reason": "queue_command_failed",
+    "slot_pressure": "unknown",
+    "queue_depth": None,
+    "active_builds": None,
+    "queued_builds": None,
+    "slots_available": None,
+    "slots_total": None,
+    "workers_healthy": None,
+    "workers_total": None,
+    "estimated_wait_seconds": None,
+    "detail": os.environ.get("RCH_QUEUE_RAW", "")[-240:],
+}, sort_keys=True, separators=(",", ":")))
+PY
+        return 0
+    fi
+
+    RCH_QUEUE_RAW="$raw" RCH_QUEUE_FORECAST_MAX_AGE_SECS="$RCH_QUEUE_FORECAST_MAX_AGE_SECS" python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import os
+from datetime import datetime, timezone
+
+
+def to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_timestamp(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc)
+    text = str(value)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+raw = os.environ.get("RCH_QUEUE_RAW", "")
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError as exc:
+    print(json.dumps({
+        "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+        "status": "malformed",
+        "recommended_action": "backoff",
+        "reason": "queue_json_malformed",
+        "slot_pressure": "unknown",
+        "queue_depth": None,
+        "active_builds": None,
+        "queued_builds": None,
+        "slots_available": None,
+        "slots_total": None,
+        "workers_healthy": None,
+        "workers_total": None,
+        "estimated_wait_seconds": None,
+        "detail": str(exc),
+    }, sort_keys=True, separators=(",", ":")))
+    raise SystemExit
+
+data = payload.get("data") if isinstance(payload, dict) else None
+if not isinstance(data, dict):
+    print(json.dumps({
+        "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+        "status": "malformed",
+        "recommended_action": "backoff",
+        "reason": "queue_json_missing_data",
+        "slot_pressure": "unknown",
+        "queue_depth": None,
+        "active_builds": None,
+        "queued_builds": None,
+        "slots_available": None,
+        "slots_total": None,
+        "workers_healthy": None,
+        "workers_total": None,
+        "estimated_wait_seconds": None,
+    }, sort_keys=True, separators=(",", ":")))
+    raise SystemExit
+
+active = data.get("active_builds") if isinstance(data.get("active_builds"), list) else []
+queued = data.get("queued_builds") if isinstance(data.get("queued_builds"), list) else []
+queue_depth = to_int(data.get("queue_depth"))
+if queue_depth is None:
+    queue_depth = len(queued)
+queued_builds = len(queued)
+active_builds = len(active)
+slots_available = to_int(data.get("slots_available"))
+slots_total = to_int(data.get("slots_total"))
+workers_healthy = to_int(data.get("workers_healthy"))
+workers_total = to_int(data.get("workers_total"))
+timestamp = parse_timestamp(data.get("timestamp") or payload.get("timestamp"))
+max_age = to_int(os.environ.get("RCH_QUEUE_FORECAST_MAX_AGE_SECS")) or 120
+
+if timestamp is None:
+    status = "malformed"
+    reason = "queue_timestamp_missing"
+elif (datetime.now(timezone.utc) - timestamp).total_seconds() > max_age:
+    status = "stale"
+    reason = "queue_snapshot_stale"
+else:
+    status = "ok"
+    reason = "queue_snapshot_ok"
+
+slot_pressure = "unknown"
+if slots_total and slots_total > 0 and slots_available is not None:
+    used = max(0, slots_total - slots_available)
+    ratio = used / slots_total
+    if slots_available <= 0 and queue_depth > 0:
+        slot_pressure = "saturated"
+    elif ratio >= 0.90:
+        slot_pressure = "saturated"
+    elif ratio >= 0.75:
+        slot_pressure = "high"
+    elif ratio >= 0.50:
+        slot_pressure = "moderate"
+    else:
+        slot_pressure = "low"
+
+if status != "ok":
+    recommended_action = "backoff"
+elif slot_pressure == "saturated" and queue_depth > 0:
+    recommended_action = "backoff"
+    reason = "queue_saturated"
+elif queue_depth > 0 or slot_pressure in {"high", "moderate"}:
+    recommended_action = "split"
+    reason = "queue_pressure"
+else:
+    recommended_action = "run"
+
+estimated_wait_seconds = 0
+if queue_depth > 0:
+    available = slots_available if slots_available and slots_available > 0 else 1
+    estimated_wait_seconds = int(max(60, math.ceil(queue_depth / available) * 60))
+
+print(json.dumps({
+    "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+    "status": status,
+    "recommended_action": recommended_action,
+    "reason": reason,
+    "slot_pressure": slot_pressure,
+    "queue_depth": queue_depth,
+    "active_builds": active_builds,
+    "queued_builds": queued_builds,
+    "slots_available": slots_available,
+    "slots_total": slots_total,
+    "workers_healthy": workers_healthy,
+    "workers_total": workers_total,
+    "estimated_wait_seconds": estimated_wait_seconds,
+}, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 emit_admission_decision() {
@@ -226,7 +424,7 @@ emit_admission_decision() {
     recommended_tmpdir="$BUILD_ROOT/$(safe_agent_suffix)/tmp"
     target_remediation="Set CARGO_TARGET_DIR or pass --target-dir to an off-repo scratch path such as $recommended_target_dir; current CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
     tmpdir_remediation="Set TMPDIR or pass --tmpdir to an off-repo scratch path such as $recommended_tmpdir; current TMPDIR=$TMPDIR"
-    json="{\"schema\":\"pi.cargo_headroom.admission.v1\",\"decision\":\"$(json_escape "$decision")\",\"requested_runner\":\"$(json_escape "$RUNNER")\",\"resolved_runner\":\"$(json_escape "$resolved_runner")\",\"reason\":\"$(json_escape "$reason")\",\"command_class\":\"$(json_escape "$command_class")\",\"allow_local_fallback\":$(if [[ "$ALLOW_LOCAL_FALLBACK" == "1" ]]; then echo true; else echo false; fi),\"cargo_target_dir\":\"$(json_escape "$CARGO_TARGET_DIR")\",\"tmpdir\":\"$(json_escape "$TMPDIR")\",\"recommended_cargo_target_dir\":\"$(json_escape "$recommended_target_dir")\",\"recommended_tmpdir\":\"$(json_escape "$recommended_tmpdir")\",\"storage_remediation\":{\"cargo_target_dir\":\"$(json_escape "$target_remediation")\",\"tmpdir\":\"$(json_escape "$tmpdir_remediation")\"},\"cargo_command\":\"$(json_escape "$command_text")\",\"rch_detail\":\"$(json_escape "$rch_detail")\"}"
+    json="{\"schema\":\"pi.cargo_headroom.admission.v1\",\"decision\":\"$(json_escape "$decision")\",\"requested_runner\":\"$(json_escape "$RUNNER")\",\"resolved_runner\":\"$(json_escape "$resolved_runner")\",\"reason\":\"$(json_escape "$reason")\",\"command_class\":\"$(json_escape "$command_class")\",\"allow_local_fallback\":$(if [[ "$ALLOW_LOCAL_FALLBACK" == "1" ]]; then echo true; else echo false; fi),\"cargo_target_dir\":\"$(json_escape "$CARGO_TARGET_DIR")\",\"tmpdir\":\"$(json_escape "$TMPDIR")\",\"recommended_cargo_target_dir\":\"$(json_escape "$recommended_target_dir")\",\"recommended_tmpdir\":\"$(json_escape "$recommended_tmpdir")\",\"storage_remediation\":{\"cargo_target_dir\":\"$(json_escape "$target_remediation")\",\"tmpdir\":\"$(json_escape "$tmpdir_remediation")\"},\"cargo_command\":\"$(json_escape "$command_text")\",\"rch_detail\":\"$(json_escape "$rch_detail")\",\"rch_queue_forecast\":$RCH_QUEUE_FORECAST_JSON}"
 
     echo "$json"
     if [[ -n "$DECISION_JSON_PATH" ]]; then
@@ -369,11 +567,18 @@ COMMAND_CLASS="heavy"
 if is_safe_local_command "$@"; then
     COMMAND_CLASS="safe_local"
 fi
+RCH_QUEUE_FORECAST_JSON="$(build_rch_queue_forecast)"
+RCH_QUEUE_FORECAST_ACTION="$(json_field "$RCH_QUEUE_FORECAST_JSON" recommended_action)"
+RCH_QUEUE_FORECAST_REASON="$(json_field "$RCH_QUEUE_FORECAST_JSON" reason)"
 
 case "$RUNNER" in
     rch)
         if ! check_rch_health; then
             emit_admission_decision "backoff" "none" "rch_unavailable" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
+            exit 2
+        fi
+        if [[ "$COMMAND_CLASS" == "heavy" && "$RCH_QUEUE_FORECAST_ACTION" == "backoff" ]]; then
+            emit_admission_decision "backoff" "none" "rch_${RCH_QUEUE_FORECAST_REASON}" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
             exit 2
         fi
         emit_admission_decision "allow" "rch" "rch_available" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
@@ -384,6 +589,10 @@ case "$RUNNER" in
         ;;
     auto)
         if check_rch_health; then
+            if [[ "$COMMAND_CLASS" == "heavy" && "$RCH_QUEUE_FORECAST_ACTION" == "backoff" ]]; then
+                emit_admission_decision "backoff" "none" "rch_${RCH_QUEUE_FORECAST_REASON}" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
+                exit 2
+            fi
             emit_admission_decision "allow" "rch" "rch_available" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
             if (( ADMIT_ONLY == 1 )); then
                 exit 0

@@ -464,6 +464,8 @@ def summarize_cargo_admission(source: SourcePayload) -> dict[str, Any]:
     payload = source.payload
     if not isinstance(payload, dict):
         return {"status": source.status}
+    forecast = payload.get("rch_queue_forecast")
+    queue_forecast = forecast if isinstance(forecast, dict) else {}
     return {
         "status": source.status,
         "decision": payload.get("decision"),
@@ -475,6 +477,20 @@ def summarize_cargo_admission(source: SourcePayload) -> dict[str, Any]:
         "cargo_target_dir": payload.get("cargo_target_dir"),
         "tmpdir": payload.get("tmpdir"),
         "storage_remediation": payload.get("storage_remediation"),
+        "queue_forecast": {
+            "status": queue_forecast.get("status"),
+            "recommended_action": queue_forecast.get("recommended_action"),
+            "reason": queue_forecast.get("reason"),
+            "slot_pressure": queue_forecast.get("slot_pressure"),
+            "queue_depth": queue_forecast.get("queue_depth"),
+            "active_builds": queue_forecast.get("active_builds"),
+            "queued_builds": queue_forecast.get("queued_builds"),
+            "slots_available": queue_forecast.get("slots_available"),
+            "slots_total": queue_forecast.get("slots_total"),
+            "workers_healthy": queue_forecast.get("workers_healthy"),
+            "workers_total": queue_forecast.get("workers_total"),
+            "estimated_wait_seconds": queue_forecast.get("estimated_wait_seconds"),
+        },
     }
 
 
@@ -574,6 +590,11 @@ def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
         actions.append("Review stale in-progress Beads before assigning more work")
     if runpack["rch_admission"].get("decision") in {"backoff", "degraded", "deny"}:
         actions.append("Treat cargo/RCH admission as blocked or degraded before heavy builds")
+    forecast_action = runpack["rch_admission"].get("queue_forecast", {}).get("recommended_action")
+    if forecast_action == "split":
+        actions.append("Split heavy cargo validation based on RCH queue forecast pressure")
+    elif forecast_action == "backoff":
+        actions.append("Back off heavy cargo validation until the RCH queue forecast recovers")
     if runpack["activity_digest"].get("saturated"):
         actions.append("Use activity-digest saturation evidence to narrow or redirect the swarm")
     if runpack["git_state"].get("dirty"):
@@ -605,6 +626,7 @@ def render_markdown(runpack: dict[str, Any]) -> str:
     lines.append(f"- Doctor swarm overall: `{runpack['doctor_swarm'].get('overall')}`")
     lines.append(f"- Beads active/stale: `{runpack['beads'].get('active_count')}` active, `{len(runpack['beads'].get('stale') or [])}` stale")
     lines.append(f"- RCH admission: `{runpack['rch_admission'].get('decision')}`")
+    lines.append(f"- RCH queue forecast: `{runpack['rch_admission'].get('queue_forecast', {}).get('recommended_action')}`")
     lines.append(f"- Evidence readiness: `{runpack['evidence_readiness'].get('overall_status')}`")
     lines.append(f"- Git dirty: `{runpack['git_state'].get('dirty')}`")
     lines.append(f"- Activity saturated: `{runpack['activity_digest'].get('saturated')}`")
@@ -807,13 +829,28 @@ def run_self_test() -> int:
         {
             "schema": "pi.cargo_headroom.admission.v1",
             "decision": "backoff",
-            "reason": "rch_unavailable",
+            "reason": "rch_queue_saturated",
             "requested_runner": "auto",
             "resolved_runner": "none",
             "command_class": "heavy",
             "allow_local_fallback": False,
             "cargo_target_dir": "/data/tmp/pi_agent_rust_cargo/test/target",
             "tmpdir": "/data/tmp/pi_agent_rust_cargo/test/tmp",
+            "rch_queue_forecast": {
+                "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+                "status": "ok",
+                "recommended_action": "backoff",
+                "reason": "queue_saturated",
+                "slot_pressure": "saturated",
+                "queue_depth": 4,
+                "active_builds": 8,
+                "queued_builds": 4,
+                "slots_available": 0,
+                "slots_total": 8,
+                "workers_healthy": 1,
+                "workers_total": 8,
+                "estimated_wait_seconds": 240,
+            },
         },
     )
     beads_path = write_json(
@@ -860,6 +897,7 @@ def run_self_test() -> int:
         assert runpack["status"] == "degraded"
         assert runpack["agent_mail"]["build_slots"]["data"]["active"] == 1
         assert runpack["beads"]["stale"][0]["id"] == "bd-stale"
+        assert runpack["rch_admission"]["queue_forecast"]["recommended_action"] == "backoff"
         assert runpack["activity_digest"]["saturated"] is True
         assert runpack["git_state"]["dirty"] is True
         assert runpack["smoke_harness"]["artifact_manifest"][0]["sha256"] == "a" * 64

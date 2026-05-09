@@ -50,9 +50,33 @@ fn decision_from_stdout(output: &Output) -> Value {
     serde_json::from_str(line).expect("admission JSON should parse")
 }
 
-fn write_mock_rch(dir: &Path, body: &str) {
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn write_mock_rch(
+    dir: &Path,
+    check_status: i32,
+    check_stderr: &str,
+    queue_status: i32,
+    queue_stdout: &str,
+) {
     std::fs::create_dir_all(dir).expect("mock rch dir should be created");
     let path = dir.join("rch");
+    let body = format!(
+        "#!/usr/bin/env bash\n\
+if [[ \"$1\" == \"check\" ]]; then\n\
+    printf '%s\\n' {} >&2\n\
+    exit {check_status}\n\
+fi\n\
+if [[ \"$1\" == \"queue\" ]]; then\n\
+    printf '%s\\n' {}\n\
+    exit {queue_status}\n\
+fi\n\
+exit 1\n",
+        shell_single_quote(check_stderr),
+        shell_single_quote(queue_stdout)
+    );
     std::fs::write(&path, body).expect("mock rch script should be written");
     let mut permissions = std::fs::metadata(&path)
         .expect("mock rch metadata should be readable")
@@ -68,11 +92,25 @@ enum PathMode {
     MockRch,
 }
 
+const fn default_mock_rch_check_status() -> i32 {
+    1
+}
+
+const fn default_mock_rch_queue_status() -> i32 {
+    1
+}
+
 #[derive(Debug, Deserialize)]
 struct AdmissionFixture {
     name: String,
     path_mode: PathMode,
     mock_rch_stderr: Option<String>,
+    #[serde(default = "default_mock_rch_check_status")]
+    mock_rch_check_status: i32,
+    #[serde(default = "default_mock_rch_queue_status")]
+    mock_rch_queue_status: i32,
+    #[serde(default)]
+    mock_rch_queue_stdout: Option<String>,
     args: Vec<String>,
     expected_status: i32,
     expected_decision: String,
@@ -81,6 +119,9 @@ struct AdmissionFixture {
     expected_resolved_runner: String,
     expected_rch_detail: String,
     expected_allow_local_fallback: bool,
+    expected_forecast_status: String,
+    expected_forecast_recommended_action: String,
+    expected_forecast_slot_pressure: String,
 }
 
 fn admission_fixtures() -> Vec<AdmissionFixture> {
@@ -90,6 +131,32 @@ fn admission_fixtures() -> Vec<AdmissionFixture> {
     serde_json::from_str(&content).expect("admission fixture file should parse")
 }
 
+fn assert_forecast_matches_fixture(decision: &Value, fixture: &AdmissionFixture) {
+    let forecast = &decision["rch_queue_forecast"];
+    assert_eq!(
+        forecast["schema"].as_str(),
+        Some("pi.cargo_headroom.rch_queue_forecast.v1")
+    );
+    assert_eq!(
+        forecast["status"].as_str(),
+        Some(fixture.expected_forecast_status.as_str()),
+        "{} forecast status mismatch: {forecast}",
+        fixture.name
+    );
+    assert_eq!(
+        forecast["recommended_action"].as_str(),
+        Some(fixture.expected_forecast_recommended_action.as_str()),
+        "{} forecast recommended action mismatch: {forecast}",
+        fixture.name
+    );
+    assert_eq!(
+        forecast["slot_pressure"].as_str(),
+        Some(fixture.expected_forecast_slot_pressure.as_str()),
+        "{} forecast slot pressure mismatch: {forecast}",
+        fixture.name
+    );
+}
+
 #[test]
 fn fixture_matrix_keeps_rch_admission_decisions_stable() {
     for fixture in admission_fixtures() {
@@ -97,16 +164,12 @@ fn fixture_matrix_keeps_rch_admission_decisions_stable() {
         let path = match fixture.path_mode {
             PathMode::WithoutRch => "/usr/bin:/bin".to_string(),
             PathMode::MockRch => {
-                let stderr = fixture
-                    .mock_rch_stderr
-                    .as_deref()
-                    .expect("mock_rch fixtures must provide stderr");
                 write_mock_rch(
                     &mock_dir,
-                    &format!(
-                        "#!/usr/bin/env bash\nif [[ \"$1\" == \"check\" ]]; then\n    echo \"{}\" >&2\n    exit 1\nfi\nexit 1\n",
-                        stderr.replace('\\', "\\\\").replace('"', "\\\"")
-                    ),
+                    fixture.mock_rch_check_status,
+                    fixture.mock_rch_stderr.as_deref().unwrap_or(""),
+                    fixture.mock_rch_queue_status,
+                    fixture.mock_rch_queue_stdout.as_deref().unwrap_or(""),
                 );
                 format!("{}:/usr/bin:/bin", mock_dir.display())
             }
@@ -137,6 +200,7 @@ fn fixture_matrix_keeps_rch_admission_decisions_stable() {
             decision["allow_local_fallback"],
             fixture.expected_allow_local_fallback
         );
+        assert_forecast_matches_fixture(&decision, &fixture);
 
         let cargo_target_dir = decision["cargo_target_dir"]
             .as_str()
@@ -209,6 +273,11 @@ fn auto_runner_backs_off_heavy_command_when_rch_is_missing() {
     assert_eq!(decision["reason"], "rch_unavailable");
     assert_eq!(decision["command_class"], "heavy");
     assert_eq!(decision["resolved_runner"], "none");
+    assert_eq!(decision["rch_queue_forecast"]["status"], "unavailable");
+    assert_eq!(
+        decision["rch_queue_forecast"]["recommended_action"],
+        "backoff"
+    );
 }
 
 #[test]
@@ -225,6 +294,7 @@ fn auto_runner_allows_safe_local_command_when_rch_is_missing() {
     assert_eq!(decision["reason"], "safe_local_command");
     assert_eq!(decision["command_class"], "safe_local");
     assert_eq!(decision["resolved_runner"], "local");
+    assert_eq!(decision["rch_queue_forecast"]["status"], "unavailable");
 }
 
 #[test]
@@ -247,21 +317,13 @@ fn auto_runner_requires_explicit_local_fallback_for_heavy_command() {
     assert_eq!(decision["reason"], "explicit_local_fallback");
     assert_eq!(decision["allow_local_fallback"], true);
     assert_eq!(decision["resolved_runner"], "local");
+    assert_eq!(decision["rch_queue_forecast"]["status"], "unavailable");
 }
 
 #[test]
 fn auto_runner_reports_saturated_rch_check_detail() {
     let mock_dir = case_dir("saturated-rch").join("bin");
-    write_mock_rch(
-        &mock_dir,
-        r#"#!/usr/bin/env bash
-if [[ "$1" == "check" ]]; then
-    echo "queue saturated" >&2
-    exit 1
-fi
-exit 1
-"#,
-    );
+    write_mock_rch(&mock_dir, 1, "queue saturated", 1, "");
     let path = format!("{}:/usr/bin:/bin", mock_dir.display());
     let output = run_admission(
         "saturated-rch",
@@ -274,6 +336,7 @@ exit 1
     assert_eq!(decision["decision"], "backoff");
     assert_eq!(decision["reason"], "rch_unavailable");
     assert_eq!(decision["rch_detail"], "queue saturated");
+    assert_eq!(decision["rch_queue_forecast"]["status"], "unavailable");
 }
 
 #[test]

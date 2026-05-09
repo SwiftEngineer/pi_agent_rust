@@ -1,16 +1,98 @@
 [
   {
+    "name": "healthy_queue_run",
+    "path_mode": "mock_rch",
+    "mock_rch_stderr": "",
+    "mock_rch_check_status": 0,
+    "mock_rch_queue_status": 0,
+    "mock_rch_queue_stdout": "{\"data\":{\"timestamp\":\"2099-01-01T00:00:00+00:00\",\"queue_depth\":0,\"queued_builds\":[],\"active_builds\":[],\"slots_available\":8,\"slots_total\":8,\"workers_healthy\":2,\"workers_total\":2}}",
+    "args": ["--runner", "auto", "test", "--all-targets"],
+    "expected_status": 0,
+    "expected_decision": "allow",
+    "expected_reason": "rch_available",
+    "expected_command_class": "heavy",
+    "expected_resolved_runner": "rch",
+    "expected_rch_detail": "rch_check_ok",
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "ok",
+    "expected_forecast_recommended_action": "run",
+    "expected_forecast_slot_pressure": "low"
+  },
+  {
+    "name": "queue_pressure_split",
+    "path_mode": "mock_rch",
+    "mock_rch_stderr": "",
+    "mock_rch_check_status": 0,
+    "mock_rch_queue_status": 0,
+    "mock_rch_queue_stdout": "{\"data\":{\"timestamp\":\"2099-01-01T00:00:00+00:00\",\"queue_depth\":2,\"queued_builds\":[{},{}],\"active_builds\":[{},{}],\"slots_available\":2,\"slots_total\":8,\"workers_healthy\":2,\"workers_total\":2}}",
+    "args": ["--runner", "auto", "test", "--all-targets"],
+    "expected_status": 0,
+    "expected_decision": "allow",
+    "expected_reason": "rch_available",
+    "expected_command_class": "heavy",
+    "expected_resolved_runner": "rch",
+    "expected_rch_detail": "rch_check_ok",
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "ok",
+    "expected_forecast_recommended_action": "split",
+    "expected_forecast_slot_pressure": "high"
+  },
+  {
     "name": "queue_saturated",
     "path_mode": "mock_rch",
-    "mock_rch_stderr": "queue saturated",
+    "mock_rch_stderr": "",
+    "mock_rch_check_status": 0,
+    "mock_rch_queue_status": 0,
+    "mock_rch_queue_stdout": "{\"data\":{\"timestamp\":\"2099-01-01T00:00:00+00:00\",\"queue_depth\":4,\"queued_builds\":[{},{},{},{}],\"active_builds\":[{},{}],\"slots_available\":0,\"slots_total\":8,\"workers_healthy\":2,\"workers_total\":2}}",
     "args": ["--runner", "auto", "test", "--all-targets"],
     "expected_status": 2,
     "expected_decision": "backoff",
-    "expected_reason": "rch_unavailable",
+    "expected_reason": "rch_queue_saturated",
     "expected_command_class": "heavy",
     "expected_resolved_runner": "none",
-    "expected_rch_detail": "queue saturated",
-    "expected_allow_local_fallback": false
+    "expected_rch_detail": "rch_check_ok",
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "ok",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "saturated"
+  },
+  {
+    "name": "stale_queue_snapshot",
+    "path_mode": "mock_rch",
+    "mock_rch_stderr": "",
+    "mock_rch_check_status": 0,
+    "mock_rch_queue_status": 0,
+    "mock_rch_queue_stdout": "{\"data\":{\"timestamp\":\"2000-01-01T00:00:00+00:00\",\"queue_depth\":0,\"queued_builds\":[],\"active_builds\":[],\"slots_available\":8,\"slots_total\":8,\"workers_healthy\":2,\"workers_total\":2}}",
+    "args": ["--runner", "auto", "test", "--all-targets"],
+    "expected_status": 2,
+    "expected_decision": "backoff",
+    "expected_reason": "rch_queue_snapshot_stale",
+    "expected_command_class": "heavy",
+    "expected_resolved_runner": "none",
+    "expected_rch_detail": "rch_check_ok",
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "stale",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "low"
+  },
+  {
+    "name": "malformed_queue_json",
+    "path_mode": "mock_rch",
+    "mock_rch_stderr": "",
+    "mock_rch_check_status": 0,
+    "mock_rch_queue_status": 0,
+    "mock_rch_queue_stdout": "{not valid json",
+    "args": ["--runner", "auto", "test", "--all-targets"],
+    "expected_status": 2,
+    "expected_decision": "backoff",
+    "expected_reason": "rch_queue_json_malformed",
+    "expected_command_class": "heavy",
+    "expected_resolved_runner": "none",
+    "expected_rch_detail": "rch_check_ok",
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "malformed",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "unknown"
   },
   {
     "name": "no_workers",
@@ -23,7 +105,10 @@
     "expected_command_class": "heavy",
     "expected_resolved_runner": "none",
     "expected_rch_detail": "no workers available",
-    "expected_allow_local_fallback": false
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "unavailable",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "unknown"
   },
   {
     "name": "local_fallback_blocked",
@@ -36,7 +121,10 @@
     "expected_command_class": "heavy",
     "expected_resolved_runner": "none",
     "expected_rch_detail": "rch_not_found",
-    "expected_allow_local_fallback": false
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "unavailable",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "unknown"
   },
   {
     "name": "safe_narrow_local_command",
@@ -49,6 +137,9 @@
     "expected_command_class": "safe_local",
     "expected_resolved_runner": "local",
     "expected_rch_detail": "rch_not_found",
-    "expected_allow_local_fallback": false
+    "expected_allow_local_fallback": false,
+    "expected_forecast_status": "unavailable",
+    "expected_forecast_recommended_action": "backoff",
+    "expected_forecast_slot_pressure": "unknown"
   }
 ]
