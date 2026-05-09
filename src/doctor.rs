@@ -18,7 +18,7 @@ use crate::session::SessionHeader;
 use crate::session_index::walk_sessions;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -36,6 +36,7 @@ const SWARM_DOCTOR_RCH_FAILURE_SCHEMA: &str = "pi.doctor.rch_failure.v1";
 const SWARM_DOCTOR_TEMP_DIR_SCHEMA: &str = "pi.doctor.swarm_temp_dir.v1";
 const SWARM_DOCTOR_BUILD_SLOT_SCHEMA: &str = "pi.doctor.agent_mail_build_slots.v1";
 const SWARM_DOCTOR_CONTACTS_SCHEMA: &str = "pi.doctor.agent_mail_contacts.v1";
+const SWARM_DOCTOR_STALLED_REAPER_SCHEMA: &str = "pi.doctor.stalled_bead_reaper.v1";
 const SWARM_CARGO_SCRATCH_ROOT: &str = "/data/tmp/pi_agent_rust_cargo";
 const SWARM_BUILD_SLOT_SOON_EXPIRING_MINUTES: i64 = 30;
 const MIB_BYTES: u64 = 1024 * 1024;
@@ -1094,6 +1095,7 @@ fn check_swarm(cwd: &Path, findings: &mut Vec<Finding>) {
     check_swarm_live_admission(cwd, findings);
     check_swarm_br_status(cwd, findings);
     check_swarm_agent_mail(cwd, findings);
+    check_swarm_stalled_bead_reaper(cwd, findings);
     check_swarm_git(cwd, findings);
     check_swarm_rch(findings);
     check_swarm_temp_dirs(findings);
@@ -1117,13 +1119,27 @@ struct StaleIssue {
     age_hours: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct BeadsIssueRecord {
     id: String,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
     status: String,
     updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentMailActivity {
+    last_active_ts: String,
+    age_hours: i64,
 }
 
 fn check_swarm_beads(cwd: &Path, findings: &mut Vec<Finding>) {
@@ -1177,6 +1193,77 @@ fn check_swarm_beads(cwd: &Path, findings: &mut Vec<Finding>) {
                 .with_detail(format_stale_issues(&summary.stale_in_progress))
                 .with_remediation("Use Agent Mail to contact owners; only reset a bead after confirming the owner is stale"),
         );
+    }
+}
+
+fn check_swarm_stalled_bead_reaper(cwd: &Path, findings: &mut Vec<Finding>) {
+    let cat = CheckCategory::Swarm;
+    let ledger_path = cwd.join(".beads/issues.jsonl");
+    let content = match std::fs::read_to_string(&ledger_path) {
+        Ok(content) => content,
+        Err(err) => {
+            findings.push(
+                Finding::warn(cat, "Stalled bead reaper audit unavailable")
+                    .with_detail(format!("{}: {err}", ledger_path.display()))
+                    .with_remediation(
+                        "Run `br list --status=in_progress --json` manually before resetting beads",
+                    ),
+            );
+            return;
+        }
+    };
+
+    let (agent_roster, agent_roster_error) = read_agent_mail_agents_roster(cwd);
+    let finding = classify_stalled_bead_reaper(
+        &content,
+        agent_roster.as_ref(),
+        agent_roster_error.as_deref(),
+        Utc::now(),
+        SWARM_STALE_IN_PROGRESS_HOURS,
+    );
+    findings.push(finding);
+}
+
+fn read_agent_mail_agents_roster(cwd: &Path) -> (Option<serde_json::Value>, Option<String>) {
+    if which_tool("am").is_none() {
+        return (None, Some("Agent Mail CLI not found".to_string()));
+    }
+
+    let project = cwd.display().to_string();
+    let args = [
+        "robot",
+        "agents",
+        "--format",
+        "json",
+        "--project",
+        project.as_str(),
+    ];
+    match run_tool_with_timeout(SwarmProbeCommand::Am, &args, Some(cwd), SWARM_PROBE_TIMEOUT) {
+        Ok(outcome) if outcome.timed_out => (
+            None,
+            Some("am robot agents timed out before returning activity data".to_string()),
+        ),
+        Ok(outcome) if !outcome.success => (
+            None,
+            Some(format!(
+                "am robot agents unavailable: {}",
+                command_failure_detail(&outcome)
+            )),
+        ),
+        Ok(outcome) => match serde_json::from_str::<serde_json::Value>(&outcome.stdout) {
+            Ok(value) => (Some(value), None),
+            Err(err) => (
+                None,
+                Some(format!(
+                    "am robot agents returned non-JSON output: {err}; {}",
+                    redacted_output_snippet(&outcome)
+                )),
+            ),
+        },
+        Err(err) => (
+            None,
+            Some(format!("am robot agents failed to start: {err}")),
+        ),
     }
 }
 
@@ -1603,6 +1690,295 @@ fn format_stale_issues(issues: &[StaleIssue]) -> String {
         parts.push(format!("+{} more", issues.len() - SWARM_DETAIL_LIMIT));
     }
     parts.join("; ")
+}
+
+fn classify_stalled_bead_reaper(
+    content: &str,
+    agent_roster: Option<&serde_json::Value>,
+    agent_roster_error: Option<&str>,
+    now: DateTime<Utc>,
+    stale_after_hours: i64,
+) -> Finding {
+    let activities =
+        agent_roster.map_or_else(HashMap::new, |value| agent_mail_activity_index(value, now));
+    let mut parse_errors = 0_usize;
+    let mut in_progress_count = 0_usize;
+    let mut recently_updated_count = 0_usize;
+    let mut active_agent_count = 0_usize;
+    let mut blocked_by_note_count = 0_usize;
+    let mut unknown_assignee_count = 0_usize;
+    let mut suggestions = Vec::new();
+
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(issue) = serde_json::from_str::<BeadsIssueRecord>(line) else {
+            parse_errors += 1;
+            continue;
+        };
+        if issue.status != "in_progress" {
+            continue;
+        }
+        in_progress_count += 1;
+
+        let updated_at = issue.updated_at.as_deref().unwrap_or_default();
+        let Some(br_age_hours) = age_hours_since(updated_at, now) else {
+            suggestions.push(stalled_reaper_suggestion(
+                &issue,
+                None,
+                None,
+                "missing_or_invalid_br_updated_at",
+                stale_after_hours,
+            ));
+            continue;
+        };
+        if br_age_hours < stale_after_hours {
+            recently_updated_count += 1;
+            continue;
+        }
+
+        if let Some(note_excerpt) = blocked_note_excerpt(&issue) {
+            blocked_by_note_count += 1;
+            suggestions.push(stalled_reaper_watch_item(
+                &issue,
+                br_age_hours,
+                "blocked_by_note",
+                note_excerpt,
+            ));
+            continue;
+        }
+
+        let assignee = issue_assignee(&issue);
+        let activity = assignee.and_then(|name| activities.get(name));
+        if activity.is_some_and(|activity| activity.age_hours < stale_after_hours) {
+            active_agent_count += 1;
+            continue;
+        }
+        if assignee.is_none() || activity.is_none() {
+            unknown_assignee_count += 1;
+        }
+        suggestions.push(stalled_reaper_suggestion(
+            &issue,
+            Some(br_age_hours),
+            activity,
+            "stale_in_progress",
+            stale_after_hours,
+        ));
+    }
+
+    let candidate_count = suggestions
+        .iter()
+        .filter(|suggestion| {
+            suggestion.get("action").and_then(serde_json::Value::as_str)
+                == Some("notify_then_reopen_or_claim")
+        })
+        .count();
+    let detail = format!(
+        "in_progress={in_progress_count}, candidates={candidate_count}, active_agent={active_agent_count}, recently_updated={recently_updated_count}, blocked_by_note={blocked_by_note_count}, unknown_assignee={unknown_assignee_count}"
+    );
+    let data = serde_json::json!({
+        "schema": SWARM_DOCTOR_STALLED_REAPER_SCHEMA,
+        "mode": "audit_only",
+        "mutation_performed": false,
+        "requires_explicit_operator_command": true,
+        "stale_after_hours": stale_after_hours,
+        "agent_activity_source": if agent_roster.is_some() { "agent_mail" } else { "unavailable" },
+        "agent_activity_error": agent_roster_error,
+        "parse_errors": parse_errors,
+        "in_progress_count": in_progress_count,
+        "candidate_count": candidate_count,
+        "active_agent_count": active_agent_count,
+        "recently_updated_count": recently_updated_count,
+        "blocked_by_note_count": blocked_by_note_count,
+        "unknown_assignee_count": unknown_assignee_count,
+        "suggestions": suggestions,
+    });
+
+    if parse_errors > 0 {
+        return Finding::warn(CheckCategory::Swarm, "Stalled bead reaper audit degraded")
+            .with_detail(format!("{detail}; parse_errors={parse_errors}"))
+            .with_remediation("Run `br doctor --json` before reopening any in_progress bead")
+            .with_data(data);
+    }
+    if candidate_count > 0 {
+        return Finding::warn(CheckCategory::Swarm, "Stalled bead reaper found reopen candidates")
+            .with_detail(detail)
+            .with_remediation(
+                "Review notification drafts; only run suggested `br update` commands after confirming ownership is stale",
+            )
+            .with_data(data);
+    }
+    Finding::pass(
+        CheckCategory::Swarm,
+        "Stalled bead reaper found no reopen candidates",
+    )
+    .with_detail(detail)
+    .with_data(data)
+}
+
+fn stalled_reaper_suggestion(
+    issue: &BeadsIssueRecord,
+    br_age_hours: Option<i64>,
+    activity: Option<&AgentMailActivity>,
+    reason: &str,
+    stale_after_hours: i64,
+) -> serde_json::Value {
+    let assignee = issue_assignee(issue).map(str::to_string);
+    let to = assignee.iter().cloned().collect::<Vec<_>>();
+    serde_json::json!({
+        "issue_id": issue.id,
+        "title": issue.title,
+        "assignee": assignee,
+        "reason": reason,
+        "action": "notify_then_reopen_or_claim",
+        "br_updated_at": issue.updated_at.as_deref(),
+        "br_age_hours": br_age_hours,
+        "agent_mail_last_active_ts": activity.map(|activity| activity.last_active_ts.as_str()),
+        "agent_mail_age_hours": activity.map(|activity| activity.age_hours),
+        "stale_after_hours": stale_after_hours,
+        "suggested_commands": [
+            format!("br update {} --status=open", issue.id),
+            format!("br update {} --status=in_progress --assignee <agent-name>", issue.id),
+        ],
+        "notification_draft": {
+            "to": to,
+            "thread_id": issue.id,
+            "subject": format!("[{}] Stalled in-progress audit", issue.id),
+            "ack_required": true,
+            "body_md": stalled_reaper_draft_body(issue, br_age_hours, activity, stale_after_hours),
+        },
+    })
+}
+
+fn stalled_reaper_watch_item(
+    issue: &BeadsIssueRecord,
+    br_age_hours: i64,
+    reason: &str,
+    note_excerpt: String,
+) -> serde_json::Value {
+    serde_json::json!({
+        "issue_id": issue.id,
+        "title": issue.title,
+        "assignee": issue_assignee(issue),
+        "reason": reason,
+        "action": "keep_in_progress_and_review_blocker_note",
+        "br_updated_at": issue.updated_at.as_deref(),
+        "br_age_hours": br_age_hours,
+        "note_excerpt": note_excerpt,
+        "suggested_commands": [
+            format!("br show {}", issue.id),
+        ],
+    })
+}
+
+fn stalled_reaper_draft_body(
+    issue: &BeadsIssueRecord,
+    br_age_hours: Option<i64>,
+    activity: Option<&AgentMailActivity>,
+    stale_after_hours: i64,
+) -> String {
+    let assignee = issue_assignee(issue).unwrap_or("<unassigned>");
+    let br_age = br_age_hours
+        .map(|age| format!("{age}h"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let agent_activity = activity.map_or_else(
+        || "no recent Agent Mail activity found".to_string(),
+        |activity| format!("last Agent Mail activity {}h ago", activity.age_hours),
+    );
+    format!(
+        "`{}` is still in_progress for `{assignee}`. Beads last update age: {br_age}; {agent_activity}. If this is still owned, please reply or refresh the bead. Otherwise I plan to reopen it after the {stale_after_hours}h stale threshold review.",
+        issue.id
+    )
+}
+
+fn issue_assignee(issue: &BeadsIssueRecord) -> Option<&str> {
+    issue
+        .assignee
+        .as_deref()
+        .or(issue.owner.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn age_hours_since(timestamp: &str, now: DateTime<Utc>) -> Option<i64> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    Some(
+        now.signed_duration_since(parsed.with_timezone(&Utc))
+            .num_hours(),
+    )
+}
+
+fn blocked_note_excerpt(issue: &BeadsIssueRecord) -> Option<String> {
+    let text = issue.notes.as_deref().unwrap_or(&issue.description).trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    [
+        "blocked",
+        "blocker",
+        "waiting on",
+        "do not reset",
+        "do not reopen",
+        "do not reclaim",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    .then(|| truncate_chars(text, 180))
+}
+
+fn agent_mail_activity_index(
+    value: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> HashMap<String, AgentMailActivity> {
+    let mut activities = HashMap::new();
+    collect_agent_mail_activity_rows(value, now, &mut activities);
+    activities
+}
+
+fn collect_agent_mail_activity_rows(
+    value: &serde_json::Value,
+    now: DateTime<Utc>,
+    activities: &mut HashMap<String, AgentMailActivity>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let name = map
+                .get("name")
+                .or_else(|| map.get("agent"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let last_active = [
+                "last_active_ts",
+                "last_active",
+                "last_seen_ts",
+                "last_seen",
+                "updated_at",
+            ]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(serde_json::Value::as_str));
+            if let (Some(name), Some(last_active)) = (name, last_active)
+                && let Some(age_hours) = age_hours_since(last_active, now)
+            {
+                activities.insert(
+                    name.to_string(),
+                    AgentMailActivity {
+                        last_active_ts: last_active.to_string(),
+                        age_hours,
+                    },
+                );
+                return;
+            }
+            for child in map.values() {
+                collect_agent_mail_activity_rows(child, now, activities);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_agent_mail_activity_rows(child, now, activities);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn check_swarm_br_status(cwd: &Path, findings: &mut Vec<Finding>) {
@@ -3547,6 +3923,87 @@ not-json
         assert_eq!(summary.total, 2);
         assert_eq!(summary.open, 1);
         assert_eq!(summary.parse_errors, 1);
+    }
+
+    #[test]
+    fn stalled_bead_reaper_keeps_recent_and_active_work() {
+        let now = DateTime::parse_from_rfc3339("2026-05-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let content = r#"{"id":"bd-active","title":"Active owner","status":"in_progress","assignee":"ActiveAgent","updated_at":"2026-05-08T06:00:00Z"}
+{"id":"bd-recent","title":"Recent work","status":"in_progress","assignee":"QuietAgent","updated_at":"2026-05-09T11:00:00Z"}
+"#;
+        let roster = serde_json::json!({
+            "agents": [
+                {"name": "ActiveAgent", "last_active_ts": "2026-05-09T11:30:00Z"},
+                {"name": "QuietAgent", "last_active_ts": "2026-05-08T00:00:00Z"}
+            ]
+        });
+
+        let finding = classify_stalled_bead_reaper(content, Some(&roster), None, now, 24);
+
+        assert_eq!(finding.severity, Severity::Pass);
+        let data = finding_data(&finding);
+        assert_eq!(data["candidate_count"], serde_json::json!(0));
+        assert_eq!(data["active_agent_count"], serde_json::json!(1));
+        assert_eq!(data["recently_updated_count"], serde_json::json!(1));
+        assert_eq!(data["mutation_performed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn stalled_bead_reaper_keeps_blocked_notes_as_review_items() {
+        let now = DateTime::parse_from_rfc3339("2026-05-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let content = r#"{"id":"bd-blocked","title":"Blocked work","status":"in_progress","assignee":"OldAgent","notes":"Blocked by bd-prereq; do not reopen until evidence lands.","updated_at":"2026-05-07T00:00:00Z"}
+"#;
+        let roster = serde_json::json!({
+            "agents": [
+                {"name": "OldAgent", "last_active_ts": "2026-05-07T00:00:00Z"}
+            ]
+        });
+
+        let finding = classify_stalled_bead_reaper(content, Some(&roster), None, now, 24);
+
+        assert_eq!(finding.severity, Severity::Pass);
+        let data = finding_data(&finding);
+        assert_eq!(data["candidate_count"], serde_json::json!(0));
+        assert_eq!(data["blocked_by_note_count"], serde_json::json!(1));
+        assert_eq!(
+            data["suggestions"][0]["action"],
+            serde_json::json!("keep_in_progress_and_review_blocker_note")
+        );
+    }
+
+    #[test]
+    fn stalled_bead_reaper_suggests_reopen_for_truly_stalled_work() {
+        let now = DateTime::parse_from_rfc3339("2026-05-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let content = r#"{"id":"bd-stalled","title":"Quiet work","status":"in_progress","assignee":"OldAgent","updated_at":"2026-05-07T00:00:00Z"}
+"#;
+        let roster = serde_json::json!({
+            "agents": [
+                {"name": "OldAgent", "last_active_ts": "2026-05-07T00:00:00Z"}
+            ]
+        });
+
+        let finding = classify_stalled_bead_reaper(content, Some(&roster), None, now, 24);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        assert!(finding.title.contains("reopen candidates"));
+        let data = finding_data(&finding);
+        assert_eq!(data["schema"], SWARM_DOCTOR_STALLED_REAPER_SCHEMA);
+        assert_eq!(data["mode"], serde_json::json!("audit_only"));
+        assert_eq!(data["candidate_count"], serde_json::json!(1));
+        assert_eq!(
+            data["suggestions"][0]["suggested_commands"][0],
+            serde_json::json!("br update bd-stalled --status=open")
+        );
+        assert_eq!(
+            data["suggestions"][0]["notification_draft"]["to"][0],
+            serde_json::json!("OldAgent")
+        );
     }
 
     #[test]
