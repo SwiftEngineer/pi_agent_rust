@@ -1656,6 +1656,45 @@ def run_self_test() -> int:
 
         repo_root = fixture_root()
         make_complete_fixture(repo_root, now)
+        write_beads_ledger(repo_root, [])
+        stress_payload = fixture_payload(EVIDENCE_SPECS[1], now, "fixture-run")
+        assert stress_payload is not None
+        stress_payload["results"] = {
+            "reactor": {
+                "enabled": True,
+                "s3fifo": {
+                    "fallback_event_total": 0,
+                },
+            }
+        }
+        write_artifact(repo_root, EVIDENCE_SPECS[1].path, stress_payload, mtime=now)
+        report = build_report(repo_root, now=now)
+        assert_report_matches_golden(report, "hostcall_missing_fields_projection.json")
+        hostcall = report["hostcall_queue_telemetry"]
+        assert_condition(
+            hostcall["status"] == "needs_telemetry",
+            "partial reactor telemetry should keep the section needs_telemetry",
+        )
+        missing_source = hostcall_source(report, "perf_stress_triage")
+        assert_condition(
+            missing_source["status"] == "missing_fields",
+            "partial reactor telemetry should be missing_fields, not ready",
+        )
+        assert_condition(
+            missing_source["reactor_path"] == "results.reactor",
+            "partial telemetry should preserve the reactor evidence path",
+        )
+        assert_condition(
+            "bravo_rollbacks_total" in missing_source["missing_required_fields"],
+            "partial telemetry should list absent BRAVO rollback counter",
+        )
+        assert_condition(
+            "s3fifo_fairness_rejected_total" in missing_source["missing_required_fields"],
+            "partial telemetry should list absent S3-FIFO fairness counter",
+        )
+
+        repo_root = fixture_root()
+        make_complete_fixture(repo_root, now)
         write_beads_ledger(
             repo_root,
             [
