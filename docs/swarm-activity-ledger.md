@@ -37,9 +37,11 @@ Digests include:
 - Verification evidence from verification, RCH, and git events.
 - Repeated blocker hot spots.
 - Stale Agent Mail threads measured from the newest represented event.
-- Saturation signals for few newly filed bugs, duplicate work, repeated blockers, and stale threads.
+- Saturation signals for few newly filed bugs, duplicate work, repeated blockers, repeated edits to already-closed bead surfaces, stale introductions that never turn into claims or reservations, coordination-heavy windows with low commit/validation throughput, and stale threads.
 
 The JSON form is stable for automation. The text form is deterministic for handoff notes and uses only the already-redacted summaries and selected detail fields. Prompt bodies, transcripts, tokens, API keys, cookies, authorization headers, and other sensitive values remain redacted before they can reach either output.
+
+Use saturation as a stop-and-redirect signal, not as a performance claim. When the digest reports closed-surface churn, stale introductions, or high chatter with low throughput, stop launching more agents on the same review loop and switch to a narrower implementation bead, a deeper audit of one subsystem, or explicit blocker cleanup. The `saturation.evidence_pointers` field names the redacted agent, bead, thread, or window counts that caused each signal so operators can verify the decision without reading prompt bodies.
 
 ## Tail-latency regime guard
 
@@ -72,6 +74,22 @@ The profile generator fails closed for empty profile sets, zero CPU/RAM inventor
 `SwarmAdmissionController` composes a validated `SwarmCapacityPlan`, `ResourceGovernor`, and `TailLatencyRegimeGuard` into schema `pi.resource_governor.swarm_admission_controller.v1`. Each decision takes the request, live host sample, live p99/p999/queue/resource-pressure sample, and current swarm load counts, then returns one final `admit`, `backpressure`, or `deny` action.
 
 The controller uses the plan's resource budgets for host-pressure checks, the plan's tail-latency thresholds for conservative fallback, and the plan's active-agent/tool/RCH/extension-lane recommendations as live capacity ceilings. Capacity pressure can make a decision stricter than the host-resource decision, so a host that looks healthy still backpressures or denies when the swarm is already at the planned concurrency budget.
+
+## Admission replay
+
+`replay_swarm_admission_from_jsonl` in `src/resource_governor.rs` replays schema `pi.swarm.activity_ledger.v1` rows against a prevalidated `SwarmCapacityPlan` and captured `SwarmAdmissionReplaySample` values. The report schema is `pi.resource_governor.swarm_admission_replay.v1`.
+
+Replay is offline incident analysis, not live doctor output. It never samples the current host, Agent Mail, Beads, or RCH. Every decision is derived from already-redacted ledger rows and captured resource samples, so an old incident can be replayed deterministically after the live machine state has changed.
+
+Replayable ledger kinds are `bead_status`, `agent_mail`, `file_reservation`, `rch_job`, and `verification`. Rows are sorted by `timestamp_ms`, then `sequence`, then `correlation_id`, matching timeline reconstruction. Optional detail fields can refine the request:
+
+- `request_operation` or `operation`: one of `tool`, `exec`, `http`, `session`, `ui`, `events`, `log`, or `unknown`.
+- `request_capability` or `capability`: capability label attached to the replay request.
+- `estimated_tool_output_bytes` or `tool_output_bytes`: request output budget input.
+- `queue_depth`: request queue-depth input.
+- `expected_action`, `expected_admission_action`, or `admission_action`: optional comparison value for divergence markers.
+
+Each report includes a decision timeline, the dominant capacity pressure for every replayed decision, and divergence markers for duplicate correlation IDs, stale or missing samples, invalid expected-action details, and expected-action mismatches. Missing optional request fields use deterministic defaults for the ledger kind. Missing or stale resource samples are fail-closed: the report status becomes `fail_closed` and the affected event does not receive an optimistic decision.
 
 ## No-mock swarm smoke harness
 

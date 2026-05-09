@@ -4,7 +4,11 @@
 //! get live `/proc` sampling, while other platforms keep deterministic fallback
 //! budgets and only enforce request-local limits such as tool-output caps.
 
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
+
+use crate::swarm_activity_ledger::{
+    SwarmActivityKind, SwarmActivityLedgerEntry, SwarmActivityLedgerError, entries_from_jsonl,
+};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -289,6 +293,9 @@ pub const SWARM_OPERATOR_BUDGET_PROFILES_SCHEMA: &str =
 /// Stable schema for live swarm admission-controller decisions.
 pub const SWARM_ADMISSION_CONTROLLER_SCHEMA: &str =
     "pi.resource_governor.swarm_admission_controller.v1";
+
+/// Stable schema for deterministic admission replay reports.
+pub const SWARM_ADMISSION_REPLAY_SCHEMA: &str = "pi.resource_governor.swarm_admission_replay.v1";
 
 /// Current tail-latency regime selected by the guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1205,6 +1212,180 @@ impl SwarmAdmissionControllerDecision {
     }
 }
 
+/// Status for a deterministic swarm admission replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdmissionReplayStatus {
+    /// Every replayable ledger event had fresh resource evidence.
+    Pass,
+    /// One or more replayable events lacked trustworthy evidence.
+    FailClosed,
+}
+
+/// Divergence marker emitted while replaying an admission ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdmissionReplayDivergenceKind {
+    /// A correlation ID appeared more than once in replayable work.
+    DuplicateCorrelationId,
+    /// No resource sample was available at or before the event timestamp.
+    MissingResourceSample,
+    /// The newest available resource sample was older than the replay policy.
+    StaleResourceSample,
+    /// An optional expected action field was present but not understood.
+    InvalidExpectedAction,
+    /// A captured expected action differs from the replayed decision.
+    ExpectedActionMismatch,
+}
+
+/// One deterministic replay divergence marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwarmAdmissionReplayDivergence {
+    /// Divergence category.
+    pub kind: SwarmAdmissionReplayDivergenceKind,
+    /// Event timestamp in Unix milliseconds.
+    pub timestamp_ms: u64,
+    /// Stable correlation ID for the affected ledger event.
+    pub correlation_id: String,
+    /// Human-readable detail for operator output.
+    pub detail: String,
+}
+
+/// Captured evidence sample used by admission replay.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwarmAdmissionReplaySample {
+    /// Sample timestamp in Unix milliseconds.
+    pub timestamp_ms: u64,
+    /// Captured host-resource sample.
+    pub host_resource_sample: HostResourceSample,
+    /// Captured tail-latency and queue-depth sample.
+    pub tail_latency_sample: TailLatencyRegimeSample,
+    /// Captured live swarm load counters.
+    pub live_load: SwarmLiveLoad,
+}
+
+impl SwarmAdmissionReplaySample {
+    /// Create one replay sample from captured host, latency, and live-load state.
+    #[must_use]
+    pub const fn new(
+        timestamp_ms: u64,
+        host_resource_sample: HostResourceSample,
+        tail_latency_sample: TailLatencyRegimeSample,
+        live_load: SwarmLiveLoad,
+    ) -> Self {
+        Self {
+            timestamp_ms,
+            host_resource_sample,
+            tail_latency_sample,
+            live_load,
+        }
+    }
+}
+
+/// Configuration for deterministic admission replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SwarmAdmissionReplayConfig {
+    /// Maximum age allowed for the selected resource sample.
+    pub max_sample_age_ms: u64,
+}
+
+impl SwarmAdmissionReplayConfig {
+    /// Build a replay config with an explicit sample freshness bound.
+    #[must_use]
+    pub const fn new(max_sample_age_ms: u64) -> Self {
+        Self { max_sample_age_ms }
+    }
+}
+
+impl Default for SwarmAdmissionReplayConfig {
+    fn default() -> Self {
+        Self {
+            max_sample_age_ms: 60_000,
+        }
+    }
+}
+
+/// One replayed admission decision attached to an activity-ledger event.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwarmAdmissionReplayDecision {
+    /// Original ledger sequence.
+    pub sequence: u64,
+    /// Event timestamp in Unix milliseconds.
+    pub timestamp_ms: u64,
+    /// Replayed activity kind.
+    pub kind: SwarmActivityKind,
+    /// Stable event correlation ID.
+    pub correlation_id: String,
+    /// Resource-sample timestamp used by the replay.
+    pub sample_timestamp_ms: u64,
+    /// Age of the selected sample at replay time.
+    pub sample_age_ms: u64,
+    /// Optional expected action captured by the ledger fixture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_action: Option<AdmissionAction>,
+    /// Final replay decision.
+    pub admission_decision: SwarmAdmissionControllerDecision,
+    /// Capacity pressure selected by the replay decision.
+    pub dominant_pressure: SwarmCapacityPressure,
+    /// Divergence markers attached to this event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub divergence_markers: Vec<SwarmAdmissionReplayDivergence>,
+}
+
+/// Deterministic replay report for one activity-ledger incident.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwarmAdmissionReplayReport {
+    /// Stable schema identifier.
+    pub schema: &'static str,
+    /// Overall replay status.
+    pub status: SwarmAdmissionReplayStatus,
+    /// Number of ledger events considered replayable work.
+    pub replayed_event_count: usize,
+    /// Number of decisions emitted with fresh captured samples.
+    pub decision_count: usize,
+    /// Decision timeline sorted by ledger timestamp, sequence, and correlation ID.
+    pub decision_timeline: Vec<SwarmAdmissionReplayDecision>,
+    /// Divergence markers gathered across the replay.
+    pub divergence_markers: Vec<SwarmAdmissionReplayDivergence>,
+}
+
+impl SwarmAdmissionReplayReport {
+    /// Render stable JSON telemetry for the replay report.
+    #[must_use]
+    pub fn telemetry(&self) -> Value {
+        json!(self)
+    }
+}
+
+/// Error returned when deterministic admission replay cannot start safely.
+#[derive(Debug)]
+pub enum SwarmAdmissionReplayError {
+    /// Activity ledger JSONL could not be parsed or validated.
+    InvalidLedger(String),
+    /// Required replay evidence was absent.
+    MissingEvidence(&'static str),
+    /// Captured replay evidence contained unsafe or non-finite values.
+    InvalidEvidence(&'static str),
+}
+
+impl From<SwarmActivityLedgerError> for SwarmAdmissionReplayError {
+    fn from(source: SwarmActivityLedgerError) -> Self {
+        Self::InvalidLedger(source.to_string())
+    }
+}
+
+impl fmt::Display for SwarmAdmissionReplayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLedger(message) => write!(formatter, "invalid activity ledger: {message}"),
+            Self::MissingEvidence(field) => write!(formatter, "missing replay evidence: {field}"),
+            Self::InvalidEvidence(field) => write!(formatter, "invalid replay evidence: {field}"),
+        }
+    }
+}
+
+impl std::error::Error for SwarmAdmissionReplayError {}
+
 /// Error returned when capacity evidence cannot safely produce recommendations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwarmCapacityPlanError {
@@ -1541,6 +1722,325 @@ impl Default for ResourceGovernor {
     fn default() -> Self {
         Self::from_host()
     }
+}
+
+/// Replay admission decisions from redacted activity-ledger JSONL and captured samples.
+///
+/// # Errors
+///
+/// Returns an error when the ledger cannot be parsed, when no captured samples
+/// are available, or when a captured sample contains non-finite evidence.
+pub fn replay_swarm_admission_from_jsonl(
+    ledger_jsonl: &str,
+    plan: SwarmCapacityPlan,
+    samples: &[SwarmAdmissionReplaySample],
+    config: SwarmAdmissionReplayConfig,
+) -> Result<SwarmAdmissionReplayReport, SwarmAdmissionReplayError> {
+    validate_replay_samples(samples)?;
+
+    let mut entries = entries_from_jsonl(ledger_jsonl)?;
+    entries.sort_by(|left, right| {
+        left.timestamp_ms
+            .cmp(&right.timestamp_ms)
+            .then_with(|| left.sequence.cmp(&right.sequence))
+            .then_with(|| left.ids.correlation_id.cmp(&right.ids.correlation_id))
+    });
+
+    let mut controller = SwarmAdmissionController::from_plan(plan);
+    let mut seen_correlation_ids = BTreeSet::new();
+    let mut decision_timeline = Vec::new();
+    let mut divergence_markers = Vec::new();
+    let mut replayed_event_count = 0usize;
+
+    for entry in entries
+        .iter()
+        .filter(|entry| is_replayable_activity(entry.kind))
+    {
+        replayed_event_count = replayed_event_count.saturating_add(1);
+        let mut event_markers = Vec::new();
+        record_duplicate_correlation_id(entry, &mut seen_correlation_ids, &mut event_markers);
+
+        let Some(sample) = select_replay_sample(samples, entry.timestamp_ms) else {
+            event_markers.push(replay_marker(
+                SwarmAdmissionReplayDivergenceKind::MissingResourceSample,
+                entry,
+                "no captured resource sample at or before event timestamp",
+            ));
+            divergence_markers.extend(event_markers);
+            continue;
+        };
+
+        let sample_age_ms = entry.timestamp_ms.saturating_sub(sample.timestamp_ms);
+        if sample_age_ms > config.max_sample_age_ms {
+            event_markers.push(replay_marker(
+                SwarmAdmissionReplayDivergenceKind::StaleResourceSample,
+                entry,
+                format!(
+                    "resource sample age {sample_age_ms}ms exceeds {}ms",
+                    config.max_sample_age_ms
+                ),
+            ));
+            divergence_markers.extend(event_markers);
+            continue;
+        }
+
+        let (expected_action, invalid_expected_action) = expected_action_from_entry(entry);
+        if let Some(value) = invalid_expected_action {
+            event_markers.push(replay_marker(
+                SwarmAdmissionReplayDivergenceKind::InvalidExpectedAction,
+                entry,
+                format!("unsupported expected action: {value}"),
+            ));
+        }
+
+        let request = replay_request_from_entry(entry, sample.tail_latency_sample.queue_depth);
+        let decision = controller.decide(
+            &request,
+            sample.host_resource_sample.clone(),
+            sample.tail_latency_sample,
+            sample.live_load,
+        );
+
+        if let Some(expected) = expected_action {
+            if !admission_actions_match(expected, decision.action) {
+                event_markers.push(replay_marker(
+                    SwarmAdmissionReplayDivergenceKind::ExpectedActionMismatch,
+                    entry,
+                    format!("expected {:?}, replayed {:?}", expected, decision.action),
+                ));
+            }
+        }
+
+        divergence_markers.extend(event_markers.clone());
+        decision_timeline.push(SwarmAdmissionReplayDecision {
+            sequence: entry.sequence,
+            timestamp_ms: entry.timestamp_ms,
+            kind: entry.kind,
+            correlation_id: entry.ids.correlation_id.clone(),
+            sample_timestamp_ms: sample.timestamp_ms,
+            sample_age_ms,
+            expected_action,
+            dominant_pressure: decision.capacity_pressure,
+            admission_decision: decision,
+            divergence_markers: event_markers,
+        });
+    }
+
+    let status = if divergence_markers
+        .iter()
+        .any(|marker| replay_marker_is_fail_closed(marker.kind))
+    {
+        SwarmAdmissionReplayStatus::FailClosed
+    } else {
+        SwarmAdmissionReplayStatus::Pass
+    };
+
+    Ok(SwarmAdmissionReplayReport {
+        schema: SWARM_ADMISSION_REPLAY_SCHEMA,
+        status,
+        replayed_event_count,
+        decision_count: decision_timeline.len(),
+        decision_timeline,
+        divergence_markers,
+    })
+}
+
+fn validate_replay_samples(
+    samples: &[SwarmAdmissionReplaySample],
+) -> Result<(), SwarmAdmissionReplayError> {
+    if samples.is_empty() {
+        return Err(SwarmAdmissionReplayError::MissingEvidence(
+            "resource_samples",
+        ));
+    }
+    for sample in samples {
+        validate_optional_f64(sample.host_resource_sample.load_avg_1m, "load_avg_1m")?;
+        if !sample
+            .tail_latency_sample
+            .resource_pressure_ratio
+            .is_finite()
+            || sample.tail_latency_sample.resource_pressure_ratio < 0.0
+        {
+            return Err(SwarmAdmissionReplayError::InvalidEvidence(
+                "resource_pressure_ratio",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_f64(
+    value: Option<f64>,
+    field: &'static str,
+) -> Result<(), SwarmAdmissionReplayError> {
+    if value.is_some_and(|number| !number.is_finite() || number < 0.0) {
+        return Err(SwarmAdmissionReplayError::InvalidEvidence(field));
+    }
+    Ok(())
+}
+
+const fn is_replayable_activity(kind: SwarmActivityKind) -> bool {
+    matches!(
+        kind,
+        SwarmActivityKind::BeadStatus
+            | SwarmActivityKind::AgentMail
+            | SwarmActivityKind::FileReservation
+            | SwarmActivityKind::RchJob
+            | SwarmActivityKind::Verification
+    )
+}
+
+fn record_duplicate_correlation_id(
+    entry: &SwarmActivityLedgerEntry,
+    seen_correlation_ids: &mut BTreeSet<String>,
+    markers: &mut Vec<SwarmAdmissionReplayDivergence>,
+) {
+    if !seen_correlation_ids.insert(entry.ids.correlation_id.clone()) {
+        markers.push(replay_marker(
+            SwarmAdmissionReplayDivergenceKind::DuplicateCorrelationId,
+            entry,
+            "correlation ID was already replayed",
+        ));
+    }
+}
+
+fn select_replay_sample(
+    samples: &[SwarmAdmissionReplaySample],
+    timestamp_ms: u64,
+) -> Option<&SwarmAdmissionReplaySample> {
+    samples
+        .iter()
+        .filter(|sample| sample.timestamp_ms <= timestamp_ms)
+        .max_by_key(|sample| sample.timestamp_ms)
+}
+
+fn expected_action_from_entry(
+    entry: &SwarmActivityLedgerEntry,
+) -> (Option<AdmissionAction>, Option<String>) {
+    let Some(raw) = entry
+        .details()
+        .get("expected_action")
+        .or_else(|| entry.details().get("expected_admission_action"))
+        .or_else(|| entry.details().get("admission_action"))
+    else {
+        return (None, None);
+    };
+    parse_admission_action(raw)
+        .map_or_else(|| (None, Some(raw.clone())), |action| (Some(action), None))
+}
+
+const fn admission_actions_match(left: AdmissionAction, right: AdmissionAction) -> bool {
+    matches!(
+        (left, right),
+        (AdmissionAction::Admit, AdmissionAction::Admit)
+            | (AdmissionAction::Backpressure, AdmissionAction::Backpressure)
+            | (AdmissionAction::Deny, AdmissionAction::Deny)
+    )
+}
+
+fn replay_request_from_entry(
+    entry: &SwarmActivityLedgerEntry,
+    fallback_queue_depth: usize,
+) -> ResourceRequest {
+    let operation = entry
+        .details()
+        .get("request_operation")
+        .or_else(|| entry.details().get("operation"))
+        .and_then(|value| parse_operation_kind(value))
+        .unwrap_or_else(|| default_operation_for_activity(entry.kind));
+    let capability = entry
+        .details()
+        .get("request_capability")
+        .or_else(|| entry.details().get("capability"))
+        .cloned()
+        .unwrap_or_else(|| default_capability_for_activity(entry.kind).to_string());
+    let output_bytes =
+        detail_u64(entry, &["estimated_tool_output_bytes", "tool_output_bytes"]).unwrap_or(0);
+    let queue_depth = detail_usize(entry, &["queue_depth"]).unwrap_or(fallback_queue_depth);
+    ResourceRequest::new(operation, capability)
+        .with_estimated_tool_output_bytes(output_bytes)
+        .with_queue_depth(queue_depth)
+}
+
+fn detail_u64(entry: &SwarmActivityLedgerEntry, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| entry.details().get(*key))
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn detail_usize(entry: &SwarmActivityLedgerEntry, keys: &[&str]) -> Option<usize> {
+    detail_u64(entry, keys).and_then(|value| usize::try_from(value).ok())
+}
+
+fn parse_admission_action(value: &str) -> Option<AdmissionAction> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "admit" | "allowed" | "allow" => Some(AdmissionAction::Admit),
+        "backpressure" | "degraded" | "delay" => Some(AdmissionAction::Backpressure),
+        "deny" | "denied" | "reject" => Some(AdmissionAction::Deny),
+        _ => None,
+    }
+}
+
+fn parse_operation_kind(value: &str) -> Option<ResourceOperationKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tool" => Some(ResourceOperationKind::Tool),
+        "exec" | "bash" | "shell" => Some(ResourceOperationKind::Exec),
+        "http" => Some(ResourceOperationKind::Http),
+        "session" => Some(ResourceOperationKind::Session),
+        "ui" => Some(ResourceOperationKind::Ui),
+        "events" | "event" => Some(ResourceOperationKind::Events),
+        "log" => Some(ResourceOperationKind::Log),
+        "unknown" => Some(ResourceOperationKind::Unknown),
+        _ => None,
+    }
+}
+
+const fn default_operation_for_activity(kind: SwarmActivityKind) -> ResourceOperationKind {
+    match kind {
+        SwarmActivityKind::RchJob | SwarmActivityKind::Verification => ResourceOperationKind::Exec,
+        SwarmActivityKind::AgentMail | SwarmActivityKind::FileReservation => {
+            ResourceOperationKind::Session
+        }
+        SwarmActivityKind::BeadStatus => ResourceOperationKind::Session,
+        SwarmActivityKind::GitCommit | SwarmActivityKind::Recovery | SwarmActivityKind::Note => {
+            ResourceOperationKind::Unknown
+        }
+    }
+}
+
+const fn default_capability_for_activity(kind: SwarmActivityKind) -> &'static str {
+    match kind {
+        SwarmActivityKind::BeadStatus => "beads.status",
+        SwarmActivityKind::AgentMail => "agent_mail.message",
+        SwarmActivityKind::FileReservation => "agent_mail.file_reservation",
+        SwarmActivityKind::RchJob => "rch.job",
+        SwarmActivityKind::Verification => "verification.command",
+        SwarmActivityKind::GitCommit => "git.commit",
+        SwarmActivityKind::Recovery => "recovery.action",
+        SwarmActivityKind::Note => "note",
+    }
+}
+
+fn replay_marker(
+    kind: SwarmAdmissionReplayDivergenceKind,
+    entry: &SwarmActivityLedgerEntry,
+    detail: impl Into<String>,
+) -> SwarmAdmissionReplayDivergence {
+    SwarmAdmissionReplayDivergence {
+        kind,
+        timestamp_ms: entry.timestamp_ms,
+        correlation_id: entry.ids.correlation_id.clone(),
+        detail: detail.into(),
+    }
+}
+
+const fn replay_marker_is_fail_closed(kind: SwarmAdmissionReplayDivergenceKind) -> bool {
+    matches!(
+        kind,
+        SwarmAdmissionReplayDivergenceKind::MissingResourceSample
+            | SwarmAdmissionReplayDivergenceKind::StaleResourceSample
+            | SwarmAdmissionReplayDivergenceKind::InvalidExpectedAction
+    )
 }
 
 fn live_capacity_pressure(
@@ -2309,15 +2809,19 @@ mod tests {
     use super::{
         AdmissionAction, HostResourceBudgets, HostResourceSample, ResourceDimension,
         ResourceGovernor, ResourceOperationKind, ResourceRequest,
-        SWARM_ADMISSION_CONTROLLER_SCHEMA, SWARM_CAPACITY_PLAN_SCHEMA,
-        SWARM_OPERATOR_BUDGET_PROFILES_SCHEMA, SwarmAdmissionController, SwarmCapacityConfidence,
-        SwarmCapacityDimension, SwarmCapacityPlanError, SwarmHostInventory, SwarmLiveLoad,
-        SwarmOperatorHostClass, TAIL_LATENCY_REGIME_SCHEMA, TailLatencyFallbackReason,
-        TailLatencyRegime, TailLatencyRegimeConfig, TailLatencyRegimeGuard,
-        TailLatencyRegimeSample, generate_operator_budget_profiles_from_jsonl,
+        SWARM_ADMISSION_CONTROLLER_SCHEMA, SWARM_ADMISSION_REPLAY_SCHEMA,
+        SWARM_CAPACITY_PLAN_SCHEMA, SWARM_OPERATOR_BUDGET_PROFILES_SCHEMA,
+        SwarmAdmissionController, SwarmAdmissionReplayConfig, SwarmAdmissionReplayDivergenceKind,
+        SwarmAdmissionReplayError, SwarmAdmissionReplaySample, SwarmAdmissionReplayStatus,
+        SwarmCapacityConfidence, SwarmCapacityDimension, SwarmCapacityPlanError,
+        SwarmHostInventory, SwarmLiveLoad, SwarmOperatorHostClass, TAIL_LATENCY_REGIME_SCHEMA,
+        TailLatencyFallbackReason, TailLatencyRegime, TailLatencyRegimeConfig,
+        TailLatencyRegimeGuard, TailLatencyRegimeSample,
+        generate_operator_budget_profiles_from_jsonl,
         generate_operator_budget_profiles_from_jsonl_with_host_classes,
-        plan_swarm_capacity_from_jsonl,
+        plan_swarm_capacity_from_jsonl, replay_swarm_admission_from_jsonl,
     };
+    use crate::swarm_activity_ledger::{SwarmActivityIds, SwarmActivityKind, SwarmActivityLedger};
 
     fn budgets() -> HostResourceBudgets {
         HostResourceBudgets::fixed(10.0, 1_000, 100, 100, 1_000)
@@ -2363,6 +2867,23 @@ mod tests {
         ResourceRequest::new(ResourceOperationKind::Tool, "read")
             .with_estimated_tool_output_bytes(16 * 1024 * 1024)
             .with_queue_depth(128)
+    }
+
+    fn replay_sample(
+        timestamp_ms: u64,
+        active_agents: u64,
+        active_tool_calls: u64,
+    ) -> SwarmAdmissionReplaySample {
+        SwarmAdmissionReplaySample::new(
+            timestamp_ms,
+            live_controller_sample(),
+            healthy_tail_sample(),
+            SwarmLiveLoad::empty()
+                .with_active_agents(active_agents)
+                .with_active_tool_calls(active_tool_calls)
+                .with_extension_hostcall_lanes(4)
+                .with_active_rch_jobs(1),
+        )
     }
 
     #[test]
@@ -2781,6 +3302,141 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("admit")
         );
+    }
+
+    #[test]
+    fn admission_replay_sorts_out_of_order_events_and_allows_missing_optional_fields() {
+        let mut ledger = SwarmActivityLedger::new();
+        ledger.append(
+            300,
+            SwarmActivityKind::Verification,
+            SwarmActivityIds::new("later"),
+            "later verification",
+            [("expected_action", "admit")],
+        );
+        ledger.append(
+            100,
+            SwarmActivityKind::BeadStatus,
+            SwarmActivityIds::new("earlier"),
+            "earlier claim with no optional request fields",
+            std::iter::empty::<(&str, &str)>(),
+        );
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+        let report = replay_swarm_admission_from_jsonl(
+            &ledger.to_jsonl().unwrap(),
+            plan,
+            &[replay_sample(0, 8, 16)],
+            SwarmAdmissionReplayConfig::new(1_000),
+        )
+        .unwrap();
+
+        assert_eq!(report.schema, SWARM_ADMISSION_REPLAY_SCHEMA);
+        assert_eq!(report.status, SwarmAdmissionReplayStatus::Pass);
+        assert_eq!(report.replayed_event_count, 2);
+        assert_eq!(report.decision_count, 2);
+        assert_eq!(report.decision_timeline[0].correlation_id, "earlier");
+        assert!(report.decision_timeline[0].expected_action.is_none());
+        assert_eq!(
+            report.decision_timeline[1].admission_decision.action,
+            AdmissionAction::Admit
+        );
+        assert_eq!(
+            report.decision_timeline[1].dominant_pressure.dimension,
+            SwarmCapacityDimension::ActiveAgents
+        );
+    }
+
+    #[test]
+    fn admission_replay_marks_duplicate_correlation_ids_and_expected_action_mismatch() {
+        let mut ledger = SwarmActivityLedger::new();
+        let ids = SwarmActivityIds::new("dup").with_bead_id("bd-replay");
+        ledger.append(
+            100,
+            SwarmActivityKind::BeadStatus,
+            ids.clone(),
+            "first claim",
+            [("expected_action", "deny")],
+        );
+        ledger.append(
+            101,
+            SwarmActivityKind::AgentMail,
+            ids,
+            "duplicate thread note",
+            [("expected_action", "admit")],
+        );
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+        let report = replay_swarm_admission_from_jsonl(
+            &ledger.to_jsonl().unwrap(),
+            plan,
+            &[replay_sample(0, 8, 16)],
+            SwarmAdmissionReplayConfig::new(1_000),
+        )
+        .unwrap();
+
+        assert_eq!(report.status, SwarmAdmissionReplayStatus::Pass);
+        assert!(report.divergence_markers.iter().any(
+            |marker| marker.kind == SwarmAdmissionReplayDivergenceKind::DuplicateCorrelationId
+        ));
+        assert!(report.divergence_markers.iter().any(
+            |marker| marker.kind == SwarmAdmissionReplayDivergenceKind::ExpectedActionMismatch
+        ));
+        assert_eq!(report.decision_count, 2);
+    }
+
+    #[test]
+    fn admission_replay_fails_closed_for_stale_samples() {
+        let mut ledger = SwarmActivityLedger::new();
+        ledger.append(
+            10_000,
+            SwarmActivityKind::RchJob,
+            SwarmActivityIds::new("stale"),
+            "rch queued",
+            [("expected_action", "admit")],
+        );
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+        let report = replay_swarm_admission_from_jsonl(
+            &ledger.to_jsonl().unwrap(),
+            plan,
+            &[replay_sample(0, 8, 16)],
+            SwarmAdmissionReplayConfig::new(10),
+        )
+        .unwrap();
+
+        assert_eq!(report.status, SwarmAdmissionReplayStatus::FailClosed);
+        assert_eq!(report.decision_count, 0);
+        assert_eq!(
+            report.divergence_markers[0].kind,
+            SwarmAdmissionReplayDivergenceKind::StaleResourceSample
+        );
+    }
+
+    #[test]
+    fn admission_replay_requires_captured_resource_samples() {
+        let mut ledger = SwarmActivityLedger::new();
+        ledger.append(
+            100,
+            SwarmActivityKind::FileReservation,
+            SwarmActivityIds::new("reservation"),
+            "reservation requested",
+            std::iter::empty::<(&str, &str)>(),
+        );
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+        let err = replay_swarm_admission_from_jsonl(
+            &ledger.to_jsonl().unwrap(),
+            plan,
+            &[],
+            SwarmAdmissionReplayConfig::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SwarmAdmissionReplayError::MissingEvidence("resource_samples")
+        ));
     }
 
     #[test]
