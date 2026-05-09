@@ -14,6 +14,9 @@ const SURFACE_DIFF: &str = include_str!("../docs/dropin-rpc-surface-diff.json");
 const SCENARIOS: &str =
     include_str!("dropin_rpc_differential/fixtures/g05_rpc_surface_scenarios.json");
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const PI_TEST_RUNNER: &str = env!("CARGO_BIN_EXE_pi");
+const RPC_TEST_PROVIDER: &str = "ollama";
+const RPC_TEST_MODEL: &str = "qwen2.5:0.5b";
 
 fn canonicalize(value: &Value) -> Value {
     match value {
@@ -63,14 +66,14 @@ fn required_fields(entry: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn index_by_name<'a>(items: &'a [Value], kind: &str) -> BTreeMap<&'a str, &'a Value> {
+fn index_by_name<'a>(items: &'a [Value], _kind: &str) -> BTreeMap<&'a str, &'a Value> {
     items
         .iter()
         .map(|item| {
             (
                 item["name"]
                     .as_str()
-                    .unwrap_or_else(|| panic!("{kind} entry missing name: {item}")),
+                    .expect("surface entry should include a name"),
                 item,
             )
         })
@@ -78,12 +81,10 @@ fn index_by_name<'a>(items: &'a [Value], kind: &str) -> BTreeMap<&'a str, &'a Va
 }
 
 fn summary_count(surface: &Value, key: &str) -> usize {
-    usize::try_from(
-        surface["summary"][key]
-            .as_u64()
-            .unwrap_or_else(|| panic!("missing numeric summary key {key}")),
-    )
-    .unwrap_or_else(|_| panic!("summary key {key} does not fit usize"))
+    let count = surface["summary"][key]
+        .as_u64()
+        .expect("summary count should be numeric");
+    usize::try_from(count).expect("summary count should fit usize")
 }
 
 fn is_missing_field_negative_case(expected: &Value) -> bool {
@@ -118,7 +119,7 @@ fn assert_command_scenario(
 
     let surface_entry = command_index
         .get(command)
-        .unwrap_or_else(|| panic!("{id} references unknown command {command}"));
+        .expect("command scenario should reference a known command");
     assert_eq!(
         surface_entry["action"], "MATCH",
         "{id} must target a MATCH command"
@@ -167,7 +168,7 @@ fn assert_event_scenario(
 
     let surface_entry = event_index
         .get(event)
-        .unwrap_or_else(|| panic!("{id} references unknown event {event}"));
+        .expect("event scenario should reference a known event");
     assert_eq!(
         surface_entry["action"], "MATCH",
         "{id} must target a MATCH event"
@@ -284,9 +285,9 @@ fn g05_rpc_differential_tool_execution_sorting() {
     ]);
 
     let canonical = canonicalize(&unsorted);
-    let Value::Array(items) = canonical else {
-        panic!("Expected array after canonicalization");
-    };
+    let items = canonical
+        .as_array()
+        .expect("canonicalized tool events should remain an array");
     assert_eq!(items[0]["toolCallId"], "tool-1");
     assert_eq!(items[1]["toolCallId"], "tool-2");
     assert_eq!(items[2]["toolCallId"], "tool-2");
@@ -302,7 +303,7 @@ struct RpcDifferentialTester {
 impl RpcDifferentialTester {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
-        let rust_pi_path = PathBuf::from(env!("CARGO_BIN_EXE_pi"));
+        let rust_pi_path = PathBuf::from(PI_TEST_RUNNER);
 
         Ok(Self {
             temp_dir,
@@ -311,8 +312,36 @@ impl RpcDifferentialTester {
     }
 
     fn execute_rust_command(&self, input: &Value) -> Result<Value, Box<dyn std::error::Error>> {
-        let mut child = Command::new(&self.rust_pi_path)
-            .args(["--mode", "rpc", "--print", "--no-extensions"])
+        let mut child = Command::new(PI_TEST_RUNNER)
+            .args([
+                "--mode",
+                "rpc",
+                "--provider",
+                RPC_TEST_PROVIDER,
+                "--model",
+                RPC_TEST_MODEL,
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-themes",
+            ])
+            .env(
+                "PI_CODING_AGENT_DIR",
+                self.temp_dir.path().join("agent").as_os_str(),
+            )
+            .env(
+                "PI_CONFIG_PATH",
+                self.temp_dir.path().join("settings.json").as_os_str(),
+            )
+            .env(
+                "PI_SESSIONS_DIR",
+                self.temp_dir.path().join("sessions").as_os_str(),
+            )
+            .env(
+                "PI_PACKAGE_DIR",
+                self.temp_dir.path().join("packages").as_os_str(),
+            )
+            .current_dir(self.temp_dir.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
