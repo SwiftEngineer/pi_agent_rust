@@ -367,7 +367,7 @@ EVIDENCE_SPECS = (
         status_path="status",
         ok_values=("pass",),
         zero_paths=("observed.must_pass_failed", "observed.must_pass_skipped"),
-        provenance_group="extension",
+        provenance_group="extension_conformance",
     ),
     EvidenceSpec(
         id="extension_health_delta",
@@ -377,7 +377,7 @@ EVIDENCE_SPECS = (
         claim_surface="release_facing",
         required_schema="pi.ext.health_delta.v1",
         zero_paths=("current_summary.skipped",),
-        provenance_group="extension",
+        provenance_group="extension_conformance",
     ),
     EvidenceSpec(
         id="extension_journey_report",
@@ -396,7 +396,7 @@ EVIDENCE_SPECS = (
         required_schema="pi.ext.reactor_queue_coverage_evidence.v1",
         status_path="status",
         ok_values=("PASS", "pass"),
-        provenance_group="extension",
+        provenance_group="extension_reactor_queue",
     ),
     EvidenceSpec(
         id="activity_ledger_docs",
@@ -1567,6 +1567,25 @@ def run_self_test() -> int:
         assert_condition(
             "provenance_mismatch" in kinds,
             "mixed provenance should be reported",
+        )
+
+        repo_root = fixture_root()
+        make_complete_fixture(repo_root, now)
+        reactor_spec = next(
+            spec for spec in EVIDENCE_SPECS if spec.id == "extension_reactor_queue_coverage"
+        )
+        payload = fixture_payload(reactor_spec, now, "reactor-run")
+        assert payload is not None
+        write_artifact(repo_root, reactor_spec.path, payload, mtime=now)
+        report = build_report(repo_root, now=now)
+        extension_mismatch_paths = {
+            issue["path"]
+            for issue in report["blocking_issues"]
+            if issue["category"] == "extension" and issue["kind"] == "provenance_mismatch"
+        }
+        assert_condition(
+            not extension_mismatch_paths,
+            "independent extension evidence lanes should not share provenance group",
         )
 
         repo_root = fixture_root()
