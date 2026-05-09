@@ -32,6 +32,7 @@ const SWARM_DETAIL_LIMIT: usize = 5;
 const SWARM_DISK_WARN_AVAILABLE_KB: u64 = 10 * 1024 * 1024;
 const SWARM_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SWARM_DOCTOR_ADMISSION_SCHEMA: &str = "pi.doctor.swarm_admission.v1";
+const SWARM_DOCTOR_RCH_FAILURE_SCHEMA: &str = "pi.doctor.rch_failure.v1";
 const MIB_BYTES: u64 = 1024 * 1024;
 
 // ── Core Types ──────────────────────────────────────────────────────
@@ -1981,13 +1982,7 @@ fn check_swarm_rch(findings: &mut Vec<Finding>) {
                     .with_detail(redacted_output_snippet(&outcome)),
             );
         }
-        Ok(outcome) => {
-            findings.push(
-                Finding::warn(cat, "rch status failed")
-                    .with_detail(command_failure_detail(&outcome))
-                    .with_remediation("Run `rch doctor` and use a high-capacity local target dir if rch is unavailable"),
-            );
-        }
+        Ok(outcome) => findings.push(rch_failure_finding(&outcome)),
         Err(err) => {
             findings.push(
                 Finding::warn(cat, "rch status failed to start")
@@ -1996,6 +1991,178 @@ fn check_swarm_rch(findings: &mut Vec<Finding>) {
             );
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RchFailureKind {
+    ArtifactRetrievalDiskPressure,
+    LocalTargetDiskPressure,
+    RemoteBuildOrTestFailure,
+    Unknown,
+}
+
+impl RchFailureKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ArtifactRetrievalDiskPressure => "artifact_retrieval_disk_pressure",
+            Self::LocalTargetDiskPressure => "local_target_tmpdir_disk_pressure",
+            Self::RemoteBuildOrTestFailure => "remote_build_or_test_failure",
+            Self::Unknown => "unknown_rch_failure",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::ArtifactRetrievalDiskPressure => {
+                "rch artifact retrieval failed after remote success"
+            }
+            Self::LocalTargetDiskPressure => "rch local target/TMPDIR disk pressure",
+            Self::RemoteBuildOrTestFailure => "rch remote build/test failure",
+            Self::Unknown => "rch status failed",
+        }
+    }
+
+    const fn code_regression(self) -> Option<bool> {
+        match self {
+            Self::ArtifactRetrievalDiskPressure | Self::LocalTargetDiskPressure => Some(false),
+            Self::RemoteBuildOrTestFailure => Some(true),
+            Self::Unknown => None,
+        }
+    }
+
+    const fn fail_closed(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    const fn remediation(self) -> &'static str {
+        match self {
+            Self::ArtifactRetrievalDiskPressure => {
+                "Remote execution appears to have completed; rerun with CARGO_TARGET_DIR and TMPDIR under /data/tmp/pi_agent_rust_cargo/<agent>/ so artifact retrieval has local headroom"
+            }
+            Self::LocalTargetDiskPressure => {
+                "Export CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target and TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp, create both dirs, then rerun the RCH command"
+            }
+            Self::RemoteBuildOrTestFailure => {
+                "Treat this as a real compile/test failure; inspect the cargo error and fix the code or test before rerunning"
+            }
+            Self::Unknown => {
+                "Run `rch doctor`, keep the raw RCH status visible, and do not classify this as disk pressure or a code regression until the failure signature is understood"
+            }
+        }
+    }
+}
+
+fn rch_failure_finding(outcome: &CommandOutcome) -> Finding {
+    let kind = classify_rch_failure(outcome);
+    let detail = command_failure_detail(outcome);
+    let code_regression = kind.code_regression();
+    let data = serde_json::json!({
+        "schema": SWARM_DOCTOR_RCH_FAILURE_SCHEMA,
+        "classification": kind.label(),
+        "code_regression": code_regression,
+        "fail_closed": kind.fail_closed(),
+        "raw_status": {
+            "exit_code": outcome.status_code,
+            "timed_out": outcome.timed_out,
+            "success": outcome.success
+        },
+        "evidence": redacted_output_snippet(outcome),
+        "remediation": kind.remediation()
+    });
+
+    Finding::warn(CheckCategory::Swarm, kind.title())
+        .with_detail(detail)
+        .with_remediation(kind.remediation())
+        .with_data(data)
+}
+
+fn classify_rch_failure(outcome: &CommandOutcome) -> RchFailureKind {
+    let text = rch_failure_text(outcome);
+    let has_disk_pressure = contains_any(
+        &text,
+        &[
+            "no space left on device",
+            "enospc",
+            "disk quota exceeded",
+            "not enough space",
+        ],
+    );
+    let mentions_retrieval = contains_any(
+        &text,
+        &[
+            "artifact retrieval",
+            "retrieve artifact",
+            "retrieving artifact",
+            "download artifact",
+            "fetch artifact",
+            "copy artifact",
+            "sync artifact",
+            "failed to retrieve",
+            "failed to download",
+            "failed to copy",
+            "failed to sync",
+        ],
+    );
+    let remote_succeeded = contains_any(
+        &text,
+        &[
+            "remote command succeeded",
+            "remote build succeeded",
+            "remote build completed",
+            "remote execution succeeded",
+            "build completed successfully",
+            "completed successfully",
+            "exit status 0",
+        ],
+    );
+
+    if mentions_retrieval && (has_disk_pressure || remote_succeeded) {
+        return RchFailureKind::ArtifactRetrievalDiskPressure;
+    }
+
+    if has_disk_pressure
+        && contains_any(
+            &text,
+            &[
+                "cargo_target_dir",
+                "tmpdir",
+                "target/debug",
+                "target/release",
+                "/target/",
+                "target dir",
+                "temporary directory",
+                "temp dir",
+            ],
+        )
+    {
+        return RchFailureKind::LocalTargetDiskPressure;
+    }
+
+    if contains_any(
+        &text,
+        &[
+            "could not compile",
+            "compilation failed",
+            "cargo check failed",
+            "cargo clippy failed",
+            "cargo test failed",
+            "test result: failed",
+            "error[",
+            "error:",
+        ],
+    ) {
+        return RchFailureKind::RemoteBuildOrTestFailure;
+    }
+
+    RchFailureKind::Unknown
+}
+
+fn rch_failure_text(outcome: &CommandOutcome) -> String {
+    format!("{}\n{}", outcome.stdout, outcome.stderr).to_ascii_lowercase()
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn check_swarm_temp_dirs(findings: &mut Vec<Finding>) {
@@ -2954,6 +3121,119 @@ not-json
         assert!(snippet.contains("status ok"));
         assert!(snippet.contains("[redacted sensitive output line]"));
         assert!(!snippet.contains("secret-value"));
+    }
+
+    #[test]
+    fn swarm_rch_classifier_reports_retrieval_disk_pressure_without_code_regression() {
+        let outcome = CommandOutcome {
+            timed_out: false,
+            success: false,
+            status_code: Some(1),
+            stdout: "remote command succeeded; exit status 0\n".to_string(),
+            stderr: "failed to retrieve artifact bundle: No space left on device while copying to CARGO_TARGET_DIR\n".to_string(),
+        };
+
+        assert_eq!(
+            classify_rch_failure(&outcome),
+            RchFailureKind::ArtifactRetrievalDiskPressure
+        );
+        let finding = rch_failure_finding(&outcome);
+        let data = finding_data(&finding);
+
+        assert_eq!(data["classification"], "artifact_retrieval_disk_pressure");
+        assert_eq!(data["code_regression"], serde_json::json!(false));
+        assert_eq!(data["fail_closed"], serde_json::json!(false));
+        assert!(
+            finding
+                .remediation
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/data/tmp/pi_agent_rust_cargo/<agent>/")
+        );
+    }
+
+    #[test]
+    fn swarm_rch_classifier_reports_local_target_tmpdir_disk_pressure() {
+        let outcome = CommandOutcome {
+            timed_out: false,
+            success: false,
+            status_code: Some(1),
+            stdout: String::new(),
+            stderr: "failed to create target/debug/.fingerprint/pi: ENOSPC (No space left on device); TMPDIR=/tmp\n".to_string(),
+        };
+
+        assert_eq!(
+            classify_rch_failure(&outcome),
+            RchFailureKind::LocalTargetDiskPressure
+        );
+        let finding = rch_failure_finding(&outcome);
+        let data = finding_data(&finding);
+
+        assert_eq!(data["classification"], "local_target_tmpdir_disk_pressure");
+        assert_eq!(data["code_regression"], serde_json::json!(false));
+        assert!(
+            finding
+                .remediation
+                .as_deref()
+                .unwrap_or_default()
+                .contains("CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target")
+        );
+    }
+
+    #[test]
+    fn swarm_rch_classifier_reports_true_remote_compile_failure() {
+        let outcome = CommandOutcome {
+            timed_out: false,
+            success: false,
+            status_code: Some(101),
+            stdout: String::new(),
+            stderr: "error[E0308]: mismatched types\nerror: could not compile `pi` due to previous error\n".to_string(),
+        };
+
+        assert_eq!(
+            classify_rch_failure(&outcome),
+            RchFailureKind::RemoteBuildOrTestFailure
+        );
+        let finding = rch_failure_finding(&outcome);
+        let data = finding_data(&finding);
+
+        assert_eq!(data["classification"], "remote_build_or_test_failure");
+        assert_eq!(data["code_regression"], serde_json::json!(true));
+        assert_eq!(data["raw_status"]["exit_code"], serde_json::json!(101));
+        assert!(
+            finding
+                .remediation
+                .as_deref()
+                .unwrap_or_default()
+                .contains("real compile/test failure")
+        );
+    }
+
+    #[test]
+    fn swarm_rch_classifier_keeps_unknown_fail_closed_with_raw_status() {
+        let outcome = CommandOutcome {
+            timed_out: false,
+            success: false,
+            status_code: Some(7),
+            stdout: String::new(),
+            stderr: "worker transport returned opaque failure code".to_string(),
+        };
+
+        assert_eq!(classify_rch_failure(&outcome), RchFailureKind::Unknown);
+        let finding = rch_failure_finding(&outcome);
+        let data = finding_data(&finding);
+
+        assert_eq!(data["classification"], "unknown_rch_failure");
+        assert!(data["code_regression"].is_null());
+        assert_eq!(data["fail_closed"], serde_json::json!(true));
+        assert_eq!(data["raw_status"]["exit_code"], serde_json::json!(7));
+        assert!(
+            finding
+                .remediation
+                .as_deref()
+                .unwrap_or_default()
+                .contains("do not classify this as disk pressure or a code regression")
+        );
     }
 
     #[test]
