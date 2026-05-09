@@ -25364,6 +25364,9 @@ impl ExtensionManager {
         let mut commands = Vec::new();
         for ext in &inner.extensions {
             for cmd in &ext.slash_commands {
+                if is_non_callable_compat_inferred(cmd) {
+                    continue;
+                }
                 let Some(name) = extract_slash_command_name(cmd) else {
                     continue;
                 };
@@ -25423,7 +25426,12 @@ impl ExtensionManager {
         inner
             .extensions
             .iter()
-            .flat_map(|ext| ext.tools.iter().cloned())
+            .flat_map(|ext| {
+                ext.tools
+                    .iter()
+                    .filter(|tool| !is_non_callable_compat_inferred(tool))
+                    .cloned()
+            })
             .collect()
     }
 
@@ -25433,6 +25441,7 @@ impl ExtensionManager {
             .extensions
             .iter()
             .flat_map(|ext| ext.slash_commands.iter())
+            .filter(|cmd| !is_non_callable_compat_inferred(cmd))
             .filter_map(extract_slash_command_name)
             .map(|cmd| normalize_command(&cmd))
             .collect()
@@ -30241,13 +30250,15 @@ fn apply_compat_registration_hints(
         }
         slash_commands.push(json!({
             "name": name,
-            "description": "Compat-inferred command placeholder",
+            "description": "Compat-inferred command metadata (static scan fallback)",
+            "compatInferred": true,
+            "callable": false,
         }));
         tracing::info!(
             event = "ext.compat.command.inferred",
             extension_id = %extension_id,
             command = %name,
-            "Added compat inferred slash command placeholder"
+            "Added compat inferred slash command metadata"
         );
     }
 
@@ -30256,7 +30267,9 @@ fn apply_compat_registration_hints(
         tools.push(json!({
             "name": inferred_tool_name,
             "label": format!("{extension_name} (compat)"),
-            "description": "Compat-inferred placeholder tool (static scan fallback)",
+            "description": "Compat-inferred tool metadata (static scan fallback)",
+            "compatInferred": true,
+            "callable": false,
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -30267,7 +30280,7 @@ fn apply_compat_registration_hints(
             event = "ext.compat.tool.inferred",
             extension_id = %extension_id,
             tool_name = %inferred_tool_name,
-            "Added compat inferred tool placeholder"
+            "Added compat inferred tool metadata"
         );
     }
 }
@@ -30314,6 +30327,17 @@ fn normalize_command(name: &str) -> String {
     name.trim_start_matches('/').trim().to_ascii_lowercase()
 }
 
+fn is_non_callable_compat_inferred(value: &Value) -> bool {
+    value
+        .get("compatInferred")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !value
+            .get("callable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30344,6 +30368,72 @@ mod tests {
         assert_eq!(now, timer_driver.now());
         let sleeper = extension_wait_sleep(Duration::from_millis(5));
         assert_eq!(sleeper.remaining(now), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn compat_inferred_static_hints_do_not_enter_callable_surfaces() {
+        let manager = ExtensionManager::new();
+        manager.register(RegisterPayload {
+            name: "compat-scan-ext".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: PROTOCOL_VERSION.to_string(),
+            capabilities: Vec::new(),
+            capability_manifest: None,
+            tools: vec![
+                json!({
+                    "name": "real_tool",
+                    "description": "runtime-registered tool",
+                    "parameters": { "type": "object", "properties": {} },
+                }),
+                json!({
+                    "name": "static_only_tool",
+                    "description": "static scan fallback",
+                    "parameters": { "type": "object", "properties": {} },
+                    "compatInferred": true,
+                    "callable": false,
+                }),
+            ],
+            slash_commands: vec![
+                json!({
+                    "name": "real-command",
+                    "description": "runtime-registered command",
+                }),
+                json!({
+                    "name": "static-only-command",
+                    "description": "static scan fallback",
+                    "compatInferred": true,
+                    "callable": false,
+                }),
+            ],
+            shortcuts: Vec::new(),
+            flags: Vec::new(),
+            event_hooks: Vec::new(),
+        });
+
+        let command_names = manager
+            .list_commands()
+            .into_iter()
+            .filter_map(|command| {
+                command
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(command_names, vec!["real-command"]);
+        assert!(manager.has_command("real-command"));
+        assert!(!manager.has_command("static-only-command"));
+
+        let tool_names = manager
+            .extension_tool_defs()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, vec!["real_tool"]);
     }
 
     fn compiled_extension_protocol_schema() -> Validator {
