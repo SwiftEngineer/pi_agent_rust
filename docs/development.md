@@ -112,6 +112,11 @@ cargo test --test ext_conformance_generated --features ext-conformance -- --noca
 
 # Community + npm + third-party (weekly in CI, use --ignored)
 cargo test --test ext_conformance_diff --features ext-conformance -- --ignored --nocapture
+
+# Npm-registry differential lane (ignored opt-in, bounded to 5 by default)
+rch exec -- env PI_NPM_FILTER=aliou-pi-extension-dev PI_NPM_MAX=1 \
+  cargo test --test ext_conformance_diff --features ext-conformance diff_npm_manifest -- \
+  --include-ignored --nocapture
 ```
 
 **Environment variables:**
@@ -119,6 +124,8 @@ cargo test --test ext_conformance_diff --features ext-conformance -- --ignored -
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PI_OFFICIAL_MAX` | (all) | Limit official extensions tested |
+| `PI_NPM_FILTER` | (none) | Filter npm-registry extensions by `dir/entry` substring |
+| `PI_NPM_MAX` | 5 | Limit the ignored npm-registry differential lane to a deterministic bounded sample |
 | `PI_TS_ORACLE_TIMEOUT_SECS` | 30 | TS oracle process timeout |
 | `PI_DETERMINISTIC_TIME_MS` | 1700000000000 | Fixed wall-clock for determinism |
 | `PI_DETERMINISTIC_RANDOM_SEED` | 1337 | Fixed random seed |
