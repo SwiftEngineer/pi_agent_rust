@@ -7,8 +7,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total non-pass extensions | 36 |
-| Actionable | 26 |
+| Total non-pass extensions | 35 |
+| Actionable | 25 |
 | Non-actionable | 10 |
 
 ## Entries
@@ -45,9 +45,8 @@
 | 28 | `third-party/openclaw-openclaw` | medium | pi-conformance-team | actionable | fixture_manifest_drift | bd-8t27h.19 | no | bd-8t27h.19 |
 | 29 | `third-party/pasky-pi-amplike` | medium | pi-conformance-team | actionable | fixture_manifest_drift | bd-8t27h.19 | no | bd-8t27h.19 |
 | 30 | `third-party/w-winter-dot314` | medium | pi-conformance-team | actionable | fixture_manifest_drift | bd-8t27h.19 | no | bd-8t27h.19 |
-| 31 | `third-party/kcosr-pi-extensions` | medium | pi-policy-runtime | actionable | fixture_manifest_drift | bd-8t27h.20 | no | bd-8t27h.20 |
-| 32 | `base_fixtures` | low | pi-conformance-team | tracked_non_actionable | fixture_exclusion | bd-8t27h.14.3 | no | bd-8t27h.14.3 |
-| 33 | `community/qualisero-background-notify` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
-| 34 | `community/qualisero-pi-agent-scip` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
-| 35 | `community/qualisero-safe-git` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
-| 36 | `npm/aliou-pi-processes` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
+| 31 | `base_fixtures` | low | pi-conformance-team | tracked_non_actionable | fixture_exclusion | bd-8t27h.14.3 | no | bd-8t27h.14.3 |
+| 32 | `community/qualisero-background-notify` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
+| 33 | `community/qualisero-pi-agent-scip` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
+| 34 | `community/qualisero-safe-git` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |
+| 35 | `npm/aliou-pi-processes` | low | pi-parity-runtime | tracked_non_actionable | packaging_gap | bd-8t27h.14.4 | no | bd-8t27h.14.4 |

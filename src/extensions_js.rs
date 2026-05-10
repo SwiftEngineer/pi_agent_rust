@@ -6973,12 +6973,229 @@ fn maybe_cjs_to_esm(source: &str) -> String {
     output.push_str(source);
     output.push('\n');
 
+    if has_module_exports {
+        for name in extract_module_exports_object_names(source) {
+            let Some(name_literal) = serde_json::to_string(&name).ok() else {
+                continue;
+            };
+            let local_name = format!("__cjs_named_export_{name}");
+            let _ = writeln!(
+                output,
+                "const {local_name} = module.exports[{name_literal}];"
+            );
+            let _ = writeln!(output, "export {{ {local_name} as {name} }};");
+        }
+    }
+
     if !has_export_default && (!has_esm || has_module_exports || has_exports_usage) {
         // Export CommonJS entrypoint for loaders that require a default init fn.
         output.push_str("export default module.exports;\n");
     }
 
     output
+}
+
+fn extract_module_exports_object_names(source: &str) -> Vec<String> {
+    const MODULE: &[u8] = b"module";
+
+    let bytes = source.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut i = 0usize;
+    let mut scanner = BindingScanner::default();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+
+        if scanner.consume_context(b, next, &mut i) || scanner.enter_context(b, next, &mut i) {
+            continue;
+        }
+
+        if bytes[i..].starts_with(MODULE)
+            && is_identifier_boundary(bytes, i, MODULE.len())
+            && let Some(body_start) = parse_module_exports_object_start(bytes, i + MODULE.len())
+            && let Some(body_end) = find_js_object_end(source, body_start)
+        {
+            collect_module_exports_object_names(&source[body_start..body_end], &mut names);
+            i = body_end.saturating_add(1);
+            continue;
+        }
+
+        i += 1;
+    }
+
+    names.into_iter().collect()
+}
+
+fn is_identifier_boundary(bytes: &[u8], start: usize, len: usize) -> bool {
+    let before_ok = start == 0 || !is_js_ident_continue(bytes[start - 1]);
+    let end = start + len;
+    let after_ok = end >= bytes.len() || !is_js_ident_continue(bytes[end]);
+    before_ok && after_ok
+}
+
+fn skip_ascii_ws(bytes: &[u8], index: &mut usize) {
+    while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+        *index += 1;
+    }
+}
+
+fn parse_module_exports_object_start(bytes: &[u8], mut index: usize) -> Option<usize> {
+    const EXPORTS: &[u8] = b"exports";
+
+    skip_ascii_ws(bytes, &mut index);
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        skip_ascii_ws(bytes, &mut index);
+        if !bytes.get(index..)?.starts_with(EXPORTS) {
+            return None;
+        }
+        index += EXPORTS.len();
+    } else if bytes.get(index) == Some(&b'[') {
+        index += 1;
+        skip_ascii_ws(bytes, &mut index);
+        let quote = *bytes.get(index)?;
+        if quote != b'\'' && quote != b'"' {
+            return None;
+        }
+        index += 1;
+        if !bytes.get(index..)?.starts_with(EXPORTS) {
+            return None;
+        }
+        index += EXPORTS.len();
+        if bytes.get(index) != Some(&quote) {
+            return None;
+        }
+        index += 1;
+        skip_ascii_ws(bytes, &mut index);
+        if bytes.get(index) != Some(&b']') {
+            return None;
+        }
+        index += 1;
+    } else {
+        return None;
+    }
+
+    skip_ascii_ws(bytes, &mut index);
+    if bytes.get(index) != Some(&b'=') {
+        return None;
+    }
+    index += 1;
+    skip_ascii_ws(bytes, &mut index);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    Some(index + 1)
+}
+
+fn find_js_object_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut i = start;
+    let mut depth = 1usize;
+    let mut scanner = BindingScanner::default();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+
+        if scanner.consume_context(b, next, &mut i) || scanner.enter_context(b, next, &mut i) {
+            continue;
+        }
+
+        match b {
+            b'{' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    None
+}
+
+fn collect_module_exports_object_names(body: &str, names: &mut BTreeSet<String>) {
+    for entry in split_top_level_object_entries(body) {
+        let Some(name) = module_exports_property_name(entry) else {
+            continue;
+        };
+        if name != "default" && is_valid_js_export_name(&name) {
+            names.insert(name);
+        }
+    }
+}
+
+fn split_top_level_object_entries(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut entries = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    let mut scanner = BindingScanner::default();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+
+        if scanner.consume_context(b, next, &mut i) || scanner.enter_context(b, next, &mut i) {
+            continue;
+        }
+
+        match b {
+            b'{' | b'[' | b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b'}' | b']' | b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b',' if depth == 0 => {
+                entries.push(body[start..i].trim());
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let tail = body[start..].trim();
+    if !tail.is_empty() {
+        entries.push(tail);
+    }
+    entries
+}
+
+fn module_exports_property_name(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry.is_empty() || entry.starts_with("...") {
+        return None;
+    }
+
+    let bytes = entry.as_bytes();
+    if let Some((&quote, rest)) = bytes.split_first()
+        && (quote == b'\'' || quote == b'"')
+    {
+        let end = rest.iter().position(|b| *b == quote)?;
+        return Some(entry[1..=end].to_string());
+    }
+
+    let first = *bytes.first()?;
+    if !is_js_ident_start(first) {
+        return None;
+    }
+    let mut end = 1usize;
+    while end < bytes.len() && is_js_ident_continue(bytes[end]) {
+        end += 1;
+    }
+    Some(entry[..end].to_string())
 }
 
 const fn is_js_ident_start(byte: u8) -> bool {
@@ -20884,6 +21101,42 @@ module.exports = { fs, generated };
         let rewritten = maybe_cjs_to_esm(source);
         assert!(rewritten.contains(r#"from "fs";"#));
         assert!(!rewritten.contains(r#"from "ajv/dist/runtime/validation_error";"#));
+    }
+
+    #[test]
+    fn maybe_cjs_to_esm_synthesizes_named_exports_from_module_exports_object() {
+        let source = r"
+function buildListItemContentBlock() {}
+function buildNoteMetadataBlock() {}
+module.exports = {
+  buildListItemContentBlock,
+  buildNoteMetadataBlock,
+};
+";
+
+        let rewritten = maybe_cjs_to_esm(source);
+        assert!(
+            rewritten.contains(
+                "const __cjs_named_export_buildListItemContentBlock = \
+                 module.exports[\"buildListItemContentBlock\"];"
+            ),
+            "CommonJS object shorthand should get a named export binding:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains(
+                "export { __cjs_named_export_buildListItemContentBlock as \
+                 buildListItemContentBlock };"
+            ),
+            "CommonJS object shorthand should export the property name:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains(
+                "export { __cjs_named_export_buildNoteMetadataBlock as \
+                 buildNoteMetadataBlock };"
+            ),
+            "all valid shorthand properties should be exported:\n{rewritten}"
+        );
+        assert!(rewritten.contains("export default module.exports;"));
     }
 
     #[test]

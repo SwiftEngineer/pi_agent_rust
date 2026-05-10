@@ -11,14 +11,11 @@ import { matchesKey } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import * as formatModule from "./format";
-import * as instancesModule from "./instances";
-import * as entriesModule from "./entries";
 
-// PiJS wraps adjacent CommonJS helpers as default module.exports objects.
-const formatHelpers = (formatModule as any).default ?? formatModule;
-const instancesHelpers = (instancesModule as any).default ?? instancesModule;
-const entriesHelpers = (entriesModule as any).default ?? entriesModule;
+// PiJS bridges adjacent CommonJS helpers through require() as module.exports.
+const formatHelpers = require("./format");
+const instancesHelpers = require("./instances");
+const entriesHelpers = require("./entries");
 const {
   buildListItemContentBlock,
   buildListItemExportBlock,

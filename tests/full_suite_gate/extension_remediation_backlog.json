@@ -7,18 +7,17 @@
     "conformance_baseline": "tests/ext_conformance/reports/conformance_baseline.json"
   },
   "summary": {
-    "total_non_pass_extensions": 36,
-    "actionable": 22,
+    "total_non_pass_extensions": 35,
+    "actionable": 21,
     "non_actionable": 14,
     "by_severity": {
       "high": 9,
       "low": 5,
-      "medium": 22
+      "medium": 21
     },
     "by_owner": {
       "pi-conformance-team": 22,
-      "pi-parity-runtime": 13,
-      "pi-policy-runtime": 1
+      "pi-parity-runtime": 13
     }
   },
   "entries": [
@@ -908,35 +907,6 @@
     },
     {
       "rank": 31,
-      "extension_id": "third-party/kcosr-pi-extensions",
-      "status": "actionable",
-      "owner": "pi-policy-runtime",
-      "severity": "medium",
-      "root_cause_family": "fixture_manifest_drift",
-      "root_cause_codes": [
-        "manifest_mismatch"
-      ],
-      "remediation": "Package prompt assets in-root or extend safe packaged-asset mapping.",
-      "fallback_guidance": "Regenerate expected registration fixtures so manifest and runtime outputs agree.",
-      "verification_tests": [
-        "cargo test --test conformance_regression_gate -- --nocapture",
-        "cargo test --test conformance_report -- --nocapture",
-        "cargo test --test ext_conformance_generated --features ext-conformance -- conformance_must_pass_gate --nocapture --exact",
-        "cargo test --test ext_conformance_generated --features ext-conformance -- conformance_provider_compat_matrix --nocapture --exact"
-      ],
-      "evidence_refs": [
-        "tests/ext_conformance/reports/conformance_baseline.json",
-        "/failure_classification/manifest_mismatch/extensions",
-        "/remediation_buckets/missing_fixture/cause_codes",
-        "/exception_policy/entries"
-      ],
-      "follow_up_bead": "bd-8t27h.20",
-      "tracking_issue": "bd-8t27h.20",
-      "fallback_validation": "exception_policy status=temporary cause_code=policy_blocked review_by=2026-06-30 tracking_issue=bd-8t27h.20; rationale=Reads prompt artifact outside extension root and is blocked by path policy.",
-      "canonical_failure": false
-    },
-    {
-      "rank": 32,
       "extension_id": "base_fixtures",
       "status": "tracked_non_actionable",
       "owner": "pi-conformance-team",
@@ -965,7 +935,7 @@
       "canonical_failure": false
     },
     {
-      "rank": 33,
+      "rank": 32,
       "extension_id": "community/qualisero-background-notify",
       "status": "tracked_non_actionable",
       "owner": "pi-parity-runtime",
@@ -994,7 +964,7 @@
       "canonical_failure": false
     },
     {
-      "rank": 34,
+      "rank": 33,
       "extension_id": "community/qualisero-pi-agent-scip",
       "status": "tracked_non_actionable",
       "owner": "pi-parity-runtime",
@@ -1023,7 +993,7 @@
       "canonical_failure": false
     },
     {
-      "rank": 35,
+      "rank": 34,
       "extension_id": "community/qualisero-safe-git",
       "status": "tracked_non_actionable",
       "owner": "pi-parity-runtime",
@@ -1052,7 +1022,7 @@
       "canonical_failure": false
     },
     {
-      "rank": 36,
+      "rank": 35,
       "extension_id": "npm/aliou-pi-processes",
       "status": "tracked_non_actionable",
       "owner": "pi-parity-runtime",
