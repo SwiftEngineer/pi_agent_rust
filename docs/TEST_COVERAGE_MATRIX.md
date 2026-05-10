@@ -110,7 +110,7 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/package_manager.rs` | Package manager | Unit; `tests/package_manager.rs`, `tests/e2e_cli.rs`. |
 | `src/perf_build.rs` | Perf build metadata | Unit; `tests/perf_bench_harness.rs`, `tests/perf_budgets.rs`, `tests/perf_regression.rs`. |
 | `src/permissions.rs` | Capability permissions | Unit; `tests/capability_policy_model.rs`, `tests/capability_policy_scoped.rs`, `tests/capability_denial_matrix.rs`. |
-| `src/pi_wasm.rs` | PiWasm runtime | Unit; `tests/lab_runtime_extensions.rs`; unsupported import policy audit owner `bd-8t27h.13`. |
+| `src/pi_wasm.rs` | PiWasm runtime | Unit; `tests/lab_runtime_extensions.rs`; unsupported imports fail closed, with bounded Emscripten compatibility stubs covered by source tests. |
 | `src/platform.rs` | Platform helpers | Unit. |
 | `src/provider.rs` | Provider trait/schema | Unit; `tests/provider_factory.rs`, `tests/provider_contract.rs`, `tests/provider_native_contract.rs`. |
 | `src/provider_metadata.rs` | Provider metadata | Unit; `tests/provider_metadata_comprehensive.rs`, `tests/provider_registry_guardrails.rs`. |
@@ -214,7 +214,7 @@ The active JSONL inventory gap is `bd-8t27h.9`.
 | `bd-8t27h.10` | Determinize E2E golden corpus dynamic cassette path. |
 | `bd-8t27h.11` | Move extension dispatcher timing regression away from wall-clock flake. |
 | `bd-8t27h.12` | Normalize manual perf/report generators to tmpdir-aware smoke tests. |
-| `bd-8t27h.13` | Audit PiWasm unsupported import fallback policy. |
+| `bd-8t27h.13` | Document and test PiWasm unsupported import fail-closed policy. |
 | `bd-8t27h.15` | Add resource/scheduler/admission replay coverage to machine-readable matrix. |
 | `bd-8t27h.16` | Bound extension random trials into deterministic smoke lane. |
 | `bd-8t27h.17` | Onboard unvendored extension conformance corpus. |

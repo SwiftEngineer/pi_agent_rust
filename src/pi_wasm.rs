@@ -415,13 +415,51 @@ const fn set_f64_result(results: &mut [Val], value: f64) {
     }
 }
 
-fn stub_import(
+const SUPPORTED_HOST_IMPORTS: &[&str] = &[
+    "__syscall_openat",
+    "fd_close",
+    "fd_read",
+    "fd_seek",
+    "fd_write",
+    "emscripten_get_now",
+    "emscripten_resize_heap",
+];
+
+const COMPAT_STUB_IMPORTS: &[&str] = &[
+    "__syscall_fcntl64",
+    "__syscall_ioctl",
+    "__syscall_mkdirat",
+    "__syscall_renameat",
+    "__syscall_rmdir",
+    "__syscall_unlinkat",
+    "_emscripten_system",
+    "exit",
+];
+
+fn unsupported_import_error(mod_name: &str, imp_name: &str) -> String {
+    format!(
+        "Unsupported WASM import {mod_name}.{imp_name}; PiWasm fails closed instead of creating ambient default stubs. Supported host imports: {}; compatibility stubs: {}",
+        SUPPORTED_HOST_IMPORTS.join(", "),
+        COMPAT_STUB_IMPORTS.join(", ")
+    )
+}
+
+fn register_compat_stub_import(
     linker: &mut Linker<WasmHostData>,
     mod_name: &str,
     imp_name: &str,
     func_ty: &wasmtime::FuncType,
 ) -> Result<(), String> {
     let result_types: Vec<ValType> = func_ty.results().collect();
+    let import_label = format!("{mod_name}.{imp_name}");
+    if result_types
+        .iter()
+        .any(|ty| Val::default_for_ty(ty).is_none())
+    {
+        return Err(format!(
+            "Compatibility stub {import_label} has unsupported default result type"
+        ));
+    }
     linker
         .func_new(
             mod_name,
@@ -429,17 +467,19 @@ fn stub_import(
             func_ty.clone(),
             move |_caller: Caller<'_, WasmHostData>, _params: &[Val], results: &mut [Val]| {
                 for (i, ty) in result_types.iter().enumerate() {
-                    results[i] = Val::default_for_ty(ty).unwrap_or(Val::I32(0));
+                    results[i] = Val::default_for_ty(ty)
+                        .ok_or_else(|| anyhow!("Unsupported default result for {import_label}"))?;
                 }
                 Ok(())
             },
         )
-        .map_err(|e| format!("Failed to stub import {mod_name}.{imp_name}: {e}"))?;
+        .map_err(|e| format!("Failed to register compatibility stub {mod_name}.{imp_name}: {e}"))?;
     Ok(())
 }
 
 /// Register the small host import surface PiWasm currently supports.
-/// Any unsupported imports fall back to no-op/default stubs.
+/// Unsupported imports fail closed. The only default-return compatibility stubs
+/// are the explicit Emscripten names in `COMPAT_STUB_IMPORTS`.
 #[allow(clippy::too_many_lines)]
 fn register_host_imports(
     linker: &mut Linker<WasmHostData>,
@@ -899,15 +939,13 @@ fn register_host_imports(
                             format!("Failed to register import {mod_name}.{imp_name}: {e}")
                         })?;
                 }
-                "__syscall_fcntl64" | "__syscall_ioctl" | "__syscall_mkdirat"
-                | "__syscall_renameat" | "__syscall_rmdir" | "__syscall_unlinkat"
-                | "_emscripten_system" | "exit" => {
-                    stub_import(linker, mod_name, imp_name, &func_ty)?;
+                name if COMPAT_STUB_IMPORTS.contains(&name) => {
+                    register_compat_stub_import(linker, mod_name, imp_name, &func_ty)?;
                 }
-                _ => stub_import(linker, mod_name, imp_name, &func_ty)?,
+                _ => return Err(unsupported_import_error(mod_name, imp_name)),
             }
         } else {
-            // Non-function imports are currently skipped for MVP.
+            return Err(unsupported_import_error(mod_name, imp_name));
         }
     }
     Ok(())
@@ -2543,7 +2581,7 @@ mod tests {
     }
 
     #[test]
-    fn module_with_imports_instantiates_with_stubs() {
+    fn module_with_unknown_import_fails_closed() {
         let wasm_bytes = wat_to_wasm(
             r#"(module
               (import "env" "log" (func (param i32)))
@@ -2560,16 +2598,69 @@ mod tests {
             }
             ctx.globals().set("__test_bytes", arr).unwrap();
 
+            let result: rquickjs::Result<u32> = ctx.eval(
+                r#"
+                    var mid = __pi_wasm_compile_native(__test_bytes);
+                    __pi_wasm_instantiate_native(mid);
+                "#,
+            );
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn module_with_explicit_compat_stub_import_instantiates() {
+        let wasm_bytes = wat_to_wasm(
+            r#"(module
+              (import "env" "__syscall_ioctl" (func $ioctl (param i32 i32 i32) (result i32)))
+              (func (export "call_ioctl") (result i32)
+                i32.const 0
+                i32.const 0
+                i32.const 0
+                call $ioctl)
+            )"#,
+        );
+        run_wasm_test(|ctx, _state| {
+            let arr = rquickjs::Array::new(ctx.clone()).unwrap();
+            for (i, &b) in wasm_bytes.iter().enumerate() {
+                arr.set(i, i32::from(b)).unwrap();
+            }
+            ctx.globals().set("__test_bytes", arr).unwrap();
+
             let result: i32 = ctx
                 .eval(
                     r#"
                     var mid = __pi_wasm_compile_native(__test_bytes);
                     var iid = __pi_wasm_instantiate_native(mid);
-                    __pi_wasm_call_export_native(iid, "run", []);
+                    __pi_wasm_call_export_native(iid, "call_ioctl", []);
                 "#,
                 )
-                .expect("call with import stubs");
-            assert_eq!(result, 1);
+                .expect("call explicit compatibility stub");
+            assert_eq!(result, 0);
+        });
+    }
+
+    #[test]
+    fn module_with_non_function_import_fails_closed() {
+        let wasm_bytes = wat_to_wasm(
+            r#"(module
+              (import "env" "memory" (memory 1))
+            )"#,
+        );
+        run_wasm_test(|ctx, _state| {
+            let arr = rquickjs::Array::new(ctx.clone()).unwrap();
+            for (i, &b) in wasm_bytes.iter().enumerate() {
+                arr.set(i, i32::from(b)).unwrap();
+            }
+            ctx.globals().set("__test_bytes", arr).unwrap();
+
+            let result: rquickjs::Result<u32> = ctx.eval(
+                r#"
+                    var mid = __pi_wasm_compile_native(__test_bytes);
+                    __pi_wasm_instantiate_native(mid);
+                "#,
+            );
+            assert!(result.is_err());
         });
     }
 

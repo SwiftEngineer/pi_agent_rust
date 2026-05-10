@@ -52224,7 +52224,9 @@ mod tests {
                 assert_eq!(native.extension_id, "sample");
                 assert_eq!(native.entry_path, safe_canonicalize(&entry));
             }
-            other @ ExtensionLoadSpec::Js(_) => panic!("expected native spec, got {other:?}"),
+            ExtensionLoadSpec::Js(other) => panic!("expected native spec, got {other:?}"),
+            #[cfg(feature = "wasm-host")]
+            ExtensionLoadSpec::Wasm(other) => panic!("expected native spec, got {other:?}"),
         }
     }
 
@@ -52252,7 +52254,9 @@ mod tests {
                 assert_eq!(js.extension_id, expected_id);
                 assert_eq!(js.entry_path, safe_canonicalize(&entry));
             }
-            other @ ExtensionLoadSpec::NativeRust(_) => panic!("expected js spec, got {other:?}"),
+            ExtensionLoadSpec::NativeRust(other) => panic!("expected js spec, got {other:?}"),
+            #[cfg(feature = "wasm-host")]
+            ExtensionLoadSpec::Wasm(other) => panic!("expected js spec, got {other:?}"),
         }
     }
 
@@ -52287,8 +52291,12 @@ mod tests {
                     assert_eq!(js.extension_id, expected_id);
                     assert_eq!(js.entry_path, safe_canonicalize(&entry));
                 }
-                other @ ExtensionLoadSpec::NativeRust(_) => {
-                    panic!("expected js spec for {ext}, got {other:?}")
+                ExtensionLoadSpec::NativeRust(other) => {
+                    panic!("expected js spec for {ext}, got {other:?}");
+                }
+                #[cfg(feature = "wasm-host")]
+                ExtensionLoadSpec::Wasm(other) => {
+                    panic!("expected js spec for {ext}, got {other:?}");
                 }
             }
         }
@@ -52329,7 +52337,9 @@ mod tests {
                 assert_eq!(js.version, "0.1.0");
                 assert_eq!(js.entry_path, safe_canonicalize(&entry));
             }
-            other @ ExtensionLoadSpec::NativeRust(_) => panic!("expected js spec, got {other:?}"),
+            ExtensionLoadSpec::NativeRust(other) => panic!("expected js spec, got {other:?}"),
+            #[cfg(feature = "wasm-host")]
+            ExtensionLoadSpec::Wasm(other) => panic!("expected js spec, got {other:?}"),
         }
     }
 

@@ -280,8 +280,10 @@ PI_BENCH_MODE=nightly PI_BENCH_MAX=103 PI_BENCH_ITERATIONS=10 \
 | **Compatibility** | 100% Node API | ~98% Node API | `123/123` certified must-pass extensions; `221/224` full-manifest health (harness scope) |
 | **Dependencies** | node binary (80MB+) | bun binary (60MB+) | Embedded (0 bytes) |
 
-*PiWasm bridge planned for extensions that require WebAssembly; no current
-corpus extension uses it.
+*PiWasm bridge is available behind `wasm-host` for extensions that require
+WebAssembly. It links only explicit host imports and bounded Emscripten
+compatibility stubs; unsupported imports fail closed during instantiation. No
+current corpus extension requires it as a runtime dependency.
 
 ---
 

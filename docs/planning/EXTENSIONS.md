@@ -108,6 +108,11 @@ and test harness workstreams.
   components).
 - No ambient OS APIs: all side effects must flow through the connector
   dispatcher (capability checks + structured audit logs).
+- PiWasm import linking is fail-closed: modules only receive the host imports
+  implemented in `src/pi_wasm.rs`. Unsupported function/table/global/memory
+  imports fail during instantiation. Default-return compatibility stubs are
+  limited to the explicit Emscripten names in `COMPAT_STUB_IMPORTS` and do not
+  grant host filesystem, network, or process authority.
 
 #### 1A.4.2 Definitions (Terms)
 
