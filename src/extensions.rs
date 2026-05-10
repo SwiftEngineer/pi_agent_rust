@@ -20377,15 +20377,7 @@ async fn load_one_extension(
         match load_result {
             Ok(()) => {}
             Err(err) if entry_index == 0 => return Err(err),
-            Err(err) => {
-                tracing::warn!(
-                    event = "ext.load.multi_entry.skipped",
-                    extension_id = %spec.extension_id,
-                    entry = %entry_specifier,
-                    error = %err,
-                    "Skipping non-primary entrypoint after load failure"
-                );
-            }
+            Err(err) => return Err(err),
         }
     }
 
