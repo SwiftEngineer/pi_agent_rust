@@ -16,7 +16,12 @@ BENCH_ALLOCATOR_FALLBACK="${BENCH_ALLOCATOR_FALLBACK:-system}"
 BENCH_CARGO_RUNNER="${BENCH_CARGO_RUNNER:-auto}"
 BENCH_SYSTEM_FEATURES="${BENCH_SYSTEM_FEATURES:-image-resize,clipboard,wasm-host,sqlite-sessions}"
 
-BIN="$TARGET_DIR/$BENCH_CARGO_PROFILE/pijs_workload"
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+  BENCH_PROFILE_DIR="$TARGET_DIR/$CARGO_BUILD_TARGET/$BENCH_CARGO_PROFILE"
+else
+  BENCH_PROFILE_DIR="$TARGET_DIR/$BENCH_CARGO_PROFILE"
+fi
+BIN="$BENCH_PROFILE_DIR/examples/pijs_workload"
 ITERATIONS="${ITERATIONS:-200}"
 TOOL_CALLS_CSV="${TOOL_CALLS_CSV:-1,10}"
 HYPERFINE_WARMUP="${HYPERFINE_WARMUP:-3}"
@@ -90,7 +95,7 @@ target_supports_jemalloc() {
 build_system_allocator_binary() {
   local rustflags="$1"
   local build_log="$2"
-  local args=(build --profile "$BENCH_CARGO_PROFILE" --no-default-features --bin pijs_workload)
+  local args=(build --profile "$BENCH_CARGO_PROFILE" --no-default-features --example pijs_workload)
 
   if [[ -n "$BENCH_SYSTEM_FEATURES" ]]; then
     args+=(--features "$BENCH_SYSTEM_FEATURES")
@@ -192,7 +197,7 @@ build_binary_for_allocator() {
   fi
 
   if [[ "$normalized" == "jemalloc" ]]; then
-    if run_cargo_with_rustflags "$rustflags" build --profile "$BENCH_CARGO_PROFILE" --features jemalloc --bin pijs_workload >>"$build_log" 2>&1; then
+    if run_cargo_with_rustflags "$rustflags" build --profile "$BENCH_CARGO_PROFILE" --features jemalloc --example pijs_workload >>"$build_log" 2>&1; then
       if target_supports_jemalloc; then
         EFFECTIVE_ALLOCATOR="jemalloc"
       else
@@ -217,7 +222,7 @@ build_binary_for_allocator() {
     ALLOCATOR_FALLBACK_REASON="auto_jemalloc_unsupported_target"
     return 0
   fi
-  if run_cargo_with_rustflags "$rustflags" build --profile "$BENCH_CARGO_PROFILE" --features jemalloc --bin pijs_workload >>"$build_log" 2>&1; then
+  if run_cargo_with_rustflags "$rustflags" build --profile "$BENCH_CARGO_PROFILE" --features jemalloc --example pijs_workload >>"$build_log" 2>&1; then
     EFFECTIVE_ALLOCATOR="jemalloc"
     return 0
   fi

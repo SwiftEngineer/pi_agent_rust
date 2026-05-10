@@ -52,12 +52,12 @@ const COVERAGE_BASELINE_PATH: &str = "docs/coverage-baseline-map.json";
 const RUNTIME_HOSTCALL_TELEMETRY_SCHEMA_PATH: &str = "docs/schema/runtime_hostcall_telemetry.json";
 
 fn load_json(path: &str) -> Value {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Should read {path}"));
-    serde_json::from_str(&content).unwrap_or_else(|_| panic!("Should parse {path} as JSON"))
+    let content = std::fs::read_to_string(path).expect("should read JSON fixture");
+    serde_json::from_str(&content).expect("should parse fixture as JSON")
 }
 
 fn load_text(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Should read {path}"))
+    std::fs::read_to_string(path).expect("should read text fixture")
 }
 
 fn parse_f64_literal_after(haystack: &str, needle: &str) -> Option<f64> {
@@ -931,7 +931,7 @@ fn scenario_matrix_rows_define_non_empty_sli_ids() {
         let id = row["workflow_id"].as_str().unwrap_or("unknown");
         let sli_ids = row["sli_ids"]
             .as_array()
-            .unwrap_or_else(|| panic!("workflow {id} must define a sli_ids array"));
+            .expect("workflow row must define a sli_ids array");
         assert!(
             !sli_ids.is_empty(),
             "workflow {id} must include at least one SLI"
@@ -969,7 +969,7 @@ fn scenario_matrix_sli_ids_exist_in_perf_sli_catalog() {
         let workflow_id = row["workflow_id"].as_str().unwrap_or("unknown");
         let sli_ids = row["sli_ids"]
             .as_array()
-            .unwrap_or_else(|| panic!("workflow {workflow_id} must define sli_ids"));
+            .expect("workflow row must define sli_ids");
         for sli_id in sli_ids {
             let sli = sli_id.as_str().unwrap_or("");
             let alias_target = alias_map.get(sli).and_then(Value::as_str);
@@ -1085,7 +1085,7 @@ fn perf_sli_epistemology_contract_is_versioned_and_reference_linked() {
     ] {
         let entries = refs[key]
             .as_array()
-            .unwrap_or_else(|| panic!("contract_references.{key} must be an array"));
+            .expect("contract reference section must be an array");
         assert!(
             !entries.is_empty(),
             "contract_references.{key} must not be empty"
@@ -1093,7 +1093,7 @@ fn perf_sli_epistemology_contract_is_versioned_and_reference_linked() {
         for entry in entries {
             let issue_id = entry["issue_id"]
                 .as_str()
-                .unwrap_or_else(|| panic!("contract_references.{key} entries need issue_id"));
+                .expect("contract reference entry needs issue_id");
             linked_ids.insert(issue_id.to_string());
         }
     }
@@ -1211,7 +1211,7 @@ fn perf_sli_workload_partition_contract_is_versioned_and_complete() {
         covered_workflows.insert(workflow_id.to_string());
         let required_partitions: HashSet<String> = row["required_partitions"]
             .as_array()
-            .unwrap_or_else(|| panic!("{workflow_id} must include required_partitions"))
+            .expect("scenario partition coverage must include required_partitions")
             .iter()
             .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
             .collect();
@@ -1504,7 +1504,7 @@ fn perf_sli_metric_hierarchy_has_three_levels_without_overlap() {
     );
 
     let mut seen = HashSet::new();
-    for (level, items) in [
+    for (_level, items) in [
         ("primary", primary),
         ("secondary", secondary),
         ("tertiary", tertiary),
@@ -1512,7 +1512,7 @@ fn perf_sli_metric_hierarchy_has_three_levels_without_overlap() {
         for item in items {
             let metric = item
                 .as_str()
-                .unwrap_or_else(|| panic!("metric_hierarchy.{level} items must be strings"));
+                .expect("metric_hierarchy items must be strings");
             assert!(
                 seen.insert(metric.to_string()),
                 "metric_hierarchy has duplicate metric id across levels: {metric}"
@@ -1546,7 +1546,7 @@ fn perf_sli_catalog_entries_define_priority_and_mandatory_interpretation_notes()
 
         let notes = entry["mandatory_interpretation_notes"]
             .as_array()
-            .unwrap_or_else(|| panic!("{sli_id} must define mandatory_interpretation_notes"));
+            .expect("SLI catalog entry must define mandatory_interpretation_notes");
         assert!(
             !notes.is_empty(),
             "{sli_id} must include at least one mandatory_interpretation_note"
@@ -1554,7 +1554,7 @@ fn perf_sli_catalog_entries_define_priority_and_mandatory_interpretation_notes()
         for (idx, note) in notes.iter().enumerate() {
             let text = note
                 .as_str()
-                .unwrap_or_else(|| panic!("{sli_id} interpretation note {idx} must be a string"));
+                .expect("SLI interpretation note must be a string");
             assert!(
                 !text.trim().is_empty(),
                 "{sli_id} interpretation note {idx} must be non-empty"
@@ -1665,7 +1665,7 @@ fn perf_sli_reporting_contract_requires_absolute_and_relative_metrics_for_all_wo
         );
         let ratios = row["required_relative_ratios"]
             .as_array()
-            .unwrap_or_else(|| panic!("workflow {workflow_id} requires required_relative_ratios"));
+            .expect("workflow must define required_relative_ratios");
         let ratio_set: HashSet<&str> = ratios.iter().filter_map(Value::as_str).collect();
         for required_ratio in ["rust_vs_node_ratio", "rust_vs_bun_ratio"] {
             assert!(
@@ -1690,7 +1690,7 @@ fn perf_sli_reporting_contract_requires_absolute_and_relative_metrics_for_all_wo
         covered_workflows.insert(workflow_id.to_string());
         let required_partitions: HashSet<String> = row["required_partitions"]
             .as_array()
-            .unwrap_or_else(|| panic!("workflow {workflow_id} requires required_partitions"))
+            .expect("workflow must define required_partitions")
             .iter()
             .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
             .collect();
@@ -3123,7 +3123,7 @@ fn evidence_logging_instance_schema_source_files_exist() {
         let schema_id = schema["schema_id"].as_str().unwrap_or("unknown");
         let sources = schema["source_files"]
             .as_array()
-            .unwrap_or_else(|| panic!("schema {schema_id} must have source_files"));
+            .expect("schema must have source_files");
         for src in sources {
             let path = src.as_str().unwrap();
             assert!(
@@ -3164,41 +3164,27 @@ const BUNDLE_SCRIPT_PATH: &str = "scripts/perf/bundle.sh";
 const BENCH_EXTENSION_WORKLOADS_SCRIPT_PATH: &str = "scripts/bench_extension_workloads.sh";
 
 fn write_stub_command(path: &Path, contents: &str) {
-    std::fs::write(path, contents)
-        .unwrap_or_else(|err| panic!("failed to write stub command {}: {err}", path.display()));
+    std::fs::write(path, contents).expect("failed to write stub command");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(path)
-            .unwrap_or_else(|err| panic!("failed to stat stub command {}: {err}", path.display()))
+            .expect("failed to stat stub command")
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap_or_else(|err| {
-            panic!(
-                "failed to set executable permissions on {}: {err}",
-                path.display()
-            )
-        });
+        std::fs::set_permissions(path, perms).expect("failed to set executable permissions");
     }
 }
 
 fn pgo_events_from_dir(out_dir: &Path) -> Vec<Value> {
     let events_path = out_dir.join("pgo_pipeline_events.jsonl");
-    let content = std::fs::read_to_string(&events_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read PGO events from {}: {err}",
-            events_path.display()
-        )
-    });
+    let content = std::fs::read_to_string(&events_path).expect("failed to read PGO events");
 
     content
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .unwrap_or_else(|err| panic!("invalid PGO event JSON line: {line}; error: {err}"))
-        })
+        .map(|line| serde_json::from_str::<Value>(line).expect("invalid PGO event JSON line"))
         .collect()
 }
 
@@ -3220,7 +3206,18 @@ set -euo pipefail
 target_dir="${CARGO_TARGET_DIR:-target}"
 profile="debug"
 args=("$@")
+saw_pijs_example=0
 for ((idx = 0; idx < ${#args[@]}; idx++)); do
+  if [[ "${args[$idx]}" == "--bin" ]]; then
+    echo "pijs_workload must be built as a Cargo example, not --bin" >&2
+    exit 44
+  fi
+  if [[ "${args[$idx]}" == "--example" ]]; then
+    next=$((idx + 1))
+    if [[ $next -lt ${#args[@]} && "${args[$next]}" == "pijs_workload" ]]; then
+      saw_pijs_example=1
+    fi
+  fi
   if [[ "${args[$idx]}" == "--profile" ]]; then
     next=$((idx + 1))
     if [[ $next -lt ${#args[@]} ]]; then
@@ -3228,7 +3225,11 @@ for ((idx = 0; idx < ${#args[@]}; idx++)); do
     fi
   fi
 done
-bin="$target_dir/$profile/pijs_workload"
+if [[ "$saw_pijs_example" != "1" ]]; then
+  echo "missing --example pijs_workload" >&2
+  exit 45
+fi
+bin="$target_dir/$profile/examples/pijs_workload"
 mkdir -p "$(dirname "$bin")"
 cat > "$bin" <<'EOF'
 #!/usr/bin/env bash
@@ -3848,7 +3849,7 @@ fn bench_extension_workloads_compare_mode_emits_reproducible_artifact_lineage() 
     for key in &["baseline_hyperfine_json", "pgo_hyperfine_json"] {
         let path_value = comparison_payload[*key]
             .as_str()
-            .unwrap_or_else(|| panic!("comparison artifact must include {key} path"));
+            .expect("comparison artifact must include artifact path");
         assert!(
             Path::new(path_value).exists(),
             "{key} artifact path must exist: {path_value}"
@@ -4115,12 +4116,8 @@ fn capture_baseline_cross_env_diagnosis_emits_structured_report_and_log() {
         diagnosis_out.display()
     );
 
-    let report_text = std::fs::read_to_string(&diagnosis_out).unwrap_or_else(|err| {
-        panic!(
-            "failed to read cross-env diagnosis report {}: {err}",
-            diagnosis_out.display()
-        )
-    });
+    let report_text =
+        std::fs::read_to_string(&diagnosis_out).expect("failed to read cross-env diagnosis report");
     let report: Value = serde_json::from_str(&report_text).expect("parse diagnosis report JSON");
 
     assert_eq!(

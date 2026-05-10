@@ -233,8 +233,8 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p target/perf/perf
-          PI_BENCH_BUILD_PROFILE=perf cargo run --profile perf --bin pijs_workload -- --iterations 2000 --tool-calls 1 > target/perf/perf/pijs_workload_perf.jsonl
-          PI_BENCH_BUILD_PROFILE=perf cargo run --profile perf --bin pijs_workload -- --iterations 2000 --tool-calls 10 >> target/perf/perf/pijs_workload_perf.jsonl
+          PI_BENCH_BUILD_PROFILE=perf cargo run --profile perf --example pijs_workload -- --iterations 2000 --tool-calls 1 > target/perf/perf/pijs_workload_perf.jsonl
+          PI_BENCH_BUILD_PROFILE=perf cargo run --profile perf --example pijs_workload -- --iterations 2000 --tool-calls 10 >> target/perf/perf/pijs_workload_perf.jsonl
 
       - name: Perf budget gate
         run: cargo test --test perf_budgets -- --nocapture

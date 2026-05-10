@@ -952,7 +952,18 @@ fn install_fake_bench_toolchain(bin_dir: &Path) {
 set -euo pipefail
 target_dir="${CARGO_TARGET_DIR:-target}"
 profile="debug"
+saw_pijs_example=0
 for ((i=1; i<=$#; i++)); do
+  if [[ "${!i}" == "--bin" ]]; then
+    echo "pijs_workload must be built as a Cargo example, not --bin" >&2
+    exit 44
+  fi
+  if [[ "${!i}" == "--example" ]]; then
+    j=$((i+1))
+    if [[ $j -le $# && "${!j}" == "pijs_workload" ]]; then
+      saw_pijs_example=1
+    fi
+  fi
   if [[ "${!i}" == "--profile" ]]; then
     j=$((i+1))
     if [[ $j -le $# ]]; then
@@ -974,7 +985,11 @@ if [[ "${PI_FAKE_FAIL_JEMALLOC:-0}" == "1" ]]; then
     prev="$arg"
   done
 fi
-bin="$target_dir/$profile/pijs_workload"
+if [[ "$saw_pijs_example" != "1" ]]; then
+  echo "missing --example pijs_workload" >&2
+  exit 45
+fi
+bin="$target_dir/$profile/examples/pijs_workload"
 mkdir -p "$(dirname "$bin")"
 cat >"$bin" <<'EOS'
 #!/usr/bin/env bash
