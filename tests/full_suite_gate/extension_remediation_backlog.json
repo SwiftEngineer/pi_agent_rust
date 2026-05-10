@@ -988,9 +988,9 @@
         "/remediation_buckets/intentionally_unsupported/cause_codes",
         "/exception_policy/entries"
       ],
-      "follow_up_bead": "bd-1f42.4.4",
-      "tracking_issue": "bd-k5q5.3.9",
-      "fallback_validation": "exception_policy status=temporary cause_code=multi_file_dependency review_by=2026-03-31 tracking_issue=bd-k5q5.3.9; rationale=Relative import outside single-file artifact is unresolved in current loader.",
+      "follow_up_bead": "bd-8t27h.14.4",
+      "tracking_issue": "bd-8t27h.14.4",
+      "fallback_validation": "exception_policy status=approved cause_code=multi_file_dependency review_by=2026-06-30 tracking_issue=bd-8t27h.14.4; rationale=Artifact directory includes index.ts plus shared.ts and focused ignored conformance validation passes for community/qualisero-background-notify under current module resolution.",
       "canonical_failure": false
     },
     {
@@ -1017,9 +1017,9 @@
         "/remediation_buckets/intentionally_unsupported/cause_codes",
         "/exception_policy/entries"
       ],
-      "follow_up_bead": "bd-1f42.4.4",
-      "tracking_issue": "bd-k5q5.3.9",
-      "fallback_validation": "exception_policy status=temporary cause_code=multi_file_dependency review_by=2026-03-31 tracking_issue=bd-k5q5.3.9; rationale=Runtime cannot resolve bundled dist-relative module path for this layout.",
+      "follow_up_bead": "bd-8t27h.14.4",
+      "tracking_issue": "bd-8t27h.14.4",
+      "fallback_validation": "exception_policy status=approved cause_code=multi_file_dependency review_by=2026-06-30 tracking_issue=bd-8t27h.14.4; rationale=Artifact directory includes the referenced SCIP source graph and focused ignored conformance validation passes for community/qualisero-pi-agent-scip under current module resolution.",
       "canonical_failure": false
     },
     {
@@ -1046,9 +1046,9 @@
         "/remediation_buckets/intentionally_unsupported/cause_codes",
         "/exception_policy/entries"
       ],
-      "follow_up_bead": "bd-1f42.4.4",
-      "tracking_issue": "bd-k5q5.3.9",
-      "fallback_validation": "exception_policy status=temporary cause_code=multi_file_dependency review_by=2026-03-31 tracking_issue=bd-k5q5.3.9; rationale=Cross-directory relative import is unresolved by current single-entry resolver.",
+      "follow_up_bead": "bd-8t27h.14.4",
+      "tracking_issue": "bd-8t27h.14.4",
+      "fallback_validation": "exception_policy status=approved cause_code=multi_file_dependency review_by=2026-06-30 tracking_issue=bd-8t27h.14.4; rationale=Artifact directory includes index.ts plus shared.ts and focused ignored conformance validation passes for community/qualisero-safe-git under current module resolution.",
       "canonical_failure": false
     },
     {
@@ -1075,9 +1075,9 @@
         "/remediation_buckets/intentionally_unsupported/cause_codes",
         "/exception_policy/entries"
       ],
-      "follow_up_bead": "bd-1f42.4.4",
-      "tracking_issue": "bd-k5q5.3.9",
-      "fallback_validation": "exception_policy status=temporary cause_code=multi_file_dependency review_by=2026-03-31 tracking_issue=bd-k5q5.3.9; rationale=Unbundled component import path cannot be resolved by current loader.",
+      "follow_up_bead": "bd-8t27h.14.4",
+      "tracking_issue": "bd-8t27h.14.4",
+      "fallback_validation": "exception_policy status=approved cause_code=multi_file_dependency review_by=2026-06-30 tracking_issue=bd-8t27h.14.4; rationale=Artifact directory includes the commands/hooks/tools component graph and focused ignored conformance validation passes for npm/aliou-pi-processes under current module resolution.",
       "canonical_failure": false
     }
   ]
