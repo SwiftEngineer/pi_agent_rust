@@ -62,7 +62,12 @@ cargo test --features ext-conformance --test ext_conformance_diff
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PI_TEST_MODE` | unset | Set to `1` for deterministic timestamps and CWD normalization |
-| `PI_CONFORMANCE_SEED` | unset | Seed for deterministic random trials (e.g., `42`) |
+| `PI_CONFORMANCE_SEED` | unset | Seed for deterministic conformance diff runs (e.g., `42`) |
+| `PI_EXT_RANDOM_SEED` | `42` | Seed for `ext_random_trials` deterministic selection |
+| `PI_EXT_RANDOM_N` | `1` | Bounded `ext_random_trials` sample size; raise only for explicit batch runs |
+| `PI_EXT_RANDOM_FILTER` | unset | Optional `ext_random_trials` filter such as `tier:1-3` or `source:community` |
+| `PI_EXT_RANDOM_IDS` | unset | Explicit comma-separated `ext_random_trials` extension IDs |
+| `PI_EXT_RANDOM_OUTPUT_DIR` | `$TMPDIR/pi_agent_rust/ext_conformance/random_trials` | Override random-trial JSONL and manifest output directory |
 | `PI_TS_ORACLE_TIMEOUT_SECS` | `30` | Per-extension timeout for the TS oracle |
 | `PI_OFFICIAL_MAX` | unset | Limit number of official extensions tested (e.g., `5` for fast checks) |
 | `PI_DETERMINISTIC_CWD` | auto | Override deterministic working directory |
@@ -113,6 +118,27 @@ cargo test --test ext_conformance_generated conformance_full_report \
 cargo test --test ext_conformance_generated --features ext-conformance \
   -- --include-ignored --nocapture
 ```
+
+### Random Trial Smoke Lane (`ext_random_trials`)
+
+Runs a deterministic random subset from the Rust-N/A pool. The default is a
+single-extension smoke run so ordinary `cargo test` stays bounded, and output
+defaults under `TMPDIR`.
+
+```bash
+export CARGO_TARGET_DIR="/data/tmp/pi_agent_rust_cargo/${USER:-agent}/target"
+export TMPDIR="/data/tmp/pi_agent_rust_cargo/${USER:-agent}/tmp"
+mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
+
+PI_EXT_RANDOM_SEED=42 PI_EXT_RANDOM_N=1 \
+  rch exec -- cargo test --test ext_random_trials \
+    --features ext-conformance random_trials_batch -- --nocapture
+```
+
+For a wider opt-in batch, raise `PI_EXT_RANDOM_N` or pass
+`PI_EXT_RANDOM_IDS=id-a,id-b`; results are written to
+`$TMPDIR/pi_agent_rust/ext_conformance/random_trials` unless
+`PI_EXT_RANDOM_OUTPUT_DIR` is set.
 
 ### Scenario Conformance (`ext_conformance_scenarios`)
 

@@ -2,19 +2,27 @@
 //! Random extension trials harness (bd-2fps.1.2).
 //!
 //! Selects a deterministic random subset from the Rust-N/A pool and runs
-//! them through the conformance harness. Results are written as JSONL logs
-//! and a summary manifest.
+//! them through the conformance harness. The default test lane is a bounded
+//! one-extension smoke run; operators can opt into broader batches with
+//! `PI_EXT_RANDOM_N`. Results are written as JSONL logs and a summary manifest.
 //!
 //! # Environment Variables
-//! - `PI_EXT_RANDOM_SEED`   — u64 seed for deterministic selection (default: 42)
-//! - `PI_EXT_RANDOM_N`      — sample size (default: 20)
-//! - `PI_EXT_RANDOM_FILTER` — optional `tier:1-3` or `source:community` filter
-//! - `PI_EXT_RANDOM_IDS`    — optional comma-separated explicit ID list (bypasses selector)
+//! - `PI_EXT_RANDOM_SEED` - u64 seed for deterministic selection (default: 42)
+//! - `PI_EXT_RANDOM_N` - sample size (default: 1; use 20 for the legacy batch)
+//! - `PI_EXT_RANDOM_FILTER` - optional `tier:1-3` or `source:community` filter
+//! - `PI_EXT_RANDOM_IDS` - optional comma-separated explicit ID list (bypasses selector)
+//! - `PI_EXT_RANDOM_OUTPUT_DIR` - optional output directory (default: `$TMPDIR/pi_agent_rust/...`)
 //!
-//! # Run
+//! # Smoke Run
+//! ```sh
+//! PI_EXT_RANDOM_SEED=42 PI_EXT_RANDOM_N=1 \
+//!   rch exec -- cargo test --features ext-conformance --test ext_random_trials random_trials_batch -- --nocapture
+//! ```
+//!
+//! # Wider Opt-In Batch
 //! ```sh
 //! PI_EXT_RANDOM_SEED=42 PI_EXT_RANDOM_N=20 \
-//!   cargo test --features ext-conformance --test ext_random_trials -- --include-ignored --nocapture
+//!   rch exec -- cargo test --features ext-conformance --test ext_random_trials random_trials_batch -- --nocapture
 //! ```
 #![allow(clippy::too_many_lines, clippy::needless_raw_string_hashes)]
 
@@ -27,6 +35,10 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+const DEFAULT_RANDOM_SEED: u64 = 42;
+const DEFAULT_RANDOM_SAMPLE_SIZE: usize = 1;
+const RANDOM_OUTPUT_DIR_ENV: &str = "PI_EXT_RANDOM_OUTPUT_DIR";
 
 // ===========================================================================
 // SplitMix64 PRNG (same as ext_conformance_selector.rs)
@@ -135,12 +147,20 @@ fn events_path() -> PathBuf {
         .join("conformance_events.jsonl")
 }
 
-fn output_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
+fn output_dir_from_override(override_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = override_dir.filter(|dir| !dir.trim().is_empty()) {
+        return PathBuf::from(dir);
+    }
+
+    std::env::temp_dir()
+        .join("pi_agent_rust")
         .join("ext_conformance")
-        .join("logs")
         .join("random_trials")
+}
+
+fn output_dir() -> PathBuf {
+    let override_dir = std::env::var(RANDOM_OUTPUT_DIR_ENV).ok();
+    output_dir_from_override(override_dir.as_deref())
 }
 
 // ===========================================================================
@@ -665,25 +685,41 @@ struct TrialSummary {
     failure_classes: std::collections::HashMap<String, usize>,
 }
 
-fn run_random_trials() -> TrialRun {
-    let seed: u64 = std::env::var("PI_EXT_RANDOM_SEED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(42);
-    let sample_size: usize = std::env::var("PI_EXT_RANDOM_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
-    let filter_str = std::env::var("PI_EXT_RANDOM_FILTER").unwrap_or_default();
-    let explicit_ids = std::env::var("PI_EXT_RANDOM_IDS").ok();
+struct TrialConfig {
+    seed: u64,
+    sample_size: usize,
+    filter_str: String,
+    explicit_ids: Option<String>,
+}
 
-    let filter = parse_filter(&filter_str);
+fn trial_config_from_env() -> TrialConfig {
+    TrialConfig {
+        seed: std::env::var("PI_EXT_RANDOM_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_RANDOM_SEED),
+        sample_size: std::env::var("PI_EXT_RANDOM_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_RANDOM_SAMPLE_SIZE),
+        filter_str: std::env::var("PI_EXT_RANDOM_FILTER").unwrap_or_default(),
+        explicit_ids: std::env::var("PI_EXT_RANDOM_IDS").ok(),
+    }
+}
+
+fn run_random_trials() -> TrialRun {
+    let config = trial_config_from_env();
+    run_random_trials_with_config(&config)
+}
+
+fn run_random_trials_with_config(config: &TrialConfig) -> TrialRun {
+    let filter = parse_filter(&config.filter_str);
 
     // Determine selected extensions
-    let selected_ids = explicit_ids.map_or_else(
+    let selected_ids = config.explicit_ids.as_deref().map_or_else(
         || {
             let pool = load_na_pool();
-            select_extensions(&pool, seed, sample_size, &filter)
+            select_extensions(&pool, config.seed, config.sample_size, &filter)
         },
         |ids_str| {
             ids_str
@@ -695,7 +731,10 @@ fn run_random_trials() -> TrialRun {
     );
 
     eprintln!(
-        "[random_trials] seed={seed} n={sample_size} filter={filter_str:?} selected={}",
+        "[random_trials] seed={} n={} filter={:?} selected={}",
+        config.seed,
+        config.sample_size,
+        config.filter_str,
         selected_ids.len()
     );
 
@@ -754,9 +793,9 @@ fn run_random_trials() -> TrialRun {
 
     TrialRun {
         schema: "pi.ext.random_trials.v1".to_string(),
-        seed,
-        sample_size,
-        filter_str,
+        seed: config.seed,
+        sample_size: config.sample_size,
+        filter_str: config.filter_str.clone(),
         selected_ids,
         results,
         summary,
@@ -764,7 +803,13 @@ fn run_random_trials() -> TrialRun {
     }
 }
 
-fn write_trial_output(run: &TrialRun) {
+#[derive(Debug)]
+struct TrialOutputPaths {
+    jsonl_path: PathBuf,
+    manifest_path: PathBuf,
+}
+
+fn write_trial_output(run: &TrialRun) -> TrialOutputPaths {
     let out_dir = output_dir();
     let _ = std::fs::create_dir_all(&out_dir);
 
@@ -810,6 +855,11 @@ fn write_trial_output(run: &TrialRun) {
         "[random_trials] Manifest written to {}",
         manifest_path.display()
     );
+
+    TrialOutputPaths {
+        jsonl_path,
+        manifest_path,
+    }
 }
 
 // ===========================================================================
@@ -818,13 +868,16 @@ fn write_trial_output(run: &TrialRun) {
 
 /// Run a batch of random extension trials.
 ///
-/// This test is owned by bd-8t27h.16 while it remains `#[ignore]` by default;
-/// run with `--include-ignored`.
+/// Defaults to a one-extension deterministic smoke lane. Increase
+/// `PI_EXT_RANDOM_N` for a wider opt-in batch.
 #[test]
-#[ignore = "bd-8t27h.16: long-running random trial batch needs bounded seeded smoke lane"]
 fn random_trials_batch() {
     let run = run_random_trials();
-    write_trial_output(&run);
+    let output = write_trial_output(&run);
+    let out_dir = output_dir();
+    assert!(output.jsonl_path.starts_with(&out_dir));
+    assert!(output.manifest_path.starts_with(&out_dir));
+    assert_eq!(run.summary.total, run.results.len());
 
     eprintln!(
         "\n[random_trials] === SUMMARY ===\n  Total: {}\n  Pass:  {} ({:.1}%)\n  Fail:  {}\n  Skip:  {}",
@@ -878,6 +931,31 @@ fn parse_filter_empty() {
     let f = parse_filter("");
     assert!(f.tier_range.is_none());
     assert!(f.source_category.is_none());
+}
+
+#[test]
+fn output_dir_defaults_to_tmpdir_backed_path() {
+    let dir = output_dir_from_override(None);
+    assert!(dir.starts_with(std::env::temp_dir()));
+    assert!(
+        dir.ends_with(
+            Path::new("pi_agent_rust")
+                .join("ext_conformance")
+                .join("random_trials")
+        )
+    );
+}
+
+#[test]
+fn output_dir_honors_explicit_override() {
+    let dir = output_dir_from_override(Some("/tmp/pi-random-trial-output"));
+    assert_eq!(dir, PathBuf::from("/tmp/pi-random-trial-output"));
+}
+
+#[test]
+fn output_dir_ignores_blank_override() {
+    let dir = output_dir_from_override(Some("  "));
+    assert!(dir.starts_with(std::env::temp_dir()));
 }
 
 #[test]

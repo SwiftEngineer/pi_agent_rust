@@ -174,7 +174,8 @@ differs between TS oracle and Rust runtime.
 
 **Fix**:
 - Set `PI_TEST_MODE=1` to stabilize timestamps and CWD
-- Set `PI_CONFORMANCE_SEED=42` for deterministic random trials
+- Set `PI_CONFORMANCE_SEED=42` for deterministic conformance diffs
+- Set `PI_EXT_RANDOM_SEED=42 PI_EXT_RANDOM_N=1` for bounded random-trial smoke runs
 - Use path canonicalization assertions (suffix matching, not exact)
 - Check `docs/extension-architecture.md` for normalization details
 
