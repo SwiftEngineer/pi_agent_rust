@@ -91,6 +91,7 @@ mod read_hardened {
             h.log().info("verify", format!("error={msg}"));
             assert!(
                 msg.to_lowercase().contains("directory")
+                    || msg.to_lowercase().contains("not a regular file")
                     || msg.to_lowercase().contains("not a file"),
                 "should report directory error: {msg}"
             );
@@ -249,9 +250,9 @@ mod write_hardened {
 
     #[cfg(unix)]
     #[test]
-    fn write_atomic_replaces_symlink() {
+    fn write_same_workspace_symlink_target() {
         asupersync::test_utils::run_test(|| async {
-            let h = TestHarness::new("write_atomic_replaces_symlink");
+            let h = TestHarness::new("write_same_workspace_symlink_target");
             let real = h.create_file("real.txt", b"original");
             let link = h.temp_path("link.txt");
             std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -264,20 +265,18 @@ mod write_hardened {
             let result = tool.execute("h-write-1", input, None).await.unwrap();
             assert!(!result.is_error);
 
-            // Atomic write replaces the symlink with a regular file (rename semantics).
-            // The content at the link path should be the new content.
+            // Same-workspace symlinks resolve within the configured CWD and are
+            // allowed; the write updates the target content.
             let link_disk = std::fs::read_to_string(&link).unwrap();
             assert_eq!(link_disk, "overwritten via symlink");
 
-            // The original target file remains untouched.
             let real_disk = std::fs::read_to_string(&real).unwrap();
-            assert_eq!(real_disk, "original");
+            assert_eq!(real_disk, "overwritten via symlink");
 
-            // The symlink is now a regular file, not a symlink.
             let meta = std::fs::symlink_metadata(&link).unwrap();
             assert!(
-                meta.file_type().is_file(),
-                "link should now be a regular file"
+                meta.file_type().is_symlink(),
+                "link should remain a same-workspace symlink"
             );
         });
     }
@@ -683,25 +682,29 @@ mod bash_hardened {
             let result = tool.execute("h-bash-2a", input, None).await;
             assert!(result.is_ok(), "exit 0 should succeed");
 
-            // Exit 1 should fail
+            // Non-zero exits are successful tool invocations with is_error=true.
             let input = serde_json::json!({"command": "exit 1"});
-            let err = tool
+            let output = tool
                 .execute("h-bash-2b", input, None)
                 .await
-                .expect_err("exit 1 should fail");
+                .expect("exit 1 should return a tool error output");
+            assert!(output.is_error, "exit 1 must set is_error");
+            let message = get_text(&output.content);
             assert!(
-                err.to_string().contains("code 1"),
+                message.contains("code 1"),
                 "should report exit code 1"
             );
 
             // Exit 127 (command not found convention)
             let input = serde_json::json!({"command": "exit 127"});
-            let err = tool
+            let output = tool
                 .execute("h-bash-2c", input, None)
                 .await
-                .expect_err("exit 127 should fail");
+                .expect("exit 127 should return a tool error output");
+            assert!(output.is_error, "exit 127 must set is_error");
+            let message = get_text(&output.content);
             assert!(
-                err.to_string().contains("127"),
+                message.contains("127"),
                 "should report exit code 127"
             );
 
@@ -715,13 +718,13 @@ mod bash_hardened {
             let h = TestHarness::new("bash_shell_syntax_error");
             let tool = pi::tools::BashTool::new(h.temp_dir());
             let input = serde_json::json!({"command": "if then else fi"});
-            let err = tool
+            let output = tool
                 .execute("h-bash-3", input, None)
                 .await
-                .expect_err("syntax error should fail");
-            let msg = err.to_string();
+                .expect("syntax error should return a tool error output");
+            assert!(output.is_error, "syntax error must set is_error");
+            let msg = get_text(&output.content);
             h.log().info("verify", format!("error={msg}"));
-            // Should report non-zero exit
             assert!(
                 msg.contains("exited with code") || msg.contains("syntax"),
                 "should report shell error: {msg}"
@@ -792,11 +795,12 @@ mod bash_hardened {
                 "command": format!("sleep 30 && touch {marker_str}"),
                 "timeout": 1
             });
-            let err = tool
+            let output = tool
                 .execute("h-bash-7", input, None)
                 .await
-                .expect_err("should timeout");
-            let msg = err.to_string();
+                .expect("timeout should return a tool error output");
+            assert!(output.is_error, "timeout must set is_error");
+            let msg = get_text(&output.content);
             h.log().info("verify", format!("error={msg}"));
             assert!(msg.contains("timed out"), "should report timeout: {msg}");
 

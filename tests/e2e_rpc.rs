@@ -473,6 +473,33 @@ async fn wait_for_streaming_state(
     Value::Null
 }
 
+async fn wait_for_non_streaming_state_after_abort(
+    in_tx: &asupersync::channel::mpsc::Sender<String>,
+    out_rx: &Arc<Mutex<Receiver<String>>>,
+    session_idx: usize,
+) -> Value {
+    let start = Instant::now();
+    let cmd = json!({
+        "id": format!("s{session_idx}-final-state"),
+        "type": "get_state",
+    })
+    .to_string();
+
+    loop {
+        let resp = send_recv_after_abort(in_tx, out_rx, &cmd, "get_state(final)").await;
+        assert_ok(&resp, "get_state");
+        if matches!(is_streaming(&resp), Some(false)) {
+            return resp;
+        }
+
+        assert!(
+            start.elapsed() <= RPC_E2E_WAIT_TIMEOUT,
+            "session {session_idx}: final state remained streaming after abort: {resp}"
+        );
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(10)).await;
+    }
+}
+
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -621,18 +648,7 @@ async fn run_rpc_swarm_session(
         "abort terminal event: {agent_end}"
     );
 
-    let final_state_cmd = json!({
-        "id": format!("s{session_idx}-final-state"),
-        "type": "get_state",
-    })
-    .to_string();
-    let final_state =
-        send_recv_after_abort(&in_tx, &out_rx, &final_state_cmd, "get_state(final)").await;
-    assert_ok(&final_state, "get_state");
-    assert!(
-        matches!(is_streaming(&final_state), Some(false)),
-        "final state should not be streaming: {final_state}"
-    );
+    let final_state = wait_for_non_streaming_state_after_abort(&in_tx, &out_rx, session_idx).await;
     let session_file = PathBuf::from(require_response_field_str(
         &final_state,
         "sessionFile",
