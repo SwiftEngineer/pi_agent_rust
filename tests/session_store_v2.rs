@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use pi::PiResult;
-use pi::session::{CustomEntry, EntryBase, MigrationState, SessionEntry};
+use pi::session::{CustomEntry, EntryBase, MigrationState, Session, SessionEntry, SessionHeader};
 use pi::session_store_v2::{
     MigrationEvent, MigrationVerification, SessionStoreV2, frame_to_session_entry,
     session_entry_to_frame_args,
@@ -9,8 +9,10 @@ use pi::session_store_v2::{
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use std::fs;
+use std::future::Future;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 const fn lcg_next(state: &mut u64) -> u64 {
@@ -1489,6 +1491,361 @@ fn make_message_entry(id: &str, parent_id: Option<&str>, text: &str) -> pi::sess
     })
 }
 
+fn run_async<T, Fut>(future: Fut) -> T
+where
+    Fut: Future<Output = T>,
+{
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    runtime.block_on(future)
+}
+
+fn elapsed_test_us(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn test_timing_start() -> Instant {
+    let start: fn() -> Instant = Instant::now;
+    start()
+}
+
+fn usize_to_u64(value: usize, label: &str) -> PiResult<u64> {
+    u64::try_from(value).map_err(|_| pi::Error::session(format!("{label} does not fit in u64")))
+}
+
+fn build_large_history_entries(count: usize, payload_bytes: usize) -> Vec<SessionEntry> {
+    let mut entries = Vec::with_capacity(count);
+    let mut parent_id: Option<String> = None;
+    for idx in 0..count {
+        let id = format!("stress-{idx:06}");
+        let text = format!(
+            "large-session-store-v2 recovery stress entry {idx:06}: {}",
+            "x".repeat(payload_bytes)
+        );
+        entries.push(make_message_entry(&id, parent_id.as_deref(), &text));
+        parent_id = Some(id);
+    }
+    entries
+}
+
+fn append_jsonl_entry(path: &Path, entry: &SessionEntry) -> PiResult<()> {
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    serde_json::to_writer(&mut file, entry)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn emit_session_store_v2_recovery_evidence(report: &Value) -> PiResult<std::path::PathBuf> {
+    let evidence_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || std::env::temp_dir().join("pi_agent_rust_perf"),
+        |target_dir| std::path::PathBuf::from(target_dir).join("perf"),
+    );
+    fs::create_dir_all(&evidence_dir)?;
+
+    let path = evidence_dir.join("session_store_v2_recovery_swarm.jsonl");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    serde_json::to_writer(&mut file, report)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(path)
+}
+
+fn index_concurrent_session_snapshots(root: &Path) -> PiResult<usize> {
+    let index = pi::session_index::SessionIndex::for_sessions_root(root);
+    let writer_threads = 4usize;
+    let sessions_per_thread = 8usize;
+    let mut handles = Vec::with_capacity(writer_threads);
+
+    for worker in 0..writer_threads {
+        let index = index.clone();
+        let root = root.to_path_buf();
+        handles.push(std::thread::spawn(move || -> PiResult<()> {
+            let worker_dir = root.join(format!("worker-{worker:02}"));
+            fs::create_dir_all(&worker_dir)?;
+
+            for item in 0..sessions_per_thread {
+                let mut header = SessionHeader::new();
+                header.id = format!("swarm-index-{worker:02}-{item:02}");
+                header.timestamp = format!("2026-05-11T00:00:{item:02}.000Z");
+                header.cwd = root.display().to_string();
+
+                let path = worker_dir.join(format!("session-{item:02}.jsonl"));
+                let mut file = fs::File::create(&path)?;
+                serde_json::to_writer(&mut file, &header)?;
+                file.write_all(b"\n")?;
+                file.flush()?;
+                file.sync_all()?;
+
+                index.index_session_snapshot(
+                    &path,
+                    &header,
+                    1,
+                    Some(format!("worker {worker} session {item}")),
+                )?;
+
+                if item % 2 == 0 {
+                    let listed = index.list_sessions(None)?;
+                    let expected_id = header.id.as_str();
+                    assert!(
+                        listed.iter().any(|meta| meta.id.as_str().eq(expected_id)),
+                        "concurrent SessionIndex read missed {} in root {}",
+                        header.id,
+                        root.display()
+                    );
+                }
+            }
+            Ok(())
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| pi::Error::session("SessionIndex stress worker panicked"))??;
+    }
+
+    let listed = index.list_sessions(None)?;
+    let expected = writer_threads * sessions_per_thread;
+    assert!(
+        listed.len() >= expected,
+        "SessionIndex only listed {} rows after concurrent writes; expected at least {expected}; root={}",
+        listed.len(),
+        root.display()
+    );
+    Ok(listed.len())
+}
+
+fn assert_crash_resilient_session_save(root: &Path) -> PiResult<std::path::PathBuf> {
+    let mut session = Session::create_with_dir(Some(root.to_path_buf()));
+    for idx in 0..32 {
+        session.append_message(pi::session::SessionMessage::User {
+            content: pi::model::UserContent::Text(format!(
+                "crash-resilient-save-{idx:02}: {}",
+                "s".repeat(128)
+            )),
+            timestamp: Some(i64::from(idx)),
+        });
+    }
+
+    run_async(async { session.save().await })?;
+    let path = session
+        .path
+        .clone()
+        .ok_or_else(|| pi::Error::session("saved session did not record a path"))?;
+    let path_string = path.display().to_string();
+    let (reopened, diagnostics) =
+        run_async(async { Session::open_with_diagnostics(&path_string).await })?;
+    assert_eq!(
+        reopened.entries.len(),
+        32,
+        "saved session reopened with wrong entry count; path={}",
+        path.display()
+    );
+    assert!(
+        diagnostics.skipped_entries.is_empty(),
+        "save round-trip produced skipped entries at {}: {:?}",
+        path.display(),
+        diagnostics.skipped_entries
+    );
+
+    let mut leftover_tmp = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.contains(".tmp") || file_name.starts_with("tmp") {
+            leftover_tmp.insert(leftover_tmp.len(), file_name);
+        }
+    }
+    assert!(
+        leftover_tmp.is_empty(),
+        "atomic session save left temp artifacts in {}: {:?}",
+        root.display(),
+        leftover_tmp
+    );
+
+    Ok(path)
+}
+
+struct LargeMigrationOutcome {
+    v2_root: PathBuf,
+    index_path: PathBuf,
+    checkpoint_head_entry_seq: u64,
+    checkpoint_head_entry_id: String,
+    migration_elapsed_us: u64,
+    checkpoint_rebuild_elapsed_us: u64,
+}
+
+struct TruncatedRecoveryOutcome {
+    segment_path: PathBuf,
+    recovered_count: u64,
+    elapsed_us: u64,
+}
+
+struct StaleFallbackOutcome {
+    opened_backend: String,
+    sidecar_present: bool,
+    sidecar_stale: bool,
+    total_entries: usize,
+    elapsed_us: u64,
+}
+
+fn migrate_large_history_and_rebuild_checkpoint(
+    jsonl: &Path,
+    base_entries: usize,
+    max_segment_bytes: u64,
+) -> PiResult<LargeMigrationOutcome> {
+    let migration_start = test_timing_start();
+    let dry_run = pi::session::migrate_dry_run(jsonl)?;
+    assert!(dry_run.entry_count_match);
+    assert!(dry_run.hash_chain_match);
+    assert!(dry_run.index_consistent);
+
+    let migration = pi::session::migrate_jsonl_to_v2(jsonl, "bd-07cku.6-large-stress")?;
+    assert_eq!(migration.outcome, "ok");
+    assert!(migration.verification.entry_count_match);
+    let migration_elapsed_us = elapsed_test_us(migration_start);
+
+    let v2_root = pi::session_store_v2::v2_sidecar_path(jsonl);
+    let store = SessionStoreV2::create(&v2_root, max_segment_bytes)?;
+    let base_entries_u64 = usize_to_u64(base_entries, "base_entries")?;
+    assert_eq!(store.entry_count(), base_entries_u64);
+    store.validate_integrity()?;
+
+    let checkpoint_start = test_timing_start();
+    let checkpoint = store.create_checkpoint(1, "bd-07cku.6 pre-rebuild checkpoint")?;
+    assert_eq!(checkpoint.head_entry_seq, base_entries_u64);
+
+    let index_path = v2_root.join("index").join("offsets.jsonl");
+    fs::write(&index_path, "{not-valid-offset-index-json}\n")?;
+    let rebuilt = SessionStoreV2::create(&v2_root, max_segment_bytes)?;
+    rebuilt.validate_integrity()?;
+    assert_eq!(
+        rebuilt.entry_count(),
+        base_entries_u64,
+        "checkpoint/index rebuild lost entries; v2_root={}",
+        v2_root.display()
+    );
+    let rebuilt_checkpoint = rebuilt
+        .read_checkpoint(1)?
+        .ok_or_else(|| pi::Error::session("checkpoint missing after index rebuild"))?;
+    assert_eq!(rebuilt_checkpoint.head_entry_id, checkpoint.head_entry_id);
+
+    Ok(LargeMigrationOutcome {
+        v2_root,
+        index_path,
+        checkpoint_head_entry_seq: checkpoint.head_entry_seq,
+        checkpoint_head_entry_id: checkpoint.head_entry_id,
+        migration_elapsed_us,
+        checkpoint_rebuild_elapsed_us: elapsed_test_us(checkpoint_start),
+    })
+}
+
+fn append_tail_and_recover_truncated_frame(
+    v2_root: &Path,
+    base_entries: usize,
+    tail_entries: usize,
+    max_segment_bytes: u64,
+) -> PiResult<TruncatedRecoveryOutcome> {
+    let mut store = SessionStoreV2::create(v2_root, max_segment_bytes)?;
+    let mut parent_id = store.head().map(|head| head.entry_id);
+    for idx in 0..tail_entries {
+        let id = format!("stress-tail-{idx:04}");
+        store.append_entry(
+            id.clone(),
+            parent_id.clone(),
+            "message",
+            json!({
+                "kind": "message",
+                "ordinal": base_entries + idx,
+                "body": "tail-frame".repeat(64),
+            }),
+        )?;
+        parent_id = Some(id);
+    }
+
+    let expected_after_tail = base_entries + tail_entries;
+    assert_eq!(
+        store.entry_count(),
+        usize_to_u64(expected_after_tail, "expected_after_tail")?
+    );
+
+    let segment_path = v2_root.join("segments").join("0000000000000001.seg");
+    let segment_len = fs::metadata(&segment_path)?.len();
+    assert!(
+        segment_len > 64,
+        "segment too small to truncate meaningfully; segment={}",
+        segment_path.display()
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&segment_path)?
+        .set_len(segment_len - 32)?;
+
+    let recovery_start = test_timing_start();
+    let recovered = SessionStoreV2::create(v2_root, max_segment_bytes)?;
+    recovered.validate_integrity()?;
+    let recovered_count = recovered.entry_count();
+    assert_eq!(
+        recovered_count,
+        usize_to_u64(expected_after_tail - 1, "expected_after_tail minus one")?,
+        "truncated trailing frame recovery should drop exactly the partial final frame; segment={}",
+        segment_path.display()
+    );
+    let recovered_tail = recovered.read_tail_entries(2)?;
+    assert_eq!(
+        recovered_tail.last().map(|frame| frame.entry_id.as_str()),
+        Some("stress-tail-0014")
+    );
+
+    Ok(TruncatedRecoveryOutcome {
+        segment_path,
+        recovered_count,
+        elapsed_us: elapsed_test_us(recovery_start),
+    })
+}
+
+fn assert_stale_sidecar_fallback(
+    jsonl: &Path,
+    jsonl_root: &Path,
+    v2_root: &Path,
+    base_entries: usize,
+) -> PiResult<StaleFallbackOutcome> {
+    std::thread::sleep(Duration::from_millis(20));
+    let stale_entry = make_message_entry(
+        "stale-jsonl-newer-than-sidecar",
+        Some(&format!("stress-{:06}", base_entries - 1)),
+        "JSONL source advanced after V2 sidecar migration",
+    );
+    append_jsonl_entry(jsonl, &stale_entry)?;
+
+    let stale_start = test_timing_start();
+    let stale_trace =
+        run_async(async { Session::cold_start_trace_bundle(jsonl, jsonl_root).await })?;
+    assert!(stale_trace.storage.v2_sidecar_present);
+    assert!(
+        stale_trace.storage.v2_sidecar_stale,
+        "expected stale V2 sidecar fallback; jsonl={} v2_root={}",
+        jsonl.display(),
+        v2_root.display()
+    );
+    assert_eq!(stale_trace.storage.opened_backend, "jsonl");
+    assert_eq!(stale_trace.input.total_entries, base_entries + 1);
+
+    Ok(StaleFallbackOutcome {
+        opened_backend: stale_trace.storage.opened_backend,
+        sidecar_present: stale_trace.storage.v2_sidecar_present,
+        sidecar_stale: stale_trace.storage.v2_sidecar_stale,
+        total_entries: stale_trace.input.total_entries,
+        elapsed_us: elapsed_test_us(stale_start),
+    })
+}
+
 #[test]
 fn v2_sidecar_path_derives_from_jsonl_stem() {
     let jsonl = Path::new("/tmp/sessions/my_session.jsonl");
@@ -2534,6 +2891,97 @@ fn e2e_large_session_migration_integrity_and_chain() -> PiResult<()> {
     assert_eq!(first.entry_id, "big0");
     let last = store.lookup_entry(200)?.expect("last entry");
     assert_eq!(last.entry_id, "big199");
+
+    Ok(())
+}
+
+/// Swarm-oriented stress gate for large V2 recovery, stale fallback, and index concurrency.
+#[test]
+fn large_session_store_v2_recovery_swarm_profile_emits_evidence() -> PiResult<()> {
+    const BASE_ENTRIES: usize = 384;
+    const PAYLOAD_BYTES: usize = 768;
+    const TAIL_ENTRIES: usize = 16;
+    const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+
+    let total_start = test_timing_start();
+    let dir = tempdir()?;
+    let jsonl_root = dir.path().join("jsonl");
+    let index_root = dir.path().join("index-swarm");
+    let save_root = dir.path().join("save-root");
+    fs::create_dir_all(&jsonl_root)?;
+    fs::create_dir_all(&index_root)?;
+    fs::create_dir_all(&save_root)?;
+
+    let entries = build_large_history_entries(BASE_ENTRIES, PAYLOAD_BYTES);
+    let jsonl = build_test_jsonl(&jsonl_root, &entries);
+
+    let migration =
+        migrate_large_history_and_rebuild_checkpoint(&jsonl, BASE_ENTRIES, MAX_SEGMENT_BYTES)?;
+    let recovery = append_tail_and_recover_truncated_frame(
+        &migration.v2_root,
+        BASE_ENTRIES,
+        TAIL_ENTRIES,
+        MAX_SEGMENT_BYTES,
+    )?;
+    let stale =
+        assert_stale_sidecar_fallback(&jsonl, &jsonl_root, &migration.v2_root, BASE_ENTRIES)?;
+
+    let index_start = test_timing_start();
+    let indexed_rows = index_concurrent_session_snapshots(&index_root)?;
+    let index_elapsed_us = elapsed_test_us(index_start);
+
+    let save_start = test_timing_start();
+    let saved_session_path = assert_crash_resilient_session_save(&save_root)?;
+    let save_elapsed_us = elapsed_test_us(save_start);
+
+    let report = json!({
+        "schema": "pi.session_store_v2.recovery_swarm_profile.v1",
+        "bead": "bd-07cku.6",
+        "counts": {
+            "base_entries": BASE_ENTRIES,
+            "payload_bytes_per_entry": PAYLOAD_BYTES,
+            "tail_entries_appended": TAIL_ENTRIES,
+            "recovered_entries_after_truncation": recovery.recovered_count,
+            "concurrent_index_rows": indexed_rows,
+            "stale_jsonl_entries": stale.total_entries,
+        },
+        "recovery": {
+            "v2_root": migration.v2_root.display().to_string(),
+            "offset_index": migration.index_path.display().to_string(),
+            "truncated_segment": recovery.segment_path.display().to_string(),
+            "checkpoint_head_entry_seq": migration.checkpoint_head_entry_seq,
+            "checkpoint_head_entry_id": migration.checkpoint_head_entry_id,
+        },
+        "stale_sidecar_fallback": {
+            "opened_backend": stale.opened_backend,
+            "sidecar_present": stale.sidecar_present,
+            "sidecar_stale": stale.sidecar_stale,
+        },
+        "crash_resilient_save": {
+            "session_path": saved_session_path.display().to_string(),
+            "entries": 32,
+            "deterministic_root": save_root.display().to_string(),
+        },
+        "timings_us": {
+            "migration": migration.migration_elapsed_us,
+            "checkpoint_rebuild": migration.checkpoint_rebuild_elapsed_us,
+            "trailing_frame_recovery": recovery.elapsed_us,
+            "stale_fallback": stale.elapsed_us,
+            "concurrent_index": index_elapsed_us,
+            "crash_resilient_save": save_elapsed_us,
+            "total": elapsed_test_us(total_start),
+        }
+    });
+    let evidence_path = emit_session_store_v2_recovery_evidence(&report)?;
+    assert!(
+        evidence_path.exists(),
+        "recovery evidence was not emitted at {}",
+        evidence_path.display()
+    );
+    println!(
+        "session store v2 recovery swarm evidence: {}",
+        evidence_path.display()
+    );
 
     Ok(())
 }
