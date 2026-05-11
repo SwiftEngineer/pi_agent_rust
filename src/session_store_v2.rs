@@ -280,6 +280,9 @@ impl SessionStoreV2 {
         };
         if let Err(err) = store.bootstrap_from_disk() {
             if is_recoverable_index_error(&err) {
+                if is_missing_active_segment_error(&err) && !store.segments_exist_with_data()? {
+                    return Err(err);
+                }
                 tracing::warn!(
                     root = %store.root.display(),
                     error = %err,
@@ -1113,6 +1116,18 @@ impl SessionStoreV2 {
                 let frame: SegmentFrame = match serde_json::from_str(json_line) {
                     Ok(frame) => {
                         if missing_newline {
+                            if i + 1 < segment_files.len() {
+                                tracing::warn!(
+                                    segment = %seg_path.display(),
+                                    line_number,
+                                    "SessionStoreV2 found an unsealed non-final segment during index rebuild; truncating segment and quarantining subsequent segments"
+                                );
+                                drop(reader);
+                                truncate_file_to(seg_path, byte_offset)?;
+                                quarantine_segment_tail(&segment_files[i + 1..])?;
+                                break 'segments;
+                            }
+
                             use std::io::{Read, Write};
                             tracing::warn!(
                                 segment = %seg_path.display(),
@@ -1456,6 +1471,13 @@ fn is_recoverable_index_error(error: &Error) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_missing_active_segment_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Session(message) if message.contains("failed to stat active segment")
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
