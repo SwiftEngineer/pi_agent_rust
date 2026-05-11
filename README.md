@@ -704,7 +704,7 @@ pi migrate ~/.pi/agent/sessions
 
 - `update-index` refreshes extension index metadata used by `search` and `info`.
 - `search` and `info` let you discover and inspect extension metadata without leaving the CLI.
-- `doctor` checks config, directories, auth, shell setup, sessions, swarm coordination readiness, and extension compatibility.
+- `doctor` checks config, directories, auth, shell setup, sessions, swarm coordination readiness, and extension compatibility. `pi doctor --only swarm --format json` also reports cgroup CPU quota, cpuset size, NUMA topology, cgroup memory limits, target/tmp headroom, and recommended concurrency budgets before large multi-agent runs.
 - `migrate` validates or creates the v2 session sidecar format for faster resume on larger histories.
 
 ---
@@ -2298,6 +2298,14 @@ fails before compilation if the target or temp mount has insufficient free
 space. Set `PI_CARGO_RUNNER=local` for a local-only run,
 `PI_CARGO_BUILD_ROOT=<dir>` for a different large volume, or
 `PI_CARGO_HEADROOM_MIN_FREE_MB=<mb>` for smaller focused checks.
+
+Before launching swarms or heavyweight all-target gates, run
+`pi doctor --only swarm --format json`. The
+`pi.doctor.swarm_resource_preflight.v1` result fails closed when
+`CARGO_TARGET_DIR` or `TMPDIR` cannot prove enough scratch headroom, and its
+`recommended_budgets` object gives conservative agent, tool, extension hostcall,
+RCH fanout, queue-depth, and RSS budgets derived from the effective cgroup CPU,
+cpuset, NUMA, and memory limits.
 
 ### Cargo Feature Defaults
 

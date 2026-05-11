@@ -18,7 +18,7 @@ use crate::session::SessionHeader;
 use crate::session_index::walk_sessions;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -34,6 +34,7 @@ const SWARM_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SWARM_DOCTOR_ADMISSION_SCHEMA: &str = "pi.doctor.swarm_admission.v1";
 const SWARM_DOCTOR_RCH_FAILURE_SCHEMA: &str = "pi.doctor.rch_failure.v1";
 const SWARM_DOCTOR_TEMP_DIR_SCHEMA: &str = "pi.doctor.swarm_temp_dir.v1";
+const SWARM_DOCTOR_RESOURCE_PREFLIGHT_SCHEMA: &str = "pi.doctor.swarm_resource_preflight.v1";
 const SWARM_DOCTOR_BUILD_SLOT_SCHEMA: &str = "pi.doctor.agent_mail_build_slots.v1";
 const SWARM_DOCTOR_CONTACTS_SCHEMA: &str = "pi.doctor.agent_mail_contacts.v1";
 const SWARM_DOCTOR_STALLED_REAPER_SCHEMA: &str = "pi.doctor.stalled_bead_reaper.v1";
@@ -49,6 +50,8 @@ const SWARM_RESERVATION_RECENT_HOURS: i64 = 24;
 const SWARM_RESERVATION_STALE_HOLDER_HOURS: i64 = 24;
 const SWARM_RESERVATION_EXPIRING_SOON_MINUTES: i64 = 30;
 const MIB_BYTES: u64 = 1024 * 1024;
+const CGROUP_UNLIMITED_MEMORY_THRESHOLD_BYTES: u64 = 1 << 60;
+const MAX_NUMERIC_RANGE_SPAN: u64 = 16_384;
 
 // ── Core Types ──────────────────────────────────────────────────────
 
@@ -1101,6 +1104,7 @@ fn is_executable(path: &Path) -> bool {
 #[allow(clippy::too_many_lines)]
 fn check_swarm(cwd: &Path, findings: &mut Vec<Finding>) {
     check_swarm_beads(cwd, findings);
+    check_swarm_resource_preflight(findings);
     check_swarm_live_admission(cwd, findings);
     check_swarm_br_status(cwd, findings);
     check_swarm_agent_mail(cwd, findings);
@@ -1357,13 +1361,25 @@ fn build_swarm_doctor_capacity_plan(
         cpu_cores,
         bytes_to_mib_ceil(budgets.max_rss_bytes.saturating_mul(2)).max(1),
     );
+    build_swarm_doctor_capacity_plan_with_inventory(
+        sample,
+        inventory,
+        budgets.max_queue_depth.max(1),
+    )
+}
+
+fn build_swarm_doctor_capacity_plan_with_inventory(
+    sample: &HostResourceSample,
+    inventory: SwarmHostInventory,
+    max_queue_depth: usize,
+) -> std::result::Result<SwarmCapacityPlan, SwarmCapacityPlanError> {
     let evidence = SwarmCapacityEvidenceSummary {
         complete_records: 1,
         host_capacity_rows: 1,
         host_capacity_mismatch_rows: 0,
         max_p99_ms: 250,
         max_p999_ms: 1_000,
-        max_queue_depth: budgets.max_queue_depth.max(1),
+        max_queue_depth: max_queue_depth.max(1),
         max_rss_mb: sample.rss_bytes.map_or(256, bytes_to_mib_ceil).max(1),
         max_cpu_pct: 1.0,
     };
@@ -1623,6 +1639,707 @@ fn resource_pressure_ratio(sample: &HostResourceSample, budgets: &HostResourceBu
         ratio = ratio.max((fd_count as f64) / (budgets.max_fds.max(1) as f64));
     }
     ratio
+}
+
+fn check_swarm_resource_preflight(findings: &mut Vec<Finding>) {
+    let sample = HostResourceSample::current();
+    let snapshot = build_swarm_resource_preflight_snapshot(&sample);
+    findings.push(classify_swarm_resource_preflight(&snapshot));
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SwarmResourcePreflightSnapshot {
+    logical_cpu_cores: u64,
+    cpu_quota: CgroupCpuQuota,
+    cpuset: CpuSetSnapshot,
+    numa: NumaTopologySnapshot,
+    memory: MemoryLimitSnapshot,
+    effective_cpu_cores: u64,
+    headroom_paths: Vec<SwarmHeadroomPath>,
+    recommended_budgets: Option<SwarmResourceBudgetRecommendation>,
+    plan_error: Option<String>,
+    source_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CgroupCpuQuota {
+    source: Option<String>,
+    quota_us: Option<u64>,
+    period_us: Option<u64>,
+    quota_cores: Option<f64>,
+    unlimited: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CpuSetSnapshot {
+    source: Option<String>,
+    raw: Option<String>,
+    cpu_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumaTopologySnapshot {
+    source: Option<String>,
+    raw_online: Option<String>,
+    nodes: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryLimitSnapshot {
+    mem_total_bytes: Option<u64>,
+    cgroup_limit_bytes: Option<u64>,
+    effective_limit_bytes: Option<u64>,
+    unlimited: bool,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CgroupMemoryLimitParse {
+    Limited(u64),
+    Unlimited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwarmHeadroomPath {
+    env_name: String,
+    path: Option<String>,
+    exists: bool,
+    under_expected_root: Option<bool>,
+    available_kb: Option<u64>,
+    ready: bool,
+    problem: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwarmResourceBudgetRecommendation {
+    agent_concurrency: u64,
+    tool_concurrency: u64,
+    extension_hostcall_lanes: u64,
+    rch_verification_fanout: u64,
+    max_queue_depth: usize,
+    max_rss_bytes: u64,
+    memory_pressure_threshold_ratio_label: String,
+    plan_confidence: String,
+}
+
+fn build_swarm_resource_preflight_snapshot(
+    sample: &HostResourceSample,
+) -> SwarmResourcePreflightSnapshot {
+    let mut source_errors = Vec::new();
+    let logical_cpu_cores = std::thread::available_parallelism()
+        .ok()
+        .and_then(|value| u64::try_from(value.get()).ok())
+        .unwrap_or(1);
+    let cpu_quota = read_cgroup_cpu_quota(&mut source_errors);
+    let cpuset = read_cpuset_snapshot(&mut source_errors);
+    let numa = read_numa_topology(&mut source_errors);
+    let memory = read_memory_limit_snapshot(&mut source_errors);
+
+    if cpu_quota.source.is_none() {
+        source_errors.push("cgroup CPU quota unavailable".to_string());
+    }
+    if cpuset.source.is_none() {
+        source_errors.push("cpuset CPU list unavailable".to_string());
+    }
+    if numa.source.is_none() {
+        source_errors.push("NUMA topology unavailable".to_string());
+    }
+    if memory.effective_limit_bytes.is_none() {
+        source_errors.push("effective memory limit unavailable".to_string());
+    }
+
+    let effective_cpu_cores =
+        effective_swarm_cpu_cores(logical_cpu_cores, cpu_quota.quota_cores, cpuset.cpu_count);
+    let headroom_paths = ["CARGO_TARGET_DIR", "TMPDIR"]
+        .into_iter()
+        .map(collect_swarm_headroom_path)
+        .collect::<Vec<_>>();
+    let (recommended_budgets, plan_error) =
+        match build_swarm_resource_preflight_plan(sample, effective_cpu_cores, &memory) {
+            Ok(plan) => (Some(resource_budget_recommendation(&plan)), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
+
+    SwarmResourcePreflightSnapshot {
+        logical_cpu_cores,
+        cpu_quota,
+        cpuset,
+        numa,
+        memory,
+        effective_cpu_cores,
+        headroom_paths,
+        recommended_budgets,
+        plan_error,
+        source_errors,
+    }
+}
+
+fn classify_swarm_resource_preflight(snapshot: &SwarmResourcePreflightSnapshot) -> Finding {
+    let critical_failures = swarm_resource_preflight_critical_failures(snapshot);
+    let data = swarm_resource_preflight_data(snapshot, &critical_failures);
+    let detail = format_swarm_resource_preflight_detail(snapshot, &critical_failures);
+    if !critical_failures.is_empty() {
+        return Finding::fail(CheckCategory::Swarm, "Swarm resource preflight blocked")
+            .with_detail(detail)
+            .with_remediation(format!(
+                "Export CARGO_TARGET_DIR and TMPDIR under {SWARM_CARGO_SCRATCH_ROOT}/<agent>/ with at least {} free before launching swarms or heavyweight cargo gates",
+                format_available_kb(SWARM_DISK_WARN_AVAILABLE_KB)
+            ))
+            .with_data(data);
+    }
+    if !snapshot.source_errors.is_empty() || snapshot.plan_error.is_some() {
+        return Finding::warn(CheckCategory::Swarm, "Swarm resource preflight degraded")
+            .with_detail(detail)
+            .with_remediation(
+                "Review unavailable cgroup, cpuset, NUMA, memory, or budget inputs before using the recommended concurrency as an operator limit",
+            )
+            .with_data(data);
+    }
+
+    Finding::pass(CheckCategory::Swarm, "Swarm resource preflight ready")
+        .with_detail(detail)
+        .with_data(data)
+}
+
+fn swarm_resource_preflight_critical_failures(
+    snapshot: &SwarmResourcePreflightSnapshot,
+) -> Vec<String> {
+    let mut failures = snapshot
+        .headroom_paths
+        .iter()
+        .filter_map(|path| {
+            if path.ready {
+                None
+            } else {
+                Some(format!(
+                    "{}:{}",
+                    path.env_name,
+                    path.problem.as_deref().unwrap_or("headroom_unavailable")
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+    if snapshot.effective_cpu_cores == 0 {
+        failures.push("effective_cpu_cores:unavailable".to_string());
+    }
+    failures
+}
+
+fn swarm_resource_preflight_data(
+    snapshot: &SwarmResourcePreflightSnapshot,
+    critical_failures: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": SWARM_DOCTOR_RESOURCE_PREFLIGHT_SCHEMA,
+        "source": "linux_proc_cgroup_sysfs",
+        "cpu": {
+            "logical_cores": snapshot.logical_cpu_cores,
+            "effective_cores": snapshot.effective_cpu_cores,
+            "cgroup_quota": {
+                "source": snapshot.cpu_quota.source,
+                "quota_us": snapshot.cpu_quota.quota_us,
+                "period_us": snapshot.cpu_quota.period_us,
+                "quota_cores": snapshot.cpu_quota.quota_cores,
+                "unlimited": snapshot.cpu_quota.unlimited,
+            },
+            "cpuset": {
+                "source": snapshot.cpuset.source,
+                "raw": snapshot.cpuset.raw,
+                "cpu_count": snapshot.cpuset.cpu_count,
+            },
+        },
+        "numa": {
+            "source": snapshot.numa.source,
+            "raw_online": snapshot.numa.raw_online,
+            "node_count": snapshot.numa.nodes.len(),
+            "nodes": snapshot.numa.nodes,
+        },
+        "memory": {
+            "source": snapshot.memory.source,
+            "mem_total_bytes": snapshot.memory.mem_total_bytes,
+            "cgroup_limit_bytes": snapshot.memory.cgroup_limit_bytes,
+            "effective_limit_bytes": snapshot.memory.effective_limit_bytes,
+            "unlimited": snapshot.memory.unlimited,
+        },
+        "tmpfs_headroom": {
+            "expected_root": SWARM_CARGO_SCRATCH_ROOT,
+            "warn_available_kb": SWARM_DISK_WARN_AVAILABLE_KB,
+            "paths": snapshot.headroom_paths.iter().map(swarm_headroom_path_json).collect::<Vec<_>>(),
+        },
+        "recommended_budgets": snapshot.recommended_budgets.as_ref().map(resource_budget_recommendation_json),
+        "plan_error": snapshot.plan_error,
+        "critical_failures": critical_failures,
+        "source_errors": snapshot.source_errors,
+    })
+}
+
+fn swarm_headroom_path_json(path: &SwarmHeadroomPath) -> serde_json::Value {
+    serde_json::json!({
+        "env_name": path.env_name,
+        "path": path.path,
+        "exists": path.exists,
+        "under_expected_root": path.under_expected_root,
+        "available_kb": path.available_kb,
+        "ready": path.ready,
+        "problem": path.problem,
+    })
+}
+
+fn resource_budget_recommendation_json(
+    recommendation: &SwarmResourceBudgetRecommendation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "agent_concurrency": recommendation.agent_concurrency,
+        "tool_concurrency": recommendation.tool_concurrency,
+        "extension_hostcall_lanes": recommendation.extension_hostcall_lanes,
+        "rch_verification_fanout": recommendation.rch_verification_fanout,
+        "max_queue_depth": recommendation.max_queue_depth,
+        "max_rss_bytes": recommendation.max_rss_bytes,
+        "memory_pressure_threshold_ratio": recommendation.memory_pressure_threshold_ratio_label,
+        "plan_confidence": recommendation.plan_confidence,
+    })
+}
+
+fn format_swarm_resource_preflight_detail(
+    snapshot: &SwarmResourcePreflightSnapshot,
+    critical_failures: &[String],
+) -> String {
+    let quota = snapshot
+        .cpu_quota
+        .quota_cores
+        .map_or_else(|| "unlimited".to_string(), format_ratio_label);
+    let cpuset = snapshot
+        .cpuset
+        .cpu_count
+        .map_or_else(|| "unknown".to_string(), |count| count.to_string());
+    let memory = snapshot.memory.effective_limit_bytes.map_or_else(
+        || "unknown".to_string(),
+        |bytes| format!("{} MiB", bytes_to_mib_ceil(bytes)),
+    );
+    let budget = snapshot.recommended_budgets.as_ref().map_or_else(
+        || "unavailable".to_string(),
+        |recommendation| {
+            format!(
+                "agents={}, tools={}, extension_lanes={}, rch_fanout={}",
+                recommendation.agent_concurrency,
+                recommendation.tool_concurrency,
+                recommendation.extension_hostcall_lanes,
+                recommendation.rch_verification_fanout
+            )
+        },
+    );
+    let headroom_ready = snapshot
+        .headroom_paths
+        .iter()
+        .filter(|path| path.ready)
+        .count();
+    let mut detail = format!(
+        "cpu logical={}, effective={}, quota_cores={}, cpuset_cpus={}, numa_nodes={}, memory_effective={}, headroom_ready={}/{}, recommended={budget}",
+        snapshot.logical_cpu_cores,
+        snapshot.effective_cpu_cores,
+        quota,
+        cpuset,
+        snapshot.numa.nodes.len(),
+        memory,
+        headroom_ready,
+        snapshot.headroom_paths.len(),
+    );
+    if !critical_failures.is_empty() {
+        detail.push_str("; critical_failures=");
+        detail.push_str(&critical_failures.join("; "));
+    }
+    if !snapshot.source_errors.is_empty() {
+        detail.push_str("; source_errors=");
+        detail.push_str(&snapshot.source_errors.join("; "));
+    }
+    if let Some(plan_error) = &snapshot.plan_error {
+        detail.push_str("; plan_error=");
+        detail.push_str(plan_error);
+    }
+    detail
+}
+
+fn read_cgroup_cpu_quota(source_errors: &mut Vec<String>) -> CgroupCpuQuota {
+    if let Some((source, raw)) = read_first_existing_trimmed(
+        "PI_DOCTOR_CGROUP_CPU_MAX_PATH",
+        &["/sys/fs/cgroup/cpu.max"],
+        source_errors,
+    ) {
+        if let Some(mut quota) = parse_cgroup_cpu_max(&raw) {
+            quota.source = Some(source);
+            return quota;
+        }
+        source_errors.push(format!("invalid cgroup cpu.max at {source}: {raw}"));
+    }
+
+    let quota = read_first_existing_trimmed(
+        "PI_DOCTOR_CGROUP_CPU_CFS_QUOTA_US_PATH",
+        &["/sys/fs/cgroup/cpu/cpu.cfs_quota_us"],
+        source_errors,
+    );
+    let period = read_first_existing_trimmed(
+        "PI_DOCTOR_CGROUP_CPU_CFS_PERIOD_US_PATH",
+        &["/sys/fs/cgroup/cpu/cpu.cfs_period_us"],
+        source_errors,
+    );
+    if let (Some((quota_source, quota_raw)), Some((period_source, period_raw))) = (quota, period) {
+        if let Some(mut parsed) = parse_cgroup_cpu_cfs(&quota_raw, &period_raw) {
+            parsed.source = Some(format!("{quota_source};{period_source}"));
+            return parsed;
+        }
+        source_errors.push(format!(
+            "invalid cgroup v1 CPU quota at {quota_source}/{period_source}: {quota_raw}/{period_raw}"
+        ));
+    }
+
+    CgroupCpuQuota {
+        source: None,
+        quota_us: None,
+        period_us: None,
+        quota_cores: None,
+        unlimited: false,
+    }
+}
+
+fn read_cpuset_snapshot(source_errors: &mut Vec<String>) -> CpuSetSnapshot {
+    let Some((source, raw)) = read_first_existing_trimmed(
+        "PI_DOCTOR_CPUSET_CPUS_PATH",
+        &[
+            "/sys/fs/cgroup/cpuset.cpus.effective",
+            "/sys/fs/cgroup/cpuset.cpus",
+            "/sys/fs/cgroup/cpuset/cpuset.cpus",
+        ],
+        source_errors,
+    ) else {
+        return CpuSetSnapshot {
+            source: None,
+            raw: None,
+            cpu_count: None,
+        };
+    };
+
+    let cpu_count = parse_numeric_range_list(&raw).and_then(|cpus| u64::try_from(cpus.len()).ok());
+    if cpu_count.is_none() {
+        source_errors.push(format!("invalid cpuset CPU list at {source}: {raw}"));
+    }
+    CpuSetSnapshot {
+        source: Some(source),
+        raw: Some(raw),
+        cpu_count,
+    }
+}
+
+fn read_numa_topology(source_errors: &mut Vec<String>) -> NumaTopologySnapshot {
+    let Some((source, raw)) = read_first_existing_trimmed(
+        "PI_DOCTOR_NUMA_ONLINE_PATH",
+        &["/sys/devices/system/node/online"],
+        source_errors,
+    ) else {
+        return NumaTopologySnapshot {
+            source: None,
+            raw_online: None,
+            nodes: Vec::new(),
+        };
+    };
+
+    let nodes = parse_numeric_range_list(&raw).unwrap_or_else(|| {
+        source_errors.push(format!("invalid NUMA node list at {source}: {raw}"));
+        Vec::new()
+    });
+    NumaTopologySnapshot {
+        source: Some(source),
+        raw_online: Some(raw),
+        nodes,
+    }
+}
+
+fn read_memory_limit_snapshot(source_errors: &mut Vec<String>) -> MemoryLimitSnapshot {
+    let mem_total_bytes =
+        read_first_existing_trimmed("PI_DOCTOR_MEMINFO_PATH", &["/proc/meminfo"], source_errors)
+            .and_then(|(source, raw)| {
+                let parsed = parse_mem_total_bytes(&raw);
+                if parsed.is_none() {
+                    source_errors.push(format!("invalid MemTotal in {source}"));
+                }
+                parsed
+            });
+    let (source, parsed_limit) = read_first_existing_trimmed(
+        "PI_DOCTOR_CGROUP_MEMORY_MAX_PATH",
+        &[
+            "/sys/fs/cgroup/memory.max",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        ],
+        source_errors,
+    )
+    .map_or((None, None), |(source, raw)| {
+        let parsed = parse_cgroup_memory_limit_bytes(&raw);
+        if parsed.is_none() {
+            source_errors.push(format!("invalid cgroup memory limit at {source}: {raw}"));
+        }
+        (Some(source), parsed)
+    });
+    let limit_bytes = match parsed_limit {
+        Some(CgroupMemoryLimitParse::Limited(bytes)) => Some(bytes),
+        Some(CgroupMemoryLimitParse::Unlimited) | None => None,
+    };
+    let unlimited = match parsed_limit {
+        Some(CgroupMemoryLimitParse::Limited(bytes)) => {
+            bytes >= CGROUP_UNLIMITED_MEMORY_THRESHOLD_BYTES
+                || mem_total_bytes.is_some_and(|total| bytes > total.saturating_mul(16))
+        }
+        Some(CgroupMemoryLimitParse::Unlimited) | None => true,
+    };
+    let cgroup_limit_bytes = limit_bytes.filter(|_| !unlimited);
+    let effective_limit_bytes = match (mem_total_bytes, cgroup_limit_bytes) {
+        (Some(total), Some(limit)) => Some(total.min(limit)),
+        (Some(total), None) => Some(total),
+        (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    };
+
+    MemoryLimitSnapshot {
+        mem_total_bytes,
+        cgroup_limit_bytes,
+        effective_limit_bytes,
+        unlimited,
+        source,
+    }
+}
+
+fn collect_swarm_headroom_path(env_name: &str) -> SwarmHeadroomPath {
+    let Some(raw_path) = std::env::var_os(env_name) else {
+        return SwarmHeadroomPath {
+            env_name: env_name.to_string(),
+            path: None,
+            exists: false,
+            under_expected_root: None,
+            available_kb: None,
+            ready: false,
+            problem: Some("env_not_set".to_string()),
+        };
+    };
+    let path = PathBuf::from(raw_path);
+    let path_label = path.display().to_string();
+    if !path.is_dir() {
+        return SwarmHeadroomPath {
+            env_name: env_name.to_string(),
+            path: Some(path_label),
+            exists: false,
+            under_expected_root: Some(path_under_swarm_scratch_root(&path)),
+            available_kb: None,
+            ready: false,
+            problem: Some("path_not_directory".to_string()),
+        };
+    }
+
+    let under_expected_root = path_under_swarm_scratch_root(&path);
+    let available_kb = disk_available_kb(&path).ok().flatten();
+    let problem = if !under_expected_root {
+        Some("outside_expected_root".to_string())
+    } else if available_kb.is_none() {
+        Some("available_space_unavailable".to_string())
+    } else if available_kb.is_some_and(|available| available < SWARM_DISK_WARN_AVAILABLE_KB) {
+        Some("low_available_space".to_string())
+    } else {
+        None
+    };
+    SwarmHeadroomPath {
+        env_name: env_name.to_string(),
+        path: Some(path_label),
+        exists: true,
+        under_expected_root: Some(under_expected_root),
+        available_kb,
+        ready: problem.is_none(),
+        problem,
+    }
+}
+
+fn build_swarm_resource_preflight_plan(
+    sample: &HostResourceSample,
+    effective_cpu_cores: u64,
+    memory: &MemoryLimitSnapshot,
+) -> std::result::Result<SwarmCapacityPlan, SwarmCapacityPlanError> {
+    let effective_memory_mb = memory
+        .effective_limit_bytes
+        .map_or(1024, bytes_to_mib_ceil)
+        .max(1);
+    let inventory = SwarmHostInventory::new(
+        effective_cpu_cores.max(1),
+        effective_cpu_cores.max(1),
+        effective_memory_mb,
+    );
+    build_swarm_doctor_capacity_plan_with_inventory(
+        sample,
+        inventory,
+        swarm_preflight_queue_depth_budget(effective_cpu_cores),
+    )
+}
+
+fn swarm_preflight_queue_depth_budget(effective_cpu_cores: u64) -> usize {
+    u64_to_usize_saturating(effective_cpu_cores.saturating_mul(64)).clamp(128_usize, 4096_usize)
+}
+
+fn resource_budget_recommendation(plan: &SwarmCapacityPlan) -> SwarmResourceBudgetRecommendation {
+    SwarmResourceBudgetRecommendation {
+        agent_concurrency: plan.recommended_agent_concurrency,
+        tool_concurrency: plan.recommended_tool_concurrency,
+        extension_hostcall_lanes: plan.recommended_extension_hostcall_lanes,
+        rch_verification_fanout: plan.recommended_rch_verification_fanout,
+        max_queue_depth: plan.resource_budgets.max_queue_depth,
+        max_rss_bytes: plan.resource_budgets.max_rss_bytes,
+        memory_pressure_threshold_ratio_label: format_ratio_label(
+            plan.memory_pressure_threshold_ratio,
+        ),
+        plan_confidence: format!("{:?}", plan.confidence).to_ascii_lowercase(),
+    }
+}
+
+fn read_first_existing_trimmed(
+    env_key: &str,
+    defaults: &[&str],
+    source_errors: &mut Vec<String>,
+) -> Option<(String, String)> {
+    let override_path = std::env::var_os(env_key).map(PathBuf::from);
+    let candidates = override_path.as_ref().map_or_else(
+        || defaults.iter().map(PathBuf::from).collect(),
+        |path| vec![path.clone()],
+    );
+    for path in candidates {
+        if !path.is_file() {
+            if override_path.is_some() {
+                source_errors.push(format!(
+                    "{env_key} points to missing file {}",
+                    path.display()
+                ));
+            }
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => return Some((path.display().to_string(), raw.trim().to_string())),
+            Err(err) => source_errors.push(format!("failed to read {}: {err}", path.display())),
+        }
+    }
+    None
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn parse_cgroup_cpu_max(raw: &str) -> Option<CgroupCpuQuota> {
+    let mut parts = raw.split_whitespace();
+    let quota = parts.next()?;
+    let period_us = parts.next()?.parse::<u64>().ok()?;
+    if period_us == 0 {
+        return None;
+    }
+    if quota == "max" {
+        return Some(CgroupCpuQuota {
+            source: None,
+            quota_us: None,
+            period_us: Some(period_us),
+            quota_cores: None,
+            unlimited: true,
+        });
+    }
+    let quota_us = quota.parse::<u64>().ok()?;
+    Some(CgroupCpuQuota {
+        source: None,
+        quota_us: Some(quota_us),
+        period_us: Some(period_us),
+        quota_cores: Some((quota_us as f64) / (period_us as f64)),
+        unlimited: false,
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn parse_cgroup_cpu_cfs(quota_raw: &str, period_raw: &str) -> Option<CgroupCpuQuota> {
+    let quota_value = quota_raw.trim().parse::<i64>().ok()?;
+    let period_us = period_raw.trim().parse::<u64>().ok()?;
+    if period_us == 0 {
+        return None;
+    }
+    if quota_value < 0 {
+        return Some(CgroupCpuQuota {
+            source: None,
+            quota_us: None,
+            period_us: Some(period_us),
+            quota_cores: None,
+            unlimited: true,
+        });
+    }
+    let quota_us = u64::try_from(quota_value).ok()?;
+    Some(CgroupCpuQuota {
+        source: None,
+        quota_us: Some(quota_us),
+        period_us: Some(period_us),
+        quota_cores: Some((quota_us as f64) / (period_us as f64)),
+        unlimited: false,
+    })
+}
+
+fn parse_numeric_range_list(raw: &str) -> Option<Vec<u64>> {
+    let mut values = BTreeSet::new();
+    for segment in raw.trim().split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        if let Some((start, end)) = segment.split_once('-') {
+            let start = start.trim().parse::<u64>().ok()?;
+            let end = end.trim().parse::<u64>().ok()?;
+            if start > end || end.saturating_sub(start) > MAX_NUMERIC_RANGE_SPAN {
+                return None;
+            }
+            for value in start..=end {
+                values.insert(value);
+            }
+        } else {
+            values.insert(segment.parse::<u64>().ok()?);
+        }
+    }
+    (!values.is_empty()).then(|| values.into_iter().collect())
+}
+
+fn parse_cgroup_memory_limit_bytes(raw: &str) -> Option<CgroupMemoryLimitParse> {
+    let value = raw.trim();
+    if value == "max" {
+        return Some(CgroupMemoryLimitParse::Unlimited);
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .map(CgroupMemoryLimitParse::Limited)
+}
+
+fn parse_mem_total_bytes(raw: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemTotal:")?.trim();
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        kb.checked_mul(1024)
+    })
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn effective_swarm_cpu_cores(
+    logical_cpu_cores: u64,
+    quota_cores: Option<f64>,
+    cpuset_count: Option<u64>,
+) -> u64 {
+    let quota_limit = quota_cores
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.floor().max(1.0) as u64);
+    [Some(logical_cpu_cores), cpuset_count, quota_limit]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn format_ratio_label(value: f64) -> String {
+    format!("{value:.2}")
 }
 
 fn env_u64(key: &str) -> Option<u64> {
@@ -7100,6 +7817,124 @@ not-json
                 .unwrap_or_default()
                 .contains(SWARM_CARGO_SCRATCH_ROOT)
         );
+    }
+
+    #[test]
+    fn swarm_resource_preflight_parses_cgroup_cpu_quota() {
+        let limited = parse_cgroup_cpu_max("150000 100000").expect("limited cpu.max");
+
+        assert_eq!(limited.quota_us, Some(150_000));
+        assert_eq!(limited.period_us, Some(100_000));
+        assert_eq!(limited.quota_cores, Some(1.5));
+        assert!(!limited.unlimited);
+
+        let unlimited = parse_cgroup_cpu_max("max 100000").expect("unlimited cpu.max");
+        assert!(unlimited.unlimited);
+        assert_eq!(unlimited.quota_cores, None);
+
+        let v1 = parse_cgroup_cpu_cfs("-1", "100000").expect("v1 unlimited");
+        assert!(v1.unlimited);
+    }
+
+    #[test]
+    fn swarm_resource_preflight_parses_cpuset_and_numa_ranges() {
+        let values = parse_numeric_range_list("0-3,8,10-11,3").expect("range list");
+
+        assert_eq!(values, vec![0, 1, 2, 3, 8, 10, 11]);
+        assert!(parse_numeric_range_list("3-1").is_none());
+        assert!(parse_numeric_range_list("0,,2").is_none());
+    }
+
+    #[test]
+    fn swarm_resource_preflight_parses_memory_limits() {
+        assert_eq!(
+            parse_cgroup_memory_limit_bytes("max"),
+            Some(CgroupMemoryLimitParse::Unlimited)
+        );
+        assert_eq!(
+            parse_cgroup_memory_limit_bytes("2147483648"),
+            Some(CgroupMemoryLimitParse::Limited(2_147_483_648))
+        );
+        assert_eq!(
+            parse_mem_total_bytes("MemTotal:       65536 kB\nMemFree: 4 kB\n"),
+            Some(64 * MIB_BYTES)
+        );
+    }
+
+    #[test]
+    fn swarm_resource_preflight_fails_closed_without_headroom() {
+        let snapshot = SwarmResourcePreflightSnapshot {
+            logical_cpu_cores: 8,
+            cpu_quota: CgroupCpuQuota {
+                source: Some("/sys/fs/cgroup/cpu.max".to_string()),
+                quota_us: Some(400_000),
+                period_us: Some(100_000),
+                quota_cores: Some(4.0),
+                unlimited: false,
+            },
+            cpuset: CpuSetSnapshot {
+                source: Some("/sys/fs/cgroup/cpuset.cpus.effective".to_string()),
+                raw: Some("0-3".to_string()),
+                cpu_count: Some(4),
+            },
+            numa: NumaTopologySnapshot {
+                source: Some("/sys/devices/system/node/online".to_string()),
+                raw_online: Some("0-1".to_string()),
+                nodes: vec![0, 1],
+            },
+            memory: MemoryLimitSnapshot {
+                mem_total_bytes: Some(64 * 1024 * MIB_BYTES),
+                cgroup_limit_bytes: Some(32 * 1024 * MIB_BYTES),
+                effective_limit_bytes: Some(32 * 1024 * MIB_BYTES),
+                unlimited: false,
+                source: Some("/sys/fs/cgroup/memory.max".to_string()),
+            },
+            effective_cpu_cores: 4,
+            headroom_paths: vec![SwarmHeadroomPath {
+                env_name: "CARGO_TARGET_DIR".to_string(),
+                path: None,
+                exists: false,
+                under_expected_root: None,
+                available_kb: None,
+                ready: false,
+                problem: Some("env_not_set".to_string()),
+            }],
+            recommended_budgets: Some(SwarmResourceBudgetRecommendation {
+                agent_concurrency: 2,
+                tool_concurrency: 4,
+                extension_hostcall_lanes: 1,
+                rch_verification_fanout: 1,
+                max_queue_depth: 128,
+                max_rss_bytes: 512 * MIB_BYTES,
+                memory_pressure_threshold_ratio_label: "0.70".to_string(),
+                plan_confidence: "low".to_string(),
+            }),
+            plan_error: None,
+            source_errors: Vec::new(),
+        };
+
+        let finding = classify_swarm_resource_preflight(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Fail);
+        let data = finding_data(&finding);
+        assert_eq!(data["schema"], SWARM_DOCTOR_RESOURCE_PREFLIGHT_SCHEMA);
+        assert_eq!(data["cpu"]["effective_cores"], serde_json::json!(4));
+        assert_eq!(data["numa"]["node_count"], serde_json::json!(2));
+        assert_eq!(
+            data["critical_failures"][0],
+            serde_json::json!("CARGO_TARGET_DIR:env_not_set")
+        );
+        assert_eq!(
+            data["recommended_budgets"]["agent_concurrency"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn swarm_resource_preflight_effective_cpu_uses_tightest_limit() {
+        assert_eq!(effective_swarm_cpu_cores(16, Some(3.8), Some(8)), 3);
+        assert_eq!(effective_swarm_cpu_cores(16, Some(0.5), Some(8)), 1);
+        assert_eq!(effective_swarm_cpu_cores(16, None, Some(4)), 4);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const SWARM_TEMP_DIR_SCHEMA: &str = "pi.doctor.swarm_temp_dir.v1";
+const SWARM_RESOURCE_PREFLIGHT_SCHEMA: &str = "pi.doctor.swarm_resource_preflight.v1";
 const SWARM_TEMP_EXPECTED_ROOT: &str = "/data/tmp/pi_agent_rust_cargo";
 const SWARM_TEMP_WARN_AVAILABLE_KB: u64 = 10 * 1024 * 1024;
 
@@ -135,6 +136,26 @@ fn temp_dir_finding<'a>(report: &'a Value, env_name: &str) -> TestResult<&'a Val
     ))
 }
 
+fn finding_by_schema<'a>(report: &'a Value, schema: &str) -> TestResult<&'a Value> {
+    let findings = field(report, "findings")?
+        .as_array()
+        .ok_or_else(|| TestError(format!("doctor findings is not an array in {report}")))?;
+    for finding in findings {
+        if finding
+            .get("data")
+            .and_then(|data| data.get("schema"))
+            .and_then(Value::as_str)
+            == Some(schema)
+        {
+            return Ok(finding);
+        }
+    }
+
+    fail(format!(
+        "missing doctor finding for schema {schema}: {report}"
+    ))
+}
+
 fn require_temp_dir_data_shape(data: &Value, env_name: &str) -> TestResult {
     require_eq(field_str(data, "schema")?, SWARM_TEMP_DIR_SCHEMA, "schema")?;
     require_eq(field_str(data, "env_name")?, env_name, "env_name")?;
@@ -183,6 +204,31 @@ fn create_expected_root_test_dir(name: &str) -> TestResult<(PathBuf, bool)> {
         Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok((dir, false)),
         Err(err) => Err(err.into()),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ResourceFixtureFile {
+    CpuMax,
+    CpusetCpusEffective,
+    NumaOnline,
+    MemoryMax,
+    Meminfo,
+}
+
+fn write_resource_fixture_file(
+    root: &Path,
+    file: ResourceFixtureFile,
+    content: &str,
+) -> TestResult<PathBuf> {
+    let path = match file {
+        ResourceFixtureFile::CpuMax => root.join("cpu.max"),
+        ResourceFixtureFile::CpusetCpusEffective => root.join("cpuset.cpus.effective"),
+        ResourceFixtureFile::NumaOnline => root.join("numa-online"),
+        ResourceFixtureFile::MemoryMax => root.join("memory.max"),
+        ResourceFixtureFile::Meminfo => root.join("meminfo"),
+    };
+    fs::write(&path, content)?;
+    Ok(path)
 }
 
 fn require_missing_env(report: &Value, env_name: &str) -> TestResult {
@@ -289,4 +335,157 @@ fn doctor_swarm_temp_dir_json_freezes_root_posture() -> TestResult {
         "tmp under_expected_root",
     )?;
     require_available_kb_shape(tmp_data)
+}
+
+#[test]
+fn doctor_swarm_resource_preflight_json_reports_constrained_profile() -> TestResult {
+    let root = create_swarm_temp_test_dir(Path::new("/tmp"), "constrained-resource-fixture")?;
+    let (target_dir, target_exists) = create_expected_root_test_dir("constrained-target")?;
+    let (tmp_dir, tmp_exists) = create_expected_root_test_dir("constrained-tmp")?;
+    let cpu_max =
+        write_resource_fixture_file(&root, ResourceFixtureFile::CpuMax, "200000 100000\n")?;
+    let cpuset =
+        write_resource_fixture_file(&root, ResourceFixtureFile::CpusetCpusEffective, "0-3\n")?;
+    let numa = write_resource_fixture_file(&root, ResourceFixtureFile::NumaOnline, "0\n")?;
+    let memory =
+        write_resource_fixture_file(&root, ResourceFixtureFile::MemoryMax, "2147483648\n")?;
+    let meminfo = write_resource_fixture_file(
+        &root,
+        ResourceFixtureFile::Meminfo,
+        "MemTotal: 33554432 kB\n",
+    )?;
+    let target_dir = target_dir.display().to_string();
+    let tmp_dir = tmp_dir.display().to_string();
+    let cpu_max = cpu_max.display().to_string();
+    let cpuset = cpuset.display().to_string();
+    let numa = numa.display().to_string();
+    let memory = memory.display().to_string();
+    let meminfo = meminfo.display().to_string();
+
+    let report = run_doctor_json(&[
+        ("CARGO_TARGET_DIR", Some(target_dir.as_str())),
+        ("TMPDIR", Some(tmp_dir.as_str())),
+        ("PI_DOCTOR_CGROUP_CPU_MAX_PATH", Some(cpu_max.as_str())),
+        ("PI_DOCTOR_CPUSET_CPUS_PATH", Some(cpuset.as_str())),
+        ("PI_DOCTOR_NUMA_ONLINE_PATH", Some(numa.as_str())),
+        ("PI_DOCTOR_CGROUP_MEMORY_MAX_PATH", Some(memory.as_str())),
+        ("PI_DOCTOR_MEMINFO_PATH", Some(meminfo.as_str())),
+    ])?;
+    let finding = finding_by_schema(&report, SWARM_RESOURCE_PREFLIGHT_SCHEMA)?;
+    let data = field(finding, "data")?;
+
+    if target_exists && tmp_exists {
+        require_eq(field_str(finding, "severity")?, "pass", "severity")?;
+        require(
+            field(data, "critical_failures")?
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            format!("resource preflight should have no critical failures: {data}"),
+        )?;
+    }
+    require_eq(
+        field_str(data, "schema")?,
+        SWARM_RESOURCE_PREFLIGHT_SCHEMA,
+        "schema",
+    )?;
+    require_eq(
+        &field_u64(field(data, "cpu")?, "effective_cores")?,
+        &2,
+        "effective cores",
+    )?;
+    require_eq(
+        &field_u64(field(field(data, "cpu")?, "cpuset")?, "cpu_count")?,
+        &4,
+        "cpuset cpu count",
+    )?;
+    require_eq(
+        &field_u64(field(data, "numa")?, "node_count")?,
+        &1,
+        "numa node count",
+    )?;
+    require_eq(
+        &field_u64(field(data, "memory")?, "effective_limit_bytes")?,
+        &2_147_483_648,
+        "effective memory limit",
+    )?;
+    require(
+        field(field(data, "recommended_budgets")?, "agent_concurrency")?
+            .as_u64()
+            .is_some(),
+        format!("recommended budgets should include agent concurrency: {data}"),
+    )?;
+    require(
+        field(data, "tmpfs_headroom")?
+            .get("paths")
+            .and_then(Value::as_array)
+            .is_some_and(|paths| paths.len() == 2),
+        format!("tmpfs_headroom should report target and tmp paths: {data}"),
+    )
+}
+
+#[test]
+fn doctor_swarm_resource_preflight_json_reports_high_capacity_profile() -> TestResult {
+    let root = create_swarm_temp_test_dir(Path::new("/tmp"), "high-capacity-resource-fixture")?;
+    let (target_dir, target_exists) = create_expected_root_test_dir("high-capacity-target")?;
+    let (tmp_dir, tmp_exists) = create_expected_root_test_dir("high-capacity-tmp")?;
+    let cpu_max = write_resource_fixture_file(&root, ResourceFixtureFile::CpuMax, "max 100000\n")?;
+    let cpuset =
+        write_resource_fixture_file(&root, ResourceFixtureFile::CpusetCpusEffective, "0-63\n")?;
+    let numa = write_resource_fixture_file(&root, ResourceFixtureFile::NumaOnline, "0-3\n")?;
+    let memory = write_resource_fixture_file(&root, ResourceFixtureFile::MemoryMax, "max\n")?;
+    let meminfo = write_resource_fixture_file(
+        &root,
+        ResourceFixtureFile::Meminfo,
+        "MemTotal: 268435456 kB\n",
+    )?;
+    let target_dir = target_dir.display().to_string();
+    let tmp_dir = tmp_dir.display().to_string();
+    let cpu_max = cpu_max.display().to_string();
+    let cpuset = cpuset.display().to_string();
+    let numa = numa.display().to_string();
+    let memory = memory.display().to_string();
+    let meminfo = meminfo.display().to_string();
+
+    let report = run_doctor_json(&[
+        ("CARGO_TARGET_DIR", Some(target_dir.as_str())),
+        ("TMPDIR", Some(tmp_dir.as_str())),
+        ("PI_DOCTOR_CGROUP_CPU_MAX_PATH", Some(cpu_max.as_str())),
+        ("PI_DOCTOR_CPUSET_CPUS_PATH", Some(cpuset.as_str())),
+        ("PI_DOCTOR_NUMA_ONLINE_PATH", Some(numa.as_str())),
+        ("PI_DOCTOR_CGROUP_MEMORY_MAX_PATH", Some(memory.as_str())),
+        ("PI_DOCTOR_MEMINFO_PATH", Some(meminfo.as_str())),
+    ])?;
+    let finding = finding_by_schema(&report, SWARM_RESOURCE_PREFLIGHT_SCHEMA)?;
+    let data = field(finding, "data")?;
+
+    if target_exists && tmp_exists {
+        require_eq(field_str(finding, "severity")?, "pass", "severity")?;
+        require(
+            field(data, "critical_failures")?
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            format!("resource preflight should have no critical failures: {data}"),
+        )?;
+    }
+    require_eq(
+        &field_u64(field(field(data, "cpu")?, "cpuset")?, "cpu_count")?,
+        &64,
+        "cpuset cpu count",
+    )?;
+    require(
+        field(field(field(data, "cpu")?, "cgroup_quota")?, "unlimited")?
+            .as_bool()
+            .unwrap_or(false),
+        format!("cgroup CPU quota should be unlimited: {data}"),
+    )?;
+    require_eq(
+        &field_u64(field(data, "numa")?, "node_count")?,
+        &4,
+        "numa node count",
+    )?;
+    require_eq(
+        &field_u64(field(data, "memory")?, "effective_limit_bytes")?,
+        &(256_u64 * 1024 * 1024 * 1024),
+        "effective memory limit",
+    )
 }
