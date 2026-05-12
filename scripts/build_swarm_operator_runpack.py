@@ -3114,6 +3114,34 @@ def run_self_test() -> int:
             ]
         },
     )
+    agent_mail_status_path = write_json(
+        workspace / "agent-mail-status.json",
+        {
+            "schema": "pi.agent_mail.robot_status.v1",
+            "generated_at": generated_at,
+            "status": "error",
+            "health_level": "red",
+            "registration_token": "super-secret-registration-token",
+            "issue": "database schema missing required tables",
+        },
+    )
+    agent_mail_reservations_path = write_json(
+        workspace / "agent-mail-reservations.json",
+        {
+            "schema": "pi.agent_mail.robot_reservations.v1",
+            "generated_at": generated_at,
+            "status": "ok",
+            "reservations": [
+                {
+                    "id": 7,
+                    "agent": "GreenStone",
+                    "path": "src/doctor.rs",
+                    "exclusive": True,
+                    "released_ts": None,
+                }
+            ],
+        },
+    )
     git_path = write_json(
         workspace / "git-status.json",
         {
@@ -3265,6 +3293,8 @@ def run_self_test() -> int:
         activity_digest_json=activity_path,
         cargo_admission_json=cargo_path,
         beads_json=beads_path,
+        agent_mail_status_json=agent_mail_status_path,
+        agent_mail_reservations_json=agent_mail_reservations_path,
         git_status_file=git_path,
         tail_latency_json=tail_latency_path,
         flight_recorder_report_json=flight_recorder_path,
@@ -3285,6 +3315,8 @@ def run_self_test() -> int:
                 "git_status": str(git_path),
                 "beads": str(beads_path),
                 "cargo_admission": str(cargo_path),
+                "agent_mail_status": str(agent_mail_status_path),
+                "agent_mail_reservations": str(agent_mail_reservations_path),
             },
             "commands": [
                 {
@@ -3293,6 +3325,13 @@ def run_self_test() -> int:
                     "status": "failed",
                     "exit_code": 2,
                     "issue": "database schema missing required tables",
+                },
+                {
+                    "id": "agent_mail_reservations",
+                    "command": "am robot reservations --format json",
+                    "status": "ok",
+                    "exit_code": 0,
+                    "issue": None,
                 },
                 {
                     "id": "rch_queue",
@@ -3413,6 +3452,40 @@ def run_self_test() -> int:
         assert input_pack["redaction_summary"]["redacted_count"] >= 1
         assert autopilot_args.out_autopilot_input_pack_json.exists()
         assert_autopilot_input_pack_contract(input_pack)
+        missing_agent_mail_args = argparse.Namespace(
+            **{
+                **vars(autopilot_args),
+                "agent_mail_status_json": None,
+                "agent_mail_reservations_json": None,
+                "out_autopilot_input_pack_json": None,
+            }
+        )
+        missing_input_pack = build_autopilot_input_pack(missing_agent_mail_args)
+        assert missing_input_pack["status"] == "degraded"
+        assert any(
+            "agent_mail_status" in reason for reason in missing_input_pack["degraded_reasons"]
+        )
+        stale_git_path = write_json(
+            workspace / "git-status-stale.json",
+            {
+                "schema": GIT_CONTEXT_SCHEMA,
+                "generated_at": "2026-05-07T09:00:00+00:00",
+                "branch": "main",
+                "head": "stalefixture",
+                "upstream": {"name": "origin/main", "ahead": 0, "behind": 0, "status": "ok"},
+                "porcelain_lines": [],
+                "recent_commits": [],
+                "recent_remote_commits": [],
+            },
+        )
+        stale_input_pack = build_autopilot_input_pack(
+            argparse.Namespace(**{**vars(autopilot_args), "git_status_file": stale_git_path})
+        )
+        assert stale_input_pack["status"] == "degraded"
+        assert any(
+            item.get("id") == "git_status" and item.get("classification") == "stale"
+            for item in stale_input_pack["source_classification"]
+        )
         malformed = workspace / "malformed.json"
         malformed.write_text("{not valid json", encoding="utf-8")
         bad_args = argparse.Namespace(**{**vars(args), "doctor_json": malformed})
@@ -3422,6 +3495,14 @@ def run_self_test() -> int:
             assert "malformed JSON" in str(exc)
         else:
             raise AssertionError("malformed provided source should fail closed")
+        try:
+            build_autopilot_input_pack(
+                argparse.Namespace(**{**vars(autopilot_args), "doctor_json": malformed})
+            )
+        except RunpackError as exc:
+            assert "malformed JSON" in str(exc)
+        else:
+            raise AssertionError("malformed autopilot source should fail closed")
         no_tail_args = argparse.Namespace(**{**vars(args), "tail_latency_json": None})
         no_tail_runpack = build_runpack(no_tail_args)
         assert "tail_latency" not in no_tail_runpack

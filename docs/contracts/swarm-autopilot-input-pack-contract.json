@@ -15,6 +15,7 @@
     "command_provenance",
     "normalized_inputs",
     "redaction_summary",
+    "planner_guards",
     "degraded_reasons"
   ],
   "required_source_ids": [
@@ -42,6 +43,10 @@
     "normalized_inputs.activity_digest.status",
     "normalized_inputs.operator_runpack.status",
     "redaction_summary.redacted_count",
+    "planner_guards.dry_run_only",
+    "planner_guards.no_prose_scraping",
+    "planner_guards.requires_command_provenance",
+    "planner_guards.forbidden_actions",
     "degraded_reasons"
   ],
   "required_source_status_fields": [
@@ -49,7 +54,8 @@
     "sha256"
   ],
   "required_redacted_fields": [
-    "doctor_swarm.findings[0].detail"
+    "doctor_swarm.findings[0].detail",
+    "agent_mail_status.registration_token"
   ],
   "allowed_statuses": [
     "ready",
@@ -109,6 +115,13 @@
       "validated_by": [
         "optional_source_ids",
         "required_summary_paths"
+      ]
+    },
+    {
+      "id": "AUTOPILOT-INPUT-MUST-007",
+      "description": "Planner guardrails make the pack advisory and forbid destructive or ownership-mutating actions.",
+      "validated_by": [
+        "planner_guards"
       ]
     }
   ]

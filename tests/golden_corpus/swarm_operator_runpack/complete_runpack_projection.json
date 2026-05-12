@@ -52,6 +52,12 @@
         "id": "agent_mail_status",
         "issue": "database schema missing required tables",
         "status": "failed"
+      },
+      {
+        "exit_code": 0,
+        "id": "agent_mail_reservations",
+        "issue": null,
+        "status": "ok"
       }
     ],
     "doctor_finding_count": 1,
@@ -435,6 +441,13 @@
         "status": "failed"
       },
       {
+        "command": "am robot reservations --format json",
+        "exit_code": 0,
+        "id": "agent_mail_reservations",
+        "issue": null,
+        "status": "ok"
+      },
+      {
         "command": "rch queue --json",
         "exit_code": 0,
         "id": "rch_queue",
@@ -444,6 +457,8 @@
     ],
     "generated_at": "2026-05-09T09:00:00+00:00",
     "generated_source_paths": {
+      "agent_mail_reservations": "[WORKSPACE]/agent-mail-reservations.json",
+      "agent_mail_status": "[WORKSPACE]/agent-mail-status.json",
       "beads": "[WORKSPACE]/beads.json",
       "cargo_admission": "[WORKSPACE]/cargo.json",
       "git_status": "[WORKSPACE]/git-status.json"
