@@ -40,7 +40,12 @@ RPC_SWARM_E2E_SCHEMA = "pi.rpc.concurrent_swarm_e2e.v1"
 RCH_ARTIFACT_SYNC_SCHEMA = "pi.rch.artifact_sync_preflight.v1"
 GIT_CONTEXT_SCHEMA = "pi.swarm.git_context.v1"
 RUNPACK_CAPTURE_SCHEMA = "pi.swarm.operator_runpack_capture.v1"
+AUTOPILOT_INPUT_PACK_SCHEMA = "pi.swarm.autopilot_input_pack.v1"
+AUTOPILOT_INPUT_PACK_CONTRACT_SCHEMA = "pi.swarm.autopilot_input_pack_contract.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
+AUTOPILOT_INPUT_PACK_CONTRACT_PATH = Path(
+    "docs/contracts/swarm-autopilot-input-pack-contract.json"
+)
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
 UPDATE_GOLDEN_ENV = "UPDATE_SWARM_OPERATOR_RUNPACK_GOLDEN"
@@ -96,6 +101,16 @@ BOTTLENECK_SURFACES: dict[str, tuple[str, ...]] = {
     "queue_pressure": ("cargo_admission", "activity_digest", "hostcall_swarm_profile"),
     "cgroup_numa_context": ("host_preflight", "doctor_swarm"),
 }
+AUTOPILOT_REQUIRED_SOURCE_IDS = (
+    "doctor_swarm",
+    "cargo_admission",
+    "beads",
+    "git_status",
+)
+AUTOPILOT_OPTIONAL_SOURCE_IDS = (
+    "activity_digest",
+    "operator_runpack",
+)
 TIMESTAMP_KEYS = (
     "generated_at",
     "generatedAt",
@@ -572,6 +587,26 @@ def source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
             )
         )
     return sources
+
+
+def autopilot_source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
+    operator_runpack_json = getattr(args, "operator_runpack_json", None)
+    return [
+        load_json_source("doctor_swarm", args.doctor_json),
+        load_cargo_admission(args.cargo_admission_json),
+        load_json_source("beads", args.beads_json),
+        load_git_status(args.git_status_file),
+        load_json_source(
+            "activity_digest",
+            args.activity_digest_json,
+            expected_schema="pi.swarm.activity_digest.v1",
+        ),
+        load_json_source(
+            "operator_runpack",
+            operator_runpack_json,
+            expected_schema=RUNPACK_SCHEMA,
+        ),
+    ]
 
 
 def first_stdout_line(stdout: str) -> str | None:
