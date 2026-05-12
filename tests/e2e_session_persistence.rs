@@ -32,6 +32,7 @@ use pi::session_index::SessionIndex;
 use pi::session_store_v2::SessionStoreV2;
 use pi::tools::ToolRegistry;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -175,12 +176,22 @@ struct CliResult {
 
 const SESSION_STORE_CHAOS_HARNESS_SCHEMA: &str = "pi.session.store_chaos_harness.v1";
 const SESSION_STORE_CHAOS_WORKER_SCHEMA: &str = "pi.session.store_chaos_worker.v1";
+const SESSION_DIVERGENCE_REPORT_SCHEMA: &str = "pi.session.divergence_report.v1";
 
 #[derive(Debug, Clone)]
 struct SessionChaosWorkerSpec {
     id: &'static str,
     backend: &'static str,
     inject: &'static str,
+}
+
+struct SessionDivergenceReportSpec<'a> {
+    report_id: &'a str,
+    divergence_class: &'a str,
+    recovery_action: &'a str,
+    final_verdict: &'a str,
+    sources: Vec<Value>,
+    diagnostics: Value,
 }
 
 #[derive(Debug)]
@@ -334,6 +345,130 @@ fn run_cli(
 
 fn chaos_worker_summary_path(artifact_dir: &Path, worker_id: &str) -> PathBuf {
     artifact_dir.join(format!("worker-{worker_id}.summary.json"))
+}
+
+fn session_divergence_report_path(
+    artifact_dir: &Path,
+    worker_id: &str,
+    report_id: &str,
+) -> PathBuf {
+    artifact_dir.join(format!("worker-{worker_id}.{report_id}.divergence.json"))
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn file_size_bytes(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn nonempty_line_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|raw| raw.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or_default()
+}
+
+fn divergence_source(kind: &str, path: &Path, entry_count: usize) -> Value {
+    json!({
+        "kind": kind,
+        "path": path.display().to_string(),
+        "exists": path.exists(),
+        "sha256": file_sha256(path),
+        "sizeBytes": file_size_bytes(path),
+        "entryCount": entry_count,
+    })
+}
+
+fn write_session_divergence_report(
+    artifact_dir: &Path,
+    worker_id: &str,
+    spec: &SessionDivergenceReportSpec<'_>,
+) -> String {
+    let report_path = session_divergence_report_path(artifact_dir, worker_id, spec.report_id);
+    let report = json!({
+        "schema": SESSION_DIVERGENCE_REPORT_SCHEMA,
+        "workerId": worker_id,
+        "reportId": spec.report_id,
+        "divergenceClass": spec.divergence_class,
+        "recoveryAction": spec.recovery_action,
+        "finalVerdict": spec.final_verdict,
+        "sources": spec.sources,
+        "diagnostics": spec.diagnostics,
+        "bounds": {
+            "rawMessageContentIncluded": false,
+            "rawPathIncluded": true,
+        },
+    });
+    std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).expect("serialize session divergence report"),
+    )
+    .expect("write session divergence report");
+    report_path.display().to_string()
+}
+
+fn assert_session_divergence_report(report: &Value) -> String {
+    assert_eq!(
+        report.get("schema").and_then(Value::as_str),
+        Some(SESSION_DIVERGENCE_REPORT_SCHEMA)
+    );
+    let divergence_class = report
+        .get("divergenceClass")
+        .and_then(Value::as_str)
+        .expect("divergence report class")
+        .to_string();
+    let recovery_action = report
+        .get("recoveryAction")
+        .and_then(Value::as_str)
+        .expect("divergence report recovery action");
+    let final_verdict = report
+        .get("finalVerdict")
+        .and_then(Value::as_str)
+        .expect("divergence report final verdict");
+    assert!(
+        !recovery_action.trim().is_empty(),
+        "divergence report recovery action should be explicit"
+    );
+    assert!(
+        matches!(final_verdict, "pass" | "fail_closed"),
+        "unexpected divergence report verdict {final_verdict}"
+    );
+    let sources = report
+        .get("sources")
+        .and_then(Value::as_array)
+        .expect("divergence report sources");
+    assert!(!sources.is_empty(), "divergence report needs sources");
+    for source in sources {
+        assert!(
+            source.get("path").and_then(Value::as_str).is_some(),
+            "divergence source must include path"
+        );
+        assert!(
+            source.get("entryCount").and_then(Value::as_u64).is_some(),
+            "divergence source must include entry count"
+        );
+        assert!(
+            source.get("sha256").is_some(),
+            "divergence source must include hash field"
+        );
+    }
+    divergence_class
+}
+
+fn corrupt_middle_segment_frame(segment_path: &Path) {
+    let raw = std::fs::read_to_string(segment_path).expect("read segment for mid-file corruption");
+    let mut lines = raw.lines().map(str::to_string).collect::<Vec<_>>();
+    assert!(
+        lines.len() >= 3,
+        "mid-file corruption fixture needs at least three frames"
+    );
+    if let Some(frame) = lines.get_mut(1) {
+        *frame = "{ invalid mid-file segment frame }".to_string();
+    }
+    std::fs::write(segment_path, format!("{}\n", lines.join("\n")))
+        .expect("write mid-file corrupted segment");
 }
 
 fn spawn_session_store_chaos_child(
@@ -596,6 +731,7 @@ fn run_session_store_chaos_worker_from_env() {
 
     let summary_path = chaos_worker_summary_path(&artifact_dir, &worker_id);
     let rollback_root = artifact_dir.join(format!("worker-{worker_id}.rollback.v2"));
+    let mut divergence_report_paths = Vec::new();
 
     run_async_test(async {
         let store_kind = match backend.as_str() {
@@ -671,6 +807,33 @@ fn run_session_store_chaos_worker_from_env() {
                     "corrupt-tail fixture dropped expected text {expected}"
                 );
             }
+            divergence_report_paths.push(write_session_divergence_report(
+                &artifact_dir,
+                &worker_id,
+                &SessionDivergenceReportSpec {
+                    report_id: "corrupt-tail-jsonl",
+                    divergence_class: "corrupt_trailing_jsonl_entry",
+                    recovery_action: "skip_corrupt_trailing_entry",
+                    final_verdict: "pass",
+                    sources: vec![
+                        divergence_source(
+                            "clean_session",
+                            &session_path,
+                            nonempty_line_count(&session_path),
+                        ),
+                        divergence_source(
+                            "corrupt_tail_fixture",
+                            &fixture_path,
+                            nonempty_line_count(&fixture_path),
+                        ),
+                    ],
+                    diagnostics: json!({
+                        "skippedEntries": corruption_skipped_entries,
+                        "expectedUserTextCount": expected_user_texts.len(),
+                        "observedUserTextCount": fixture_texts.len(),
+                    }),
+                },
+            ));
             corruption_fixture_path = Some(fixture_path.display().to_string());
         }
 
@@ -681,6 +844,217 @@ fn run_session_store_chaos_worker_from_env() {
                 let sidecar = create_v2_sidecar_from_jsonl(&session_path)
                     .expect("create chaos V2 sidecar from JSONL");
                 sidecar.validate_integrity().expect("V2 sidecar integrity");
+                let sidecar_index_path = sidecar.index_file_path();
+                let sidecar_segment_path = sidecar.segment_file_path(1);
+                divergence_report_paths.push(write_session_divergence_report(
+                    &artifact_dir,
+                    &worker_id,
+                    &SessionDivergenceReportSpec {
+                        report_id: "matching-stores",
+                        divergence_class: "matching_stores",
+                        recovery_action: "trust_v2_sidecar",
+                        final_verdict: "pass",
+                        sources: vec![
+                            divergence_source(
+                                "jsonl_session",
+                                &session_path,
+                                nonempty_line_count(&session_path),
+                            ),
+                            divergence_source(
+                                "v2_index",
+                                &sidecar_index_path,
+                                usize::try_from(sidecar.entry_count()).unwrap_or(usize::MAX),
+                            ),
+                            divergence_source(
+                                "v2_segment",
+                                &sidecar_segment_path,
+                                usize::try_from(sidecar.entry_count()).unwrap_or(usize::MAX),
+                            ),
+                        ],
+                        diagnostics: json!({
+                            "jsonlNonEmptyLines": nonempty_line_count(&session_path),
+                            "v2EntryCount": sidecar.entry_count(),
+                            "integrity": "ok",
+                        }),
+                    },
+                ));
+
+                let missing_index_root =
+                    artifact_dir.join(format!("worker-{worker_id}.missing-index-rows.v2"));
+                let mut missing_index_store =
+                    SessionStoreV2::create(&missing_index_root, 64 * 1024 * 1024)
+                        .expect("create missing-index fixture");
+                missing_index_store
+                    .append_entry(
+                        format!("{worker_id}-missing-index-base"),
+                        None,
+                        "message",
+                        json!({"workerId": worker_id, "text": "missing-index-base"}),
+                    )
+                    .expect("append missing-index base");
+                missing_index_store
+                    .append_entry(
+                        format!("{worker_id}-missing-index-tail"),
+                        Some(format!("{worker_id}-missing-index-base")),
+                        "message",
+                        json!({"workerId": worker_id, "text": "missing-index-tail"}),
+                    )
+                    .expect("append missing-index tail");
+                let missing_index_path = missing_index_store.index_file_path();
+                let missing_segment_path = missing_index_store.segment_file_path(1);
+                std::fs::write(&missing_index_path, "").expect("empty missing-index fixture");
+                drop(missing_index_store);
+                let rebuilt_missing_index =
+                    SessionStoreV2::create(&missing_index_root, 64 * 1024 * 1024)
+                        .expect("rebuild missing index rows");
+                assert_eq!(rebuilt_missing_index.entry_count(), 2);
+                divergence_report_paths.push(write_session_divergence_report(
+                    &artifact_dir,
+                    &worker_id,
+                    &SessionDivergenceReportSpec {
+                        report_id: "missing-index-rows",
+                        divergence_class: "missing_index_rows",
+                        recovery_action: "rebuild_index_from_segments",
+                        final_verdict: "pass",
+                        sources: vec![
+                            divergence_source(
+                                "v2_index_rebuilt",
+                                &missing_index_path,
+                                usize::try_from(rebuilt_missing_index.entry_count())
+                                    .unwrap_or(usize::MAX),
+                            ),
+                            divergence_source(
+                                "v2_segment",
+                                &missing_segment_path,
+                                usize::try_from(rebuilt_missing_index.entry_count())
+                                    .unwrap_or(usize::MAX),
+                            ),
+                        ],
+                        diagnostics: json!({
+                            "indexRowsBeforeRecovery": 0,
+                            "indexRowsAfterRecovery": rebuilt_missing_index.entry_count(),
+                            "integrity": "ok",
+                        }),
+                    },
+                ));
+
+                let trailing_frame_root =
+                    artifact_dir.join(format!("worker-{worker_id}.trailing-frame.v2"));
+                let mut trailing_frame_store =
+                    SessionStoreV2::create(&trailing_frame_root, 64 * 1024 * 1024)
+                        .expect("create trailing-frame fixture");
+                trailing_frame_store
+                    .append_entry(
+                        format!("{worker_id}-trailing-base"),
+                        None,
+                        "message",
+                        json!({"workerId": worker_id, "text": "trailing-base"}),
+                    )
+                    .expect("append trailing-frame base");
+                trailing_frame_store
+                    .append_entry(
+                        format!("{worker_id}-trailing-tail"),
+                        Some(format!("{worker_id}-trailing-base")),
+                        "message",
+                        json!({"workerId": worker_id, "text": "trailing-tail"}),
+                    )
+                    .expect("append trailing-frame tail");
+                let trailing_index_path = trailing_frame_store.index_file_path();
+                let trailing_segment_path = trailing_frame_store.segment_file_path(1);
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&trailing_segment_path)
+                    .expect("open trailing-frame segment")
+                    .write_all(b"{ incomplete trailing frame")
+                    .expect("append trailing-frame corruption");
+                std::fs::write(&trailing_index_path, "").expect("empty trailing-frame index");
+                drop(trailing_frame_store);
+                let rebuilt_trailing_frame =
+                    SessionStoreV2::create(&trailing_frame_root, 64 * 1024 * 1024)
+                        .expect("rebuild trailing-frame corruption");
+                assert_eq!(rebuilt_trailing_frame.entry_count(), 2);
+                divergence_report_paths.push(write_session_divergence_report(
+                    &artifact_dir,
+                    &worker_id,
+                    &SessionDivergenceReportSpec {
+                        report_id: "corrupt-trailing-frame",
+                        divergence_class: "corrupt_trailing_frame",
+                        recovery_action: "truncate_corrupt_tail_and_rebuild_index",
+                        final_verdict: "pass",
+                        sources: vec![
+                            divergence_source(
+                                "v2_index_rebuilt",
+                                &trailing_index_path,
+                                usize::try_from(rebuilt_trailing_frame.entry_count())
+                                    .unwrap_or(usize::MAX),
+                            ),
+                            divergence_source(
+                                "v2_segment_truncated",
+                                &trailing_segment_path,
+                                usize::try_from(rebuilt_trailing_frame.entry_count())
+                                    .unwrap_or(usize::MAX),
+                            ),
+                        ],
+                        diagnostics: json!({
+                            "entryCountAfterRecovery": rebuilt_trailing_frame.entry_count(),
+                            "integrity": "ok",
+                        }),
+                    },
+                ));
+
+                let mid_file_root = artifact_dir.join(format!("worker-{worker_id}.mid-file.v2"));
+                let mut mid_file_store = SessionStoreV2::create(&mid_file_root, 64 * 1024 * 1024)
+                    .expect("create mid-file fixture");
+                mid_file_store
+                    .append_entry(
+                        format!("{worker_id}-mid-base"),
+                        None,
+                        "message",
+                        json!({"workerId": worker_id, "text": "mid-base"}),
+                    )
+                    .expect("append mid-file base");
+                mid_file_store
+                    .append_entry(
+                        format!("{worker_id}-mid-corrupt"),
+                        Some(format!("{worker_id}-mid-base")),
+                        "message",
+                        json!({"workerId": worker_id, "text": "mid-corrupt"}),
+                    )
+                    .expect("append mid-file corrupt target");
+                mid_file_store
+                    .append_entry(
+                        format!("{worker_id}-mid-tail"),
+                        Some(format!("{worker_id}-mid-corrupt")),
+                        "message",
+                        json!({"workerId": worker_id, "text": "mid-tail"}),
+                    )
+                    .expect("append mid-file tail");
+                let mid_index_path = mid_file_store.index_file_path();
+                let mid_segment_path = mid_file_store.segment_file_path(1);
+                corrupt_middle_segment_frame(&mid_segment_path);
+                std::fs::write(&mid_index_path, "").expect("empty mid-file index");
+                drop(mid_file_store);
+                let mid_file_error = SessionStoreV2::create(&mid_file_root, 64 * 1024 * 1024)
+                    .expect_err("mid-file corruption should fail closed");
+                divergence_report_paths.push(write_session_divergence_report(
+                    &artifact_dir,
+                    &worker_id,
+                    &SessionDivergenceReportSpec {
+                        report_id: "unrecoverable-mid-file",
+                        divergence_class: "unrecoverable_mid_file_corruption",
+                        recovery_action: "fail_closed",
+                        final_verdict: "fail_closed",
+                        sources: vec![
+                            divergence_source("v2_index_empty", &mid_index_path, 0),
+                            divergence_source("v2_segment_corrupt", &mid_segment_path, 3),
+                        ],
+                        diagnostics: json!({
+                            "error": mid_file_error.to_string(),
+                            "integrity": "failed_closed",
+                        }),
+                    },
+                ));
+
                 let mut index_file = std::fs::OpenOptions::new()
                     .append(true)
                     .open(sidecar.index_file_path())
@@ -727,6 +1101,38 @@ fn run_session_store_chaos_worker_from_env() {
                         "stale V2 fallback dropped expected text {expected}"
                     );
                 }
+                divergence_report_paths.push(write_session_divergence_report(
+                    &artifact_dir,
+                    &worker_id,
+                    &SessionDivergenceReportSpec {
+                        report_id: "stale-v2-sidecar",
+                        divergence_class: "stale_v2_sidecar",
+                        recovery_action: "fallback_to_jsonl",
+                        final_verdict: "pass",
+                        sources: vec![
+                            divergence_source(
+                                "jsonl_session_newer_than_sidecar",
+                                &session_path,
+                                nonempty_line_count(&session_path),
+                            ),
+                            divergence_source(
+                                "v2_index_stale",
+                                &sidecar_index_path,
+                                usize::try_from(sidecar.entry_count()).unwrap_or(usize::MAX),
+                            ),
+                            divergence_source(
+                                "v2_segment_stale",
+                                &sidecar_segment_path,
+                                usize::try_from(sidecar.entry_count()).unwrap_or(usize::MAX),
+                            ),
+                        ],
+                        diagnostics: json!({
+                            "skippedEntries": stale_diagnostics.skipped_entries.len(),
+                            "expectedUserTextCount": expected_user_texts.len(),
+                            "observedUserTextCount": stale_texts.len(),
+                        }),
+                    },
+                ));
 
                 let mut rollback_store = SessionStoreV2::create(&rollback_root, 64 * 1024 * 1024)
                     .expect("create rollback sidecar");
@@ -804,6 +1210,7 @@ fn run_session_store_chaos_worker_from_env() {
                 "indexRowsSeenByWorker": indexed_count,
                 "corruptionFixturePath": corruption_fixture_path,
                 "corruptionSkippedEntries": corruption_skipped_entries,
+                "divergenceReportPaths": divergence_report_paths,
                 "v2": {
                     "indexRecovered": v2_index_recovered,
                     "staleJsonlRecovered": v2_stale_jsonl_recovered,
@@ -890,6 +1297,37 @@ fn session_store_chaos_harness_concurrent_workers_recover_consistently() {
             serde_json::from_str::<Value>(&raw).expect("parse chaos worker summary")
         })
         .collect::<Vec<_>>();
+
+    let mut divergence_reports = Vec::new();
+    let mut divergence_classes = HashSet::new();
+    for summary in &summaries {
+        for report_path in string_array_field(summary, "divergenceReportPaths") {
+            let report_path = PathBuf::from(report_path);
+            let artifact_name = report_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("session-divergence-report.json");
+            harness.record_artifact(artifact_name, &report_path);
+            let raw = std::fs::read_to_string(&report_path).expect("read divergence report");
+            let report = serde_json::from_str::<Value>(&raw).expect("parse divergence report");
+            let divergence_class = assert_session_divergence_report(&report);
+            divergence_classes.insert(divergence_class);
+            divergence_reports.push(report);
+        }
+    }
+    for required_class in [
+        "matching_stores",
+        "stale_v2_sidecar",
+        "corrupt_trailing_frame",
+        "missing_index_rows",
+        "unrecoverable_mid_file_corruption",
+        "corrupt_trailing_jsonl_entry",
+    ] {
+        assert!(
+            divergence_classes.contains(required_class),
+            "missing divergence report class {required_class}"
+        );
+    }
 
     run_async_test(async {
         for summary in &summaries {
@@ -992,6 +1430,7 @@ fn session_store_chaos_harness_concurrent_workers_recover_consistently() {
             "sessionsRoot": sessions_root.display().to_string(),
             "workerCount": worker_specs.len(),
             "indexedSessionCount": indexed.len(),
+            "divergenceReports": divergence_reports,
             "workers": summaries,
         }))
         .expect("serialize chaos harness summary"),
