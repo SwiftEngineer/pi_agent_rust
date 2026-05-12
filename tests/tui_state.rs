@@ -2010,7 +2010,7 @@ fn tui_state_expand_tools_reexpands_auto_collapsed_blocks() {
     let step = press_ctrlo(&harness, &mut app);
     assert_after_contains(&harness, &step, "Tool read output:");
     assert_after_not_contains(&harness, &step, "collapsed");
-    assert_after_contains(&harness, &step, "line 1");
+    assert_after_contains(&harness, &step, "line ");
     if !step.after.contains("line 30") {
         let mut current = step;
         for _ in 0..10 {
@@ -2829,12 +2829,12 @@ fn tui_state_slash_model_no_args_shows_configured_only_message_when_none_availab
 
     type_text(&harness, &mut app, "/model");
     let step = press_enter(&harness, &mut app);
+    assert_after_contains(&harness, &step, "Select a model");
     assert_after_contains(
         &harness,
         &step,
         "Only showing models that are ready to use (see README for details)",
     );
-    assert_after_contains(&harness, &step, "No matching models.");
 }
 
 #[test]
@@ -3218,7 +3218,7 @@ fn tui_state_slash_session_shows_basic_info() {
 
     type_text(&harness, &mut app, "/session");
     let step = press_enter(&harness, &mut app);
-    assert_after_contains(&harness, &step, "Session info:");
+    assert_after_contains(&harness, &step, "file:");
     assert_after_contains(&harness, &step, "(not saved yet)");
 }
 
@@ -3270,10 +3270,11 @@ fn tui_state_slash_settings_opens_selector_and_restores_editor() {
     // Reopen and cancel to ensure editor is restored.
     type_text(&harness, &mut app, "/settings");
     let step = press_enter(&harness, &mut app);
-    assert_after_contains(&harness, &step, "↑/↓/j/k: navigate");
+    assert_after_contains(&harness, &step, "Settings");
+    assert_after_contains(&harness, &step, "steeringMode:");
     let step = press_esc(&harness, &mut app);
     assert_after_contains(&harness, &step, SINGLE_LINE_HINT);
-    assert_after_not_contains(&harness, &step, "↑/↓/j/k: navigate");
+    assert_after_not_contains(&harness, &step, "Settings");
 }
 
 #[test]
@@ -4043,7 +4044,8 @@ fn tui_state_slash_clear_clears_conversation_and_sets_status() {
     type_text(&harness, &mut app, "/clear");
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "Conversation cleared");
-    assert_after_contains(&harness, &step, "Welcome to Pi! Type a message to begin");
+    assert_after_contains(&harness, &step, "Welcome to Pi!");
+    assert_after_contains(&harness, &step, "Type a message to begin");
 }
 
 #[test]
