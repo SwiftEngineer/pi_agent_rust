@@ -65,6 +65,18 @@
   },
   "beads": {
     "active_count": 2,
+    "open_candidate_count": 1,
+    "open_candidates": [
+      {
+        "assignee": null,
+        "id": "bd-open",
+        "labels": [],
+        "priority": 99,
+        "status": "open",
+        "title": "Open fixture",
+        "updated_at": "2026-05-09T09:00:00+00:00"
+      }
+    ],
     "stale": [
       {
         "age_hours": 33.0,

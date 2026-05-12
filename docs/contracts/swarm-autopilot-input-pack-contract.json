@@ -27,6 +27,7 @@
     "git_status"
   ],
   "optional_source_ids": [
+    "beads_ready",
     "activity_digest",
     "operator_runpack"
   ],
@@ -35,6 +36,9 @@
     "normalized_inputs.cargo_admission.status",
     "normalized_inputs.beads.status",
     "normalized_inputs.beads.active_count",
+    "normalized_inputs.beads.open_candidate_count",
+    "normalized_inputs.beads_ready.status",
+    "normalized_inputs.beads_ready.ready_count",
     "normalized_inputs.agent_mail.status",
     "normalized_inputs.agent_mail.read_status",
     "normalized_inputs.agent_mail.reservation_status",

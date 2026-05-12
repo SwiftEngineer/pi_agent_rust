@@ -1,0 +1,103 @@
+{
+  "schema": "pi.swarm.autopilot_plan_contract.v1",
+  "plan_schema": "pi.swarm.autopilot_plan.v1",
+  "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
+  "required_top_level_keys": [
+    "schema",
+    "generated_at",
+    "status",
+    "purpose",
+    "input_pack_schema",
+    "input_pack_status",
+    "actions",
+    "omitted_actions",
+    "forbidden_actions",
+    "redaction_summary",
+    "planner_guards",
+    "degraded_reasons"
+  ],
+  "required_action_fields": [
+    "id",
+    "rank",
+    "action",
+    "title",
+    "severity",
+    "confidence",
+    "preconditions",
+    "evidence_paths",
+    "commands",
+    "omitted_commands",
+    "forbidden_actions",
+    "rationale"
+  ],
+  "allowed_statuses": [
+    "ready",
+    "degraded",
+    "blocked"
+  ],
+  "allowed_actions": [
+    "stop_and_surface_blocker",
+    "wait_for_rch",
+    "split_by_surface",
+    "use_beads_soft_lock",
+    "reopen_stale_bead_candidate",
+    "capture_handoff",
+    "claim_ready_bead",
+    "run_docs_only_work"
+  ],
+  "allowed_severities": [
+    "critical",
+    "high",
+    "medium",
+    "low",
+    "info"
+  ],
+  "allowed_confidence": [
+    "high",
+    "medium",
+    "low"
+  ],
+  "required_forbidden_actions": [
+    "destructive git reset",
+    "destructive git clean",
+    "recursive filesystem deletion",
+    "file deletion",
+    "automatic commit",
+    "automatic file reservation"
+  ],
+  "must_requirements": [
+    {
+      "id": "AUTOPILOT-PLAN-MUST-001",
+      "description": "The plan declares the dry-run autopilot schema and does not replace upstream evidence sources.",
+      "validated_by": [
+        "schema",
+        "purpose",
+        "input_pack_schema"
+      ]
+    },
+    {
+      "id": "AUTOPILOT-PLAN-MUST-002",
+      "description": "Every action is rank ordered, evidence-linked, and includes exact operator-run commands plus omitted actions.",
+      "validated_by": [
+        "required_action_fields",
+        "actions"
+      ]
+    },
+    {
+      "id": "AUTOPILOT-PLAN-MUST-003",
+      "description": "The planner is advisory only; commands require explicit operator execution and dangerous runnable commands are blocked.",
+      "validated_by": [
+        "planner_guards",
+        "required_forbidden_actions"
+      ]
+    },
+    {
+      "id": "AUTOPILOT-PLAN-MUST-004",
+      "description": "Missing or stale required planner evidence yields a blocked plan with stop_and_surface_blocker before work-claim recommendations.",
+      "validated_by": [
+        "allowed_statuses",
+        "allowed_actions"
+      ]
+    }
+  ]
+}

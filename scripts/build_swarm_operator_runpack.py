@@ -42,12 +42,16 @@ GIT_CONTEXT_SCHEMA = "pi.swarm.git_context.v1"
 RUNPACK_CAPTURE_SCHEMA = "pi.swarm.operator_runpack_capture.v1"
 AUTOPILOT_INPUT_PACK_SCHEMA = "pi.swarm.autopilot_input_pack.v1"
 AUTOPILOT_INPUT_PACK_CONTRACT_SCHEMA = "pi.swarm.autopilot_input_pack_contract.v1"
+AUTOPILOT_PLAN_SCHEMA = "pi.swarm.autopilot_plan.v1"
+AUTOPILOT_PLAN_CONTRACT_SCHEMA = "pi.swarm.autopilot_plan_contract.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 AUTOPILOT_INPUT_PACK_CONTRACT_PATH = Path(
     "docs/contracts/swarm-autopilot-input-pack-contract.json"
 )
+AUTOPILOT_PLAN_CONTRACT_PATH = Path("docs/contracts/swarm-autopilot-plan-contract.json")
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
+AUTOPILOT_PLAN_GOLDEN = "autopilot_plan_projection.json"
 UPDATE_GOLDEN_ENV = "UPDATE_SWARM_OPERATOR_RUNPACK_GOLDEN"
 DEFAULT_MAX_ITEMS = 8
 DEFAULT_STALE_AFTER_HOURS = 24
@@ -110,6 +114,7 @@ AUTOPILOT_REQUIRED_SOURCE_IDS = (
     "git_status",
 )
 AUTOPILOT_OPTIONAL_SOURCE_IDS = (
+    "beads_ready",
     "activity_digest",
     "operator_runpack",
 )
@@ -117,6 +122,7 @@ AUTOPILOT_SOURCE_COMMAND_IDS: dict[str, tuple[str, ...]] = {
     "doctor_swarm": ("doctor_swarm",),
     "cargo_admission": ("cargo_admission",),
     "beads": ("beads_list",),
+    "beads_ready": ("beads_ready",),
     "agent_mail_status": ("agent_mail_status",),
     "agent_mail_reservations": ("agent_mail_reservations",),
     "git_status": (
@@ -132,12 +138,29 @@ AUTOPILOT_SOURCE_COMMAND_IDS: dict[str, tuple[str, ...]] = {
     "operator_runpack": (),
 }
 AUTOPILOT_FORBIDDEN_ACTIONS = (
+    "destructive git reset",
+    "destructive git clean",
+    "recursive filesystem deletion",
+    "file deletion",
+    "automatic commit",
+    "automatic file reservation",
+)
+AUTOPILOT_PLAN_ALLOWED_ACTIONS = (
+    "stop_and_surface_blocker",
+    "wait_for_rch",
+    "split_by_surface",
+    "use_beads_soft_lock",
+    "reopen_stale_bead_candidate",
+    "capture_handoff",
+    "claim_ready_bead",
+    "run_docs_only_work",
+)
+AUTOPILOT_PLAN_SEVERITIES = ("critical", "high", "medium", "low", "info")
+AUTOPILOT_PLAN_CONFIDENCE = ("high", "medium", "low")
+AUTOPILOT_PLAN_DANGEROUS_COMMAND_FRAGMENTS = (
     "git reset --hard",
     "git clean -fd",
     "rm -rf",
-    "delete files",
-    "auto-commit",
-    "auto-reserve files",
 )
 TIMESTAMP_KEYS = (
     "generated_at",
@@ -378,7 +401,7 @@ def capture_command(
     return result, stdout
 
 
-def json_object_from_stdout(stdout: str) -> dict[str, Any] | None:
+def json_payload_from_stdout(stdout: str) -> Any | None:
     stripped = stdout.strip()
     if not stripped:
         return None
@@ -386,19 +409,24 @@ def json_object_from_stdout(stdout: str) -> dict[str, Any] | None:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
         payload = None
-    if isinstance(payload, dict):
+    if isinstance(payload, (dict, list)):
         return payload
     for line in stdout.splitlines():
         line = line.strip()
-        if not line.startswith("{"):
+        if not line.startswith(("{", "[")):
             continue
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(payload, dict):
+        if isinstance(payload, (dict, list)):
             return payload
     return None
+
+
+def json_object_from_stdout(stdout: str) -> dict[str, Any] | None:
+    payload = json_payload_from_stdout(stdout)
+    return payload if isinstance(payload, dict) else None
 
 
 def json_schema(value: Any) -> str | None:
@@ -618,6 +646,7 @@ def source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
 
 
 def autopilot_source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
+    beads_ready_json = getattr(args, "beads_ready_json", None)
     agent_mail_status_json = getattr(args, "agent_mail_status_json", None)
     agent_mail_reservations_json = getattr(args, "agent_mail_reservations_json", None)
     operator_runpack_json = getattr(args, "operator_runpack_json", None)
@@ -625,6 +654,7 @@ def autopilot_source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
         load_json_source("doctor_swarm", args.doctor_json),
         load_cargo_admission(args.cargo_admission_json),
         load_json_source("beads", args.beads_json),
+        load_json_source("beads_ready", beads_ready_json),
         load_json_source("agent_mail_status", agent_mail_status_json),
         load_json_source("agent_mail_reservations", agent_mail_reservations_json),
         load_git_status(args.git_status_file),
@@ -766,7 +796,7 @@ def maybe_capture_json_source(
         timeout_seconds=timeout_seconds,
     )
     commands.append(result)
-    payload = json_object_from_stdout(stdout)
+    payload = json_payload_from_stdout(stdout)
     if payload is None:
         return
     no_overwrite_write_json(output_path, payload)
@@ -932,6 +962,19 @@ def capture_current_sources(args: argparse.Namespace) -> None:
         generated_source_paths=generated_source_paths,
     )
 
+    maybe_capture_json_source(
+        args=args,
+        attr="beads_ready_json",
+        source_id="beads_ready",
+        command_id="beads_ready",
+        command=["br", "ready", "--json"],
+        output_path=capture_dir / "beads-ready.json",
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+        commands=commands,
+        generated_source_paths=generated_source_paths,
+    )
+
     cargo_headroom = repo_root / "scripts" / "cargo_headroom.sh"
     if args.cargo_admission_json is None and cargo_headroom.exists():
         maybe_capture_json_source(
@@ -1027,6 +1070,7 @@ def capture_summary_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "activity_digest": args.activity_digest_json,
         "cargo_admission": args.cargo_admission_json,
         "beads": args.beads_json,
+        "beads_ready": getattr(args, "beads_ready_json", None),
         "agent_mail_status": getattr(args, "agent_mail_status_json", None),
         "agent_mail_reservations": getattr(args, "agent_mail_reservations_json", None),
         "git_status": args.git_status_file,
@@ -1719,6 +1763,40 @@ def parse_issue_list(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def issue_priority(issue: dict[str, Any]) -> int:
+    value = issue.get("priority")
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 99
+
+
+def normalized_bead_candidate(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": issue.get("id"),
+        "title": issue.get("title"),
+        "status": issue.get("status"),
+        "priority": issue_priority(issue),
+        "assignee": issue.get("assignee"),
+        "updated_at": issue.get("updated_at"),
+        "labels": issue.get("labels") if isinstance(issue.get("labels"), list) else [],
+    }
+
+
+def sort_bead_candidates(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = [normalized_bead_candidate(issue) for issue in issues]
+    return sorted(
+        normalized,
+        key=lambda issue: (
+            issue.get("priority", 99),
+            str(issue.get("updated_at") or ""),
+            str(issue.get("id") or ""),
+        ),
+    )
+
+
 def summarize_beads(
     source: SourcePayload,
     *,
@@ -1729,6 +1807,9 @@ def summarize_beads(
     issues = parse_issue_list(source.payload)
     status_counts = Counter(str(issue.get("status") or "unknown") for issue in issues)
     active = [issue for issue in issues if issue.get("status") in {"open", "in_progress"}]
+    open_candidates = sort_bead_candidates(
+        [issue for issue in issues if issue.get("status") == "open"]
+    )
     stale: list[dict[str, Any]] = []
     for issue in active:
         updated_at = str(issue.get("updated_at") or "")
@@ -1754,8 +1835,20 @@ def summarize_beads(
         "total_issues": len(issues),
         "status_counts": dict(sorted(status_counts.items())),
         "active_count": len(active),
+        "open_candidate_count": len(open_candidates),
+        "open_candidates": bounded(open_candidates, max_items),
         "stale_after_hours": stale_after_hours,
         "stale": bounded(stale, max_items),
+    }
+
+
+def summarize_beads_ready(source: SourcePayload, max_items: int) -> dict[str, Any]:
+    issues = parse_issue_list(source.payload)
+    ready_candidates = sort_bead_candidates(issues)
+    return {
+        "status": source.status,
+        "ready_count": len(ready_candidates),
+        "candidates": bounded(ready_candidates, max_items),
     }
 
 
@@ -2153,6 +2246,10 @@ def build_autopilot_input_pack(args: argparse.Namespace) -> dict[str, Any]:
                 stale_after_hours=args.stale_after_hours,
                 max_items=args.max_items,
             ),
+            "beads_ready": summarize_beads_ready(
+                by_id["beads_ready"],
+                args.max_items,
+            ),
             "agent_mail": summarize_agent_mail_autopilot(
                 by_id["agent_mail_status"],
                 by_id["agent_mail_reservations"],
@@ -2183,6 +2280,456 @@ def build_autopilot_input_pack(args: argparse.Namespace) -> dict[str, Any]:
     pack["status"] = status
     pack["degraded_reasons"] = reasons
     return pack
+
+
+def plan_command(purpose: str, command: str) -> dict[str, str]:
+    return {"purpose": purpose, "command": command}
+
+
+def omitted_command(action: str, reason: str) -> dict[str, str]:
+    return {"action": action, "reason": reason}
+
+
+def normalized_section(input_pack: dict[str, Any], section: str) -> dict[str, Any]:
+    normalized = input_pack.get("normalized_inputs")
+    if not isinstance(normalized, dict):
+        return {}
+    value = normalized.get(section)
+    return value if isinstance(value, dict) else {}
+
+
+def first_candidate(candidates: Any) -> dict[str, Any] | None:
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    candidate = candidates[0]
+    return candidate if isinstance(candidate, dict) else None
+
+
+def autopilot_plan_action(
+    *,
+    action: str,
+    title: str,
+    severity: str,
+    confidence: str,
+    preconditions: list[str],
+    evidence_paths: list[str],
+    commands: list[dict[str, str]],
+    rationale: str,
+    omitted_commands: list[dict[str, str]] | None = None,
+    forbidden_actions: list[str] | None = None,
+) -> dict[str, Any]:
+    if action not in AUTOPILOT_PLAN_ALLOWED_ACTIONS:
+        raise RunpackError(f"unknown autopilot action: {action}")
+    if severity not in AUTOPILOT_PLAN_SEVERITIES:
+        raise RunpackError(f"unknown autopilot severity: {severity}")
+    if confidence not in AUTOPILOT_PLAN_CONFIDENCE:
+        raise RunpackError(f"unknown autopilot confidence: {confidence}")
+    return {
+        "id": action,
+        "rank": 0,
+        "action": action,
+        "title": title,
+        "severity": severity,
+        "confidence": confidence,
+        "preconditions": preconditions,
+        "evidence_paths": evidence_paths,
+        "commands": commands,
+        "omitted_commands": omitted_commands or [],
+        "forbidden_actions": forbidden_actions or [],
+        "rationale": rationale,
+    }
+
+
+def required_input_blockers(input_pack: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    status_by_id = {
+        str(item.get("id")): str(item.get("status"))
+        for item in input_pack.get("source_statuses", [])
+        if isinstance(item, dict)
+    }
+    for source_id in AUTOPILOT_REQUIRED_SOURCE_IDS:
+        if status_by_id.get(source_id) != "ok":
+            blockers.append(f"required source `{source_id}` status is `{status_by_id.get(source_id)}`")
+    for item in input_pack.get("source_classification", []):
+        if not isinstance(item, dict) or item.get("required") is not True:
+            continue
+        classification = item.get("classification")
+        if classification in {"blocker", "stale"}:
+            blockers.append(f"required source `{item.get('id')}` is {classification}")
+    if not input_pack.get("command_provenance"):
+        blockers.append("command provenance is empty")
+    return sorted(set(blockers))
+
+
+def action_sort_key(action: dict[str, Any]) -> tuple[int, int, str]:
+    severity_order = {severity: index for index, severity in enumerate(AUTOPILOT_PLAN_SEVERITIES)}
+    action_order = {name: index for index, name in enumerate(AUTOPILOT_PLAN_ALLOWED_ACTIONS)}
+    return (
+        severity_order.get(str(action.get("severity")), 99),
+        action_order.get(str(action.get("action")), 99),
+        str(action.get("id") or ""),
+    )
+
+
+def assign_action_ranks(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(actions, key=action_sort_key)
+    for index, action in enumerate(ranked, start=1):
+        action["rank"] = index
+        action["id"] = f"AUTO-{index:03d}-{action['action']}"
+    return ranked
+
+
+def assert_autopilot_plan_commands_are_safe(plan: dict[str, Any]) -> None:
+    for action in plan.get("actions", []):
+        if not isinstance(action, dict):
+            continue
+        for command in action.get("commands", []):
+            if not isinstance(command, dict):
+                raise AssertionError("autopilot plan command entries must be objects")
+            text = str(command.get("command") or "").lower()
+            for fragment in AUTOPILOT_PLAN_DANGEROUS_COMMAND_FRAGMENTS:
+                assert fragment not in text, (
+                    f"autopilot plan emitted a dangerous runnable command fragment: {fragment}"
+                )
+
+
+def derive_autopilot_plan_status(
+    input_pack: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> str:
+    action_names = {action.get("action") for action in actions}
+    if "stop_and_surface_blocker" in action_names:
+        return "blocked"
+    degraded_actions = {
+        "wait_for_rch",
+        "use_beads_soft_lock",
+        "reopen_stale_bead_candidate",
+        "capture_handoff",
+    }
+    if input_pack.get("status") != "ready" or action_names.intersection(degraded_actions):
+        return "degraded"
+    return "ready"
+
+
+def build_autopilot_plan(
+    input_pack: dict[str, Any],
+    *,
+    max_items: int,
+) -> dict[str, Any]:
+    if input_pack.get("schema") != AUTOPILOT_INPUT_PACK_SCHEMA:
+        raise RunpackError(
+            "autopilot plan requires "
+            f"{AUTOPILOT_INPUT_PACK_SCHEMA}, got {input_pack.get('schema')}"
+        )
+
+    actions: list[dict[str, Any]] = []
+    blockers = required_input_blockers(input_pack)
+    if blockers:
+        actions.append(
+            autopilot_plan_action(
+                action="stop_and_surface_blocker",
+                title="Surface missing, stale, or unverifiable planner evidence",
+                severity="critical",
+                confidence="high",
+                preconditions=[
+                    "Do not infer healthy swarm state from partial evidence.",
+                    "Regenerate or inspect each missing required source before claiming new work.",
+                ],
+                evidence_paths=[
+                    "source_statuses",
+                    "source_classification",
+                    "degraded_reasons",
+                    "command_provenance",
+                ],
+                commands=[
+                    plan_command("Inspect planner input status", "python3 -m json.tool <autopilot-input-pack.json>"),
+                    plan_command("Refresh current evidence bundle", "python3 scripts/build_swarm_operator_runpack.py --capture-current --capture-dir <capture-dir> --out-autopilot-input-pack-json <capture-dir>/autopilot-input-pack.json"),
+                ],
+                omitted_commands=[
+                    omitted_command("claim work", "ready Beads evidence is not trustworthy until required sources are present"),
+                    omitted_command("start heavy validation", "RCH admission evidence may be missing or stale"),
+                ],
+                forbidden_actions=[
+                    "destructive cleanup",
+                    "automatic ownership mutation",
+                ],
+                rationale="; ".join(blockers[:max_items]),
+            )
+        )
+
+    cargo = normalized_section(input_pack, "cargo_admission")
+    queue_forecast = (
+        cargo.get("queue_forecast") if isinstance(cargo.get("queue_forecast"), dict) else {}
+    )
+    decision = cargo.get("decision")
+    queue_action = queue_forecast.get("recommended_action")
+    if decision in {"backoff", "degraded", "deny"} or queue_action == "backoff":
+        actions.append(
+            autopilot_plan_action(
+                action="wait_for_rch",
+                title="Back off heavyweight Cargo work until RCH recovers",
+                severity="high",
+                confidence="high",
+                preconditions=[
+                    "Do not run heavyweight cargo locally during swarm contention.",
+                    "Recheck admission before starting check, clippy, test, or release builds.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.cargo_admission.decision",
+                    "normalized_inputs.cargo_admission.queue_forecast.recommended_action",
+                    "normalized_inputs.cargo_admission.queue_forecast.slot_pressure",
+                ],
+                commands=[
+                    plan_command("Inspect RCH queue", "rch queue"),
+                    plan_command("Inspect RCH workers", "rch status"),
+                    plan_command("Refresh cargo admission", "./scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets"),
+                ],
+                omitted_commands=[
+                    omitted_command("cargo check --all-targets", "heavy validation waits for a fresh RCH admit decision"),
+                ],
+                forbidden_actions=["local heavyweight cargo fallback"],
+                rationale=f"cargo decision={decision}; queue recommended_action={queue_action}",
+            )
+        )
+    if queue_action == "split":
+        actions.append(
+            autopilot_plan_action(
+                action="split_by_surface",
+                title="Split validation or implementation by narrow surfaces",
+                severity="medium",
+                confidence="medium",
+                preconditions=[
+                    "Keep each validation slice small enough for the current RCH queue.",
+                    "Use file ownership evidence before assigning overlapping work.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.cargo_admission.queue_forecast.recommended_action",
+                    "normalized_inputs.operator_runpack.operator_next_actions",
+                ],
+                commands=[
+                    plan_command("Inspect ready work", "br ready --json"),
+                    plan_command("Inspect current ownership", "br list --status=in_progress --json"),
+                    plan_command("Capture current dirty paths", "git status --short --branch"),
+                ],
+                omitted_commands=[
+                    omitted_command("broad all-targets validation", "queue forecast recommends split work first"),
+                ],
+                forbidden_actions=["broad duplicate file ownership"],
+                rationale="RCH queue forecast recommends split validation.",
+            )
+        )
+
+    agent_mail = normalized_section(input_pack, "agent_mail")
+    if agent_mail.get("status") != "ok":
+        actions.append(
+            autopilot_plan_action(
+                action="use_beads_soft_lock",
+                title="Use Beads assignment as the coordination lock",
+                severity="high",
+                confidence="high",
+                preconditions=[
+                    "Agent Mail read/reservation status is degraded or unavailable.",
+                    "Announce/reserve through Agent Mail only after health recovers.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.agent_mail.status",
+                    "normalized_inputs.agent_mail.read_status",
+                    "normalized_inputs.agent_mail.reservation_status",
+                    "normalized_inputs.beads.active_count",
+                ],
+                commands=[
+                    plan_command("Inspect active ownership", "br list --status=in_progress --json"),
+                    plan_command("Inspect candidate bead before editing", "br show <issue-id> --json"),
+                    plan_command("Claim through Beads", "br update <issue-id> --status in_progress --assignee \"${AGENT_NAME:-agent}\""),
+                ],
+                omitted_commands=[
+                    omitted_command("Agent Mail reservation", "coordination transport is degraded; retry after health is green"),
+                ],
+                forbidden_actions=["automatic file reservation"],
+                rationale=f"Agent Mail status={agent_mail.get('status')}; fallback={agent_mail.get('fallback_action')}",
+            )
+        )
+
+    beads = normalized_section(input_pack, "beads")
+    stale = beads.get("stale") if isinstance(beads.get("stale"), list) else []
+    stale_candidate = first_candidate(stale)
+    if stale_candidate is not None:
+        issue_id = str(stale_candidate.get("id") or "<issue-id>")
+        actions.append(
+            autopilot_plan_action(
+                action="reopen_stale_bead_candidate",
+                title=f"Review stale in-progress bead {issue_id}",
+                severity="medium",
+                confidence="medium",
+                preconditions=[
+                    "Confirm no recent human or agent work exists for the stale assignee.",
+                    "Do not reopen work that has fresh commits, comments, or reservations.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.beads.stale",
+                    "normalized_inputs.beads.stale_after_hours",
+                ],
+                commands=[
+                    plan_command("Inspect stale bead", f"br show {issue_id} --json"),
+                    plan_command("Inspect active ownership", "br list --status=in_progress --json"),
+                    plan_command("Reopen only after confirming abandonment", f"br update {issue_id} --status open"),
+                ],
+                omitted_commands=[
+                    omitted_command("force-release unrelated reservations", "reservation ownership must be verified in Agent Mail first"),
+                ],
+                forbidden_actions=["destructive cleanup of another agent worktree"],
+                rationale=(
+                    f"{issue_id} is {stale_candidate.get('status')} "
+                    f"and age_hours={stale_candidate.get('age_hours')}"
+                ),
+            )
+        )
+
+    git_state = normalized_section(input_pack, "git_state")
+    if git_state.get("dirty") is True:
+        actions.append(
+            autopilot_plan_action(
+                action="capture_handoff",
+                title="Capture handoff context before changing dirty worktree state",
+                severity="medium",
+                confidence="high",
+                preconditions=[
+                    "Treat dirty files as concurrent work unless they directly overlap the active bead.",
+                    "Stage only the files changed for the current bead.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.git_state.dirty",
+                    "normalized_inputs.git_state.sample",
+                    "normalized_inputs.git_state.upstream",
+                ],
+                commands=[
+                    plan_command("Inspect dirty files", "git status --short --branch"),
+                    plan_command("Capture handoff bundle", "python3 scripts/build_swarm_operator_runpack.py --capture-current --capture-dir <capture-dir> --out-json <capture-dir>/operator-runpack.json --out-autopilot-input-pack-json <capture-dir>/autopilot-input-pack.json --out-autopilot-plan-json <capture-dir>/autopilot-plan.json"),
+                ],
+                omitted_commands=[
+                    omitted_command("workspace cleanup", "dirty files may belong to another active agent"),
+                ],
+                forbidden_actions=["destructive git cleanup"],
+                rationale=f"git_state reports {git_state.get('change_count')} dirty paths.",
+            )
+        )
+
+    beads_ready = normalized_section(input_pack, "beads_ready")
+    ready_candidate = first_candidate(beads_ready.get("candidates"))
+    if ready_candidate is not None and not blockers:
+        issue_id = str(ready_candidate.get("id") or "<issue-id>")
+        actions.append(
+            autopilot_plan_action(
+                action="claim_ready_bead",
+                title=f"Claim ready bead {issue_id}",
+                severity="medium",
+                confidence="high",
+                preconditions=[
+                    "The ready queue source is fresh and produced the candidate.",
+                    "No active in-progress bead already owns the same work.",
+                    "Inspect the bead before editing files.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.beads_ready.candidates",
+                    "normalized_inputs.beads_ready.ready_count",
+                    "command_provenance",
+                ],
+                commands=[
+                    plan_command("Inspect candidate bead", f"br show {issue_id} --json"),
+                    plan_command("Check active ownership", "br list --status=in_progress --json"),
+                    plan_command("Claim candidate", f"br update {issue_id} --status in_progress --assignee \"${{AGENT_NAME:-agent}}\""),
+                ],
+                omitted_commands=[
+                    omitted_command("automatic Agent Mail reservation", "planner is dry-run and does not mutate reservation state"),
+                ],
+                forbidden_actions=["automatic commit", "automatic file reservation"],
+                rationale=(
+                    f"ready queue candidate priority={ready_candidate.get('priority')} "
+                    f"title={ready_candidate.get('title')}"
+                ),
+            )
+        )
+
+    ready_count = int_value(beads_ready.get("ready_count"))
+    active_count = int_value(beads.get("active_count"))
+    open_count = int_value(beads.get("open_candidate_count"))
+    if ready_count == 0 and active_count == 0 and open_count == 0 and not blockers:
+        actions.append(
+            autopilot_plan_action(
+                action="run_docs_only_work",
+                title="Switch to source or docs-only work while the queue is empty",
+                severity="low",
+                confidence="medium",
+                preconditions=[
+                    "No ready, open, or in-progress Beads are present in the captured evidence.",
+                    "Keep validation lightweight unless RCH admission is fresh and green.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.beads_ready.ready_count",
+                    "normalized_inputs.beads.active_count",
+                    "normalized_inputs.beads.open_candidate_count",
+                ],
+                commands=[
+                    plan_command("Check ready queue again", "br ready --json"),
+                    plan_command("Run docs/script self-test", "python3 scripts/build_swarm_operator_runpack.py --self-test"),
+                    plan_command("Check formatting", "cargo fmt --check"),
+                    plan_command("Check diff whitespace", "git diff --check"),
+                ],
+                omitted_commands=[
+                    omitted_command("claim placeholder epic", "no ready implementation bead is present"),
+                ],
+                forbidden_actions=["invent broad work without a bead"],
+                rationale="Captured Beads evidence contains no ready, open, or in-progress work.",
+            )
+        )
+
+    if not actions:
+        actions.append(
+            autopilot_plan_action(
+                action="capture_handoff",
+                title="Capture a current handoff bundle before choosing next work",
+                severity="info",
+                confidence="medium",
+                preconditions=["Use the bundle as advisory context, not as a source of truth."],
+                evidence_paths=["capture", "command_provenance"],
+                commands=[
+                    plan_command("Capture handoff bundle", "python3 scripts/build_swarm_operator_runpack.py --capture-current --capture-dir <capture-dir> --out-json <capture-dir>/operator-runpack.json --out-autopilot-input-pack-json <capture-dir>/autopilot-input-pack.json --out-autopilot-plan-json <capture-dir>/autopilot-plan.json"),
+                ],
+                omitted_commands=[
+                    omitted_command("automatic claim", "no single higher-confidence action was derived"),
+                ],
+                forbidden_actions=["automatic commit", "automatic file reservation"],
+                rationale="Planner found no blocker, ready candidate, stale bead, dirty state, or RCH pressure action.",
+            )
+        )
+
+    ranked_actions = assign_action_ranks(actions)
+    plan = {
+        "schema": AUTOPILOT_PLAN_SCHEMA,
+        "generated_at": input_pack.get("generated_at"),
+        "status": "unknown",
+        "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
+        "input_pack_schema": input_pack.get("schema"),
+        "input_pack_status": input_pack.get("status"),
+        "actions": bounded(ranked_actions, max_items),
+        "omitted_actions": [
+            omitted_command("destructive cleanup", "planner never recommends destructive git or filesystem cleanup"),
+            omitted_command("automatic commit", "operator must stage, validate, and commit explicitly"),
+            omitted_command("automatic file reservation", "Agent Mail or Beads remains the ownership source of truth"),
+        ],
+        "forbidden_actions": list(AUTOPILOT_FORBIDDEN_ACTIONS),
+        "redaction_summary": input_pack.get("redaction_summary"),
+        "planner_guards": {
+            "dry_run_only": True,
+            "source_of_truth": "upstream_source_artifacts",
+            "commands_require_operator_execution": True,
+            "dangerous_runnable_commands_blocked": True,
+        },
+        "degraded_reasons": input_pack.get("degraded_reasons", []),
+    }
+    plan["status"] = derive_autopilot_plan_status(input_pack, ranked_actions)
+    assert_autopilot_plan_commands_are_safe(plan)
+    return plan
 
 
 def int_value(value: Any) -> int:
@@ -2792,6 +3339,19 @@ def write_autopilot_input_pack_output(
     output_path.write_text(json_dumps(input_pack, pretty=True), encoding="utf-8")
 
 
+def write_autopilot_plan_output(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_autopilot_plan_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(f"refusing to overwrite existing autopilot plan: {output_path}")
+    output_path.write_text(json_dumps(plan, pretty=True), encoding="utf-8")
+
+
 def write_json(path: Path, payload: Any) -> Path:
     path.write_text(json_dumps(payload, pretty=True), encoding="utf-8")
     return path
@@ -2941,6 +3501,57 @@ def assert_autopilot_input_pack_contract(input_pack: dict[str, Any]) -> None:
         assert reasons, "degraded input pack must explain why it is degraded"
 
 
+def assert_autopilot_plan_contract(plan: dict[str, Any]) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    contract_path = repo_root / AUTOPILOT_PLAN_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(f"missing autopilot plan contract: {contract_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"autopilot plan contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == AUTOPILOT_PLAN_CONTRACT_SCHEMA
+    assert contract.get("plan_schema") == AUTOPILOT_PLAN_SCHEMA
+    assert plan.get("schema") == contract["plan_schema"]
+    assert plan.get("purpose") == contract.get("purpose")
+    assert plan.get("status") in set(contract.get("allowed_statuses", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in plan, f"missing top-level autopilot plan key: {key}"
+    action_fields = set(contract.get("required_action_fields", []))
+    allowed_actions = set(contract.get("allowed_actions", []))
+    allowed_severities = set(contract.get("allowed_severities", []))
+    allowed_confidence = set(contract.get("allowed_confidence", []))
+    actions = plan.get("actions")
+    assert isinstance(actions, list) and actions
+    ranks = [action.get("rank") for action in actions if isinstance(action, dict)]
+    assert ranks == sorted(ranks), "autopilot plan actions must be rank ordered"
+    for action in actions:
+        assert isinstance(action, dict)
+        missing = action_fields - set(action)
+        assert not missing, f"autopilot plan action missing fields: {sorted(missing)}"
+        assert action.get("action") in allowed_actions
+        assert action.get("severity") in allowed_severities
+        assert action.get("confidence") in allowed_confidence
+        assert isinstance(action.get("preconditions"), list) and action.get("preconditions")
+        assert isinstance(action.get("evidence_paths"), list) and action.get("evidence_paths")
+        assert isinstance(action.get("commands"), list)
+        for command in action.get("commands", []):
+            assert isinstance(command, dict)
+            assert command.get("purpose")
+            assert command.get("command")
+    assert set(plan.get("forbidden_actions", [])).issuperset(
+        set(contract.get("required_forbidden_actions", []))
+    )
+    guards = plan.get("planner_guards")
+    assert isinstance(guards, dict)
+    assert guards.get("dry_run_only") is True
+    assert guards.get("commands_require_operator_execution") is True
+    assert guards.get("dangerous_runnable_commands_blocked") is True
+    assert_autopilot_plan_commands_are_safe(plan)
+
+
 def canonicalize_for_golden(value: Any, workspace: Path) -> Any:
     workspace_text = str(workspace)
     if isinstance(value, dict):
@@ -2985,6 +3596,39 @@ def assert_runpack_golden(runpack: dict[str, Any], workspace: Path) -> None:
         raise AssertionError(
             "swarm operator runpack projection changed; update the golden only "
             f"after reviewing the diff with `{UPDATE_GOLDEN_ENV}=1 "
+            "python3 scripts/build_swarm_operator_runpack.py --self-test`\n"
+            + diff
+        )
+
+
+def assert_autopilot_plan_golden(plan: dict[str, Any], workspace: Path) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    golden_path = repo_root / GOLDEN_REPORT_DIRECTORY / AUTOPILOT_PLAN_GOLDEN
+    actual_projection = canonicalize_for_golden(plan, workspace)
+    actual = json_dumps(actual_projection, pretty=True)
+    if os.environ.get(UPDATE_GOLDEN_ENV) == "1":
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual, encoding="utf-8")
+        return
+    try:
+        expected = golden_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing autopilot plan golden {golden_path}; rerun with {UPDATE_GOLDEN_ENV}=1"
+        ) from exc
+    if actual != expected:
+        diff = "\n".join(
+            difflib.unified_diff(
+                expected.splitlines(),
+                actual.splitlines(),
+                fromfile=str(golden_path),
+                tofile="actual autopilot plan projection",
+                lineterm="",
+            )
+        )
+        raise AssertionError(
+            "autopilot plan projection changed; update the golden only after "
+            f"reviewing the diff with `{UPDATE_GOLDEN_ENV}=1 "
             "python3 scripts/build_swarm_operator_runpack.py --self-test`\n"
             + diff
         )
@@ -3293,6 +3937,7 @@ def run_self_test() -> int:
         activity_digest_json=activity_path,
         cargo_admission_json=cargo_path,
         beads_json=beads_path,
+        beads_ready_json=None,
         agent_mail_status_json=agent_mail_status_path,
         agent_mail_reservations_json=agent_mail_reservations_path,
         git_status_file=git_path,
@@ -3347,7 +3992,9 @@ def run_self_test() -> int:
         out_md=workspace / "runpack.md",
         operator_runpack_json=None,
         out_autopilot_input_pack_json=None,
+        out_autopilot_plan_json=None,
         print_autopilot_input_pack=False,
+        print_autopilot_plan=False,
         generated_at=generated_at,
         stale_after_hours=24,
         max_items=4,
@@ -3444,6 +4091,7 @@ def run_self_test() -> int:
         assert input_pack["normalized_inputs"]["agent_mail"]["status"] == "degraded"
         assert input_pack["normalized_inputs"]["agent_mail"]["fallback_action"] == "use_beads_soft_lock"
         assert input_pack["normalized_inputs"]["operator_runpack"]["status"] == "ok"
+        assert input_pack["normalized_inputs"]["beads_ready"]["status"] == "not_provided"
         assert any(
             item.get("id") == "operator_runpack" and item.get("status") == "ok"
             for item in input_pack["source_statuses"]
@@ -3452,6 +4100,26 @@ def run_self_test() -> int:
         assert input_pack["redaction_summary"]["redacted_count"] >= 1
         assert autopilot_args.out_autopilot_input_pack_json.exists()
         assert_autopilot_input_pack_contract(input_pack)
+        plan = build_autopilot_plan(input_pack, max_items=args.max_items)
+        assert plan["schema"] == AUTOPILOT_PLAN_SCHEMA
+        assert plan["status"] == "degraded"
+        plan_actions = [item["action"] for item in plan["actions"]]
+        assert plan_actions == [
+            "wait_for_rch",
+            "use_beads_soft_lock",
+            "reopen_stale_bead_candidate",
+            "capture_handoff",
+        ]
+        assert_autopilot_plan_contract(plan)
+        assert_autopilot_plan_golden(plan, workspace)
+        plan_output_args = argparse.Namespace(
+            **{
+                **vars(autopilot_args),
+                "out_autopilot_plan_json": workspace / "autopilot-plan.json",
+            }
+        )
+        write_autopilot_plan_output(plan_output_args, plan)
+        assert plan_output_args.out_autopilot_plan_json.exists()
         missing_agent_mail_args = argparse.Namespace(
             **{
                 **vars(autopilot_args),
@@ -3465,6 +4133,151 @@ def run_self_test() -> int:
         assert any(
             "agent_mail_status" in reason for reason in missing_input_pack["degraded_reasons"]
         )
+        missing_plan = build_autopilot_plan(missing_input_pack, max_items=args.max_items)
+        assert missing_plan["status"] == "blocked"
+        assert missing_plan["actions"][0]["action"] == "stop_and_surface_blocker"
+        clean_git_path = write_json(
+            workspace / "git-status-clean.json",
+            {
+                "schema": GIT_CONTEXT_SCHEMA,
+                "generated_at": generated_at,
+                "branch": "main",
+                "head": "cleanfixture",
+                "upstream": {"name": "origin/main", "ahead": 0, "behind": 0, "status": "ok"},
+                "porcelain_lines": [],
+                "recent_commits": [],
+                "recent_remote_commits": [],
+            },
+        )
+        empty_beads_path = write_json(workspace / "beads-empty.json", {"issues": []})
+        cargo_admit_path = write_json(
+            workspace / "cargo-admit.json",
+            {
+                "schema": "pi.cargo_headroom.admission.v1",
+                "decision": "admit",
+                "reason": "healthy_fixture",
+                "requested_runner": "rch",
+                "resolved_runner": "rch",
+                "command_class": "heavy",
+                "allow_local_fallback": False,
+                "cargo_target_dir": "/data/tmp/pi_agent_rust_cargo/test/target",
+                "tmpdir": "/data/tmp/pi_agent_rust_cargo/test/tmp",
+                "rch_queue_forecast": {
+                    "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
+                    "status": "ok",
+                    "recommended_action": "proceed",
+                    "slot_pressure": "available",
+                    "queue_depth": 0,
+                    "active_builds": 0,
+                    "queued_builds": 0,
+                    "slots_available": 8,
+                    "slots_total": 8,
+                    "workers_healthy": 8,
+                    "workers_total": 8,
+                    "estimated_wait_seconds": 0,
+                },
+            },
+        )
+        agent_mail_ok_path = write_json(
+            workspace / "agent-mail-status-ok.json",
+            {
+                "schema": "pi.agent_mail.robot_status.v1",
+                "generated_at": generated_at,
+                "status": "ok",
+                "health_level": "green",
+                "registration_token": "super-secret-registration-token",
+            },
+        )
+        agent_mail_reservations_empty_path = write_json(
+            workspace / "agent-mail-reservations-empty.json",
+            {
+                "schema": "pi.agent_mail.robot_reservations.v1",
+                "generated_at": generated_at,
+                "status": "ok",
+                "reservations": [],
+            },
+        )
+        ready_beads_path = write_json(
+            workspace / "beads-ready.json",
+            [
+                {
+                    "id": "bd-ready",
+                    "title": "Ready fixture",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": generated_at,
+                    "labels": ["autopilot"],
+                }
+            ],
+        )
+        open_beads_path = write_json(
+            workspace / "beads-open.json",
+            {
+                "issues": [
+                    {
+                        "id": "bd-ready",
+                        "title": "Ready fixture",
+                        "status": "open",
+                        "priority": 1,
+                        "updated_at": generated_at,
+                    }
+                ]
+            },
+        )
+        healthy_args = argparse.Namespace(
+            **{
+                **vars(autopilot_args),
+                "cargo_admission_json": cargo_admit_path,
+                "beads_json": open_beads_path,
+                "beads_ready_json": ready_beads_path,
+                "agent_mail_status_json": agent_mail_ok_path,
+                "agent_mail_reservations_json": agent_mail_reservations_empty_path,
+                "git_status_file": clean_git_path,
+                "operator_runpack_json": None,
+                "capture_manifest": {
+                    "schema": RUNPACK_CAPTURE_SCHEMA,
+                    "mode": "current",
+                    "status": "ok",
+                    "generated_at": generated_at,
+                    "capture_dir": str(workspace / "capture-healthy"),
+                    "project_root": str(workspace),
+                    "generated_source_paths": {},
+                    "commands": [
+                        {
+                            "id": "beads_ready",
+                            "command": "br ready --json",
+                            "status": "ok",
+                            "exit_code": 0,
+                            "issue": None,
+                        },
+                        {
+                            "id": "agent_mail_status",
+                            "command": "am robot status --format json",
+                            "status": "ok",
+                            "exit_code": 0,
+                            "issue": None,
+                        },
+                    ],
+                },
+            }
+        )
+        healthy_input_pack = build_autopilot_input_pack(healthy_args)
+        healthy_plan = build_autopilot_plan(healthy_input_pack, max_items=args.max_items)
+        assert healthy_input_pack["status"] == "ready"
+        assert healthy_plan["status"] == "ready"
+        assert [item["action"] for item in healthy_plan["actions"]] == ["claim_ready_bead"]
+        empty_ready_path = write_json(workspace / "beads-ready-empty.json", [])
+        empty_plan_args = argparse.Namespace(
+            **{
+                **vars(healthy_args),
+                "beads_json": empty_beads_path,
+                "beads_ready_json": empty_ready_path,
+            }
+        )
+        empty_input_pack = build_autopilot_input_pack(empty_plan_args)
+        empty_plan = build_autopilot_plan(empty_input_pack, max_items=args.max_items)
+        assert empty_input_pack["status"] == "ready"
+        assert empty_plan["actions"][0]["action"] == "run_docs_only_work"
         stale_git_path = write_json(
             workspace / "git-status-stale.json",
             {
@@ -3646,6 +4459,11 @@ def parse_args() -> argparse.Namespace:
         help="JSON from `br list --json` or `br list --status=in_progress --json`",
     )
     parser.add_argument(
+        "--beads-ready-json",
+        type=Path,
+        help="JSON from `br ready --json` for ready-queue planner recommendations",
+    )
+    parser.add_argument(
         "--agent-mail-status-json",
         type=Path,
         help="optional Agent Mail robot status JSON for the autopilot input pack",
@@ -3741,6 +4559,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="write pi.swarm.autopilot_input_pack.v1 JSON; refuses to overwrite",
     )
+    parser.add_argument(
+        "--out-autopilot-plan-json",
+        type=Path,
+        help="write pi.swarm.autopilot_plan.v1 JSON; refuses to overwrite",
+    )
     parser.add_argument("--generated-at", help="override generated timestamp for deterministic tests")
     parser.add_argument("--stale-after-hours", type=int, default=DEFAULT_STALE_AFTER_HOURS)
     parser.add_argument("--max-items", type=int, default=DEFAULT_MAX_ITEMS)
@@ -3749,6 +4572,11 @@ def parse_args() -> argparse.Namespace:
         "--print-autopilot-input-pack",
         action="store_true",
         help="print the autopilot input pack JSON",
+    )
+    parser.add_argument(
+        "--print-autopilot-plan",
+        action="store_true",
+        help="print the dry-run autopilot plan JSON",
     )
     parser.add_argument("--self-test", action="store_true", help="run fixture-backed self-test")
     return parser.parse_args()
@@ -3771,11 +4599,21 @@ def main() -> int:
         capture_current_sources(args)
         runpack = build_runpack(args)
         write_outputs(args, runpack)
-        if args.out_autopilot_input_pack_json or args.print_autopilot_input_pack:
+        if (
+            args.out_autopilot_input_pack_json
+            or args.print_autopilot_input_pack
+            or args.out_autopilot_plan_json
+            or args.print_autopilot_plan
+        ):
             input_pack = build_autopilot_input_pack(args)
             write_autopilot_input_pack_output(args, input_pack)
             if args.print_autopilot_input_pack:
                 print(json_dumps(input_pack, pretty=True))
+            if args.out_autopilot_plan_json or args.print_autopilot_plan:
+                plan = build_autopilot_plan(input_pack, max_items=args.max_items)
+                write_autopilot_plan_output(args, plan)
+                if args.print_autopilot_plan:
+                    print(json_dumps(plan, pretty=True))
     except (RunpackError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -3783,7 +4621,9 @@ def main() -> int:
         not args.out_json
         and not args.out_md
         and not args.out_autopilot_input_pack_json
+        and not args.out_autopilot_plan_json
         and not args.print_autopilot_input_pack
+        and not args.print_autopilot_plan
     ):
         print(json_dumps(runpack, pretty=True))
     return 0

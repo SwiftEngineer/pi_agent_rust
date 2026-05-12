@@ -198,11 +198,13 @@ python3 scripts/build_swarm_operator_runpack.py \
   --agent-name "$AGENT_NAME" \
   --out-json "$capture_dir/operator-runpack.json" \
   --out-md "$capture_dir/operator-runpack.md" \
-  --out-autopilot-input-pack-json "$capture_dir/autopilot-input-pack.json"
+  --out-autopilot-input-pack-json "$capture_dir/autopilot-input-pack.json" \
+  --out-autopilot-plan-json "$capture_dir/autopilot-plan.json"
 ```
 
 The runpack schema is governed by `docs/contracts/swarm-operator-runpack-contract.json`. The runpack is a redacted index over existing evidence, not a release performance claim and not a replacement for the source artifacts.
 The autopilot input pack schema is governed by `docs/contracts/swarm-autopilot-input-pack-contract.json`. It normalizes source statuses for the dry-run planner, but it is still advisory and never replaces Doctor, Beads, Agent Mail, RCH, git, or the source artifacts themselves.
+The autopilot plan schema is governed by `docs/contracts/swarm-autopilot-plan-contract.json`. It maps the input pack to ordered dry-run actions such as `claim_ready_bead`, `wait_for_rch`, `use_beads_soft_lock`, `reopen_stale_bead_candidate`, `run_docs_only_work`, `capture_handoff`, or `stop_and_surface_blocker`.
 
 ## Completion Checklist
 
@@ -236,6 +238,7 @@ command -v git br bv rch cargo jq python3
 python3 scripts/build_swarm_operator_runpack.py --self-test
 python3 -m json.tool docs/contracts/swarm-operator-runpack-contract.json >/dev/null
 python3 -m json.tool docs/contracts/swarm-autopilot-input-pack-contract.json >/dev/null
+python3 -m json.tool docs/contracts/swarm-autopilot-plan-contract.json >/dev/null
 cargo fmt --check
 git diff --check
 ./scripts/reconcile_beads_ledger.sh
@@ -308,6 +311,31 @@ Autopilot input-pack evidence:
 }
 ```
 
+Autopilot plan evidence:
+
+```json
+{
+  "schema": "pi.swarm.autopilot_plan.v1",
+  "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
+  "status": "degraded",
+  "actions": [
+    {
+      "rank": 1,
+      "action": "use_beads_soft_lock",
+      "evidence_paths": [
+        "normalized_inputs.agent_mail.status"
+      ],
+      "commands": [
+        {
+          "purpose": "Inspect active ownership",
+          "command": "br list --status=in_progress --json"
+        }
+      ]
+    }
+  ]
+}
+```
+
 Swarm flight-recorder report evidence:
 
 ```json
@@ -328,6 +356,7 @@ command -v git br bv rch cargo jq python3
 python3 scripts/build_swarm_operator_runpack.py --self-test
 python3 -m json.tool docs/contracts/swarm-operator-runpack-contract.json >/dev/null
 python3 -m json.tool docs/contracts/swarm-autopilot-input-pack-contract.json >/dev/null
+python3 -m json.tool docs/contracts/swarm-autopilot-plan-contract.json >/dev/null
 cargo fmt --check
 git diff --check
 ./scripts/reconcile_beads_ledger.sh
