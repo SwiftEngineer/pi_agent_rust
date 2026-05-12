@@ -15,6 +15,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -35,12 +38,16 @@ HOSTCALL_SWARM_PROFILE_SCHEMA = "pi.ext.hostcall_admission_swarm_profile.v1"
 SESSION_RECOVERY_SWARM_PROFILE_SCHEMA = "pi.session_store_v2.recovery_swarm_profile.v1"
 RPC_SWARM_E2E_SCHEMA = "pi.rpc.concurrent_swarm_e2e.v1"
 RCH_ARTIFACT_SYNC_SCHEMA = "pi.rch.artifact_sync_preflight.v1"
+GIT_CONTEXT_SCHEMA = "pi.swarm.git_context.v1"
+RUNPACK_CAPTURE_SCHEMA = "pi.swarm.operator_runpack_capture.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
 UPDATE_GOLDEN_ENV = "UPDATE_SWARM_OPERATOR_RUNPACK_GOLDEN"
 DEFAULT_MAX_ITEMS = 8
 DEFAULT_STALE_AFTER_HOURS = 24
+DEFAULT_CAPTURE_TIMEOUT_SECONDS = 12
+CAPTURE_SNIPPET_MAX_CHARS = 1200
 SCORECARD_MAX_PER_DIMENSION = 2
 SENSITIVE_KEY_FRAGMENTS = (
     "authorization",
@@ -212,6 +219,145 @@ def file_fingerprint(path: Path) -> tuple[int, str]:
     return len(data), hashlib.sha256(data).hexdigest()
 
 
+def shell_join(command: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in command)
+
+
+def bounded_text(value: str, max_chars: int = CAPTURE_SNIPPET_MAX_CHARS) -> str:
+    if len(value) <= max_chars:
+        return value
+    omitted = len(value) - max_chars
+    return value[:max_chars] + f"\n[... {omitted} chars omitted ...]"
+
+
+def normalize_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def no_overwrite_write_text(path: Path, content: str) -> None:
+    if path.exists():
+        raise RunpackError(f"refusing to overwrite capture artifact: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def no_overwrite_write_json(path: Path, payload: Any) -> None:
+    no_overwrite_write_text(path, json_dumps(payload, pretty=True))
+
+
+def capture_unavailable(
+    command_id: str,
+    command: list[str],
+    *,
+    cwd: Path,
+    reason: str,
+) -> tuple[dict[str, Any], str]:
+    return (
+        {
+            "id": command_id,
+            "command": shell_join(command),
+            "cwd": str(cwd),
+            "status": "not_available",
+            "exit_code": None,
+            "issue": reason,
+            "stdout_path": None,
+            "stderr_snippet": "",
+            "redaction_summary": {"redacted_count": 0, "fields": []},
+        },
+        "",
+    )
+
+
+def capture_command(
+    command_id: str,
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+    stdout_path: Path | None = None,
+) -> tuple[dict[str, Any], str]:
+    result: dict[str, Any] = {
+        "id": command_id,
+        "command": shell_join(command),
+        "cwd": str(cwd),
+        "started_at": utc_now_iso(),
+        "timeout_seconds": timeout_seconds,
+        "stdout_path": str(stdout_path) if stdout_path is not None else None,
+    }
+    stdout = ""
+    stderr = ""
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        result.update({"status": "not_available", "exit_code": None, "issue": str(exc)})
+    except subprocess.TimeoutExpired as exc:
+        stdout = normalize_output(exc.stdout)
+        stderr = normalize_output(exc.stderr)
+        result.update({"status": "timeout", "exit_code": None, "issue": "command timed out"})
+    else:
+        stdout = normalize_output(completed.stdout)
+        stderr = normalize_output(completed.stderr)
+        result.update(
+            {
+                "status": "ok" if completed.returncode == 0 else "failed",
+                "exit_code": completed.returncode,
+                "issue": None if completed.returncode == 0 else "command exited non-zero",
+            }
+        )
+    if stdout_path is not None:
+        no_overwrite_write_text(stdout_path, stdout)
+
+    stdout_snippet, stdout_stats = redact_string(
+        bounded_text(stdout), f"capture.{command_id}.stdout"
+    )
+    stderr_snippet, stderr_stats = redact_string(
+        bounded_text(stderr), f"capture.{command_id}.stderr"
+    )
+    stdout_stats.merge(stderr_stats)
+    result.update(
+        {
+            "stdout_snippet": stdout_snippet,
+            "stderr_snippet": stderr_snippet,
+            "redaction_summary": stdout_stats.to_json(),
+        }
+    )
+    return result, stdout
+
+
+def json_object_from_stdout(stdout: str) -> dict[str, Any] | None:
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 def json_schema(value: Any) -> str | None:
     if isinstance(value, dict):
         schema = value.get("schema")
@@ -308,7 +454,34 @@ def load_git_status(path: Path | None) -> SourcePayload:
     if not path.exists():
         raise RunpackError(f"git_status source path does not exist: {path}")
     size_bytes, sha256 = file_fingerprint(path)
-    lines = [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines()]
+    text = path.read_text(encoding="utf-8")
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RunpackError(f"git_status source is malformed JSON: {path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RunpackError(f"git_status source JSON must be an object: {path}")
+        redacted, stats = redact_json(payload, "git_status")
+        lines = (
+            redacted.get("porcelain_lines")
+            if isinstance(redacted.get("porcelain_lines"), list)
+            else []
+        )
+        redacted["dirty"] = bool(lines)
+        return SourcePayload(
+            "git_status",
+            str(path),
+            "ok",
+            json_schema(redacted),
+            redacted,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            redacted_count=stats.redacted_count,
+            redacted_fields=tuple(sorted(stats.fields or [])),
+        )
+    lines = [line.rstrip("\n") for line in text.splitlines()]
     return SourcePayload(
         "git_status",
         str(path),
@@ -399,6 +572,545 @@ def source_payloads(args: argparse.Namespace) -> list[SourcePayload]:
             )
         )
     return sources
+
+
+def first_stdout_line(stdout: str) -> str | None:
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def parse_ahead_behind(stdout: str) -> tuple[int | None, int | None]:
+    parts = stdout.strip().split()
+    if len(parts) != 2:
+        return None, None
+    try:
+        left, right = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None, None
+    return left, right
+
+
+def capture_git_context(
+    repo_root: Path,
+    capture_dir: Path,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    commands: list[dict[str, Any]] = []
+    status_result, status_stdout = capture_command(
+        "git_status_porcelain",
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(status_result)
+    branch_result, branch_stdout = capture_command(
+        "git_branch",
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(branch_result)
+    head_result, head_stdout = capture_command(
+        "git_head",
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(head_result)
+    upstream_result, upstream_stdout = capture_command(
+        "git_upstream",
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(upstream_result)
+    ahead_result, ahead_stdout = capture_command(
+        "git_ahead_behind",
+        ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(ahead_result)
+    recent_result, recent_stdout = capture_command(
+        "git_recent_commits",
+        ["git", "log", "--oneline", "-5"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(recent_result)
+    remote_result, remote_stdout = capture_command(
+        "git_recent_remote_commits",
+        ["git", "log", "--remotes", "--oneline", "-5"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(remote_result)
+    ahead, behind = parse_ahead_behind(ahead_stdout)
+    context = {
+        "schema": GIT_CONTEXT_SCHEMA,
+        "generated_at": utc_now_iso(),
+        "branch": first_stdout_line(branch_stdout),
+        "head": first_stdout_line(head_stdout),
+        "upstream": {
+            "name": first_stdout_line(upstream_stdout),
+            "ahead": ahead,
+            "behind": behind,
+            "status": upstream_result.get("status"),
+        },
+        "porcelain_lines": status_stdout.splitlines(),
+        "recent_commits": recent_stdout.splitlines(),
+        "recent_remote_commits": remote_stdout.splitlines(),
+        "command_statuses": [
+            {
+                "id": command.get("id"),
+                "status": command.get("status"),
+                "exit_code": command.get("exit_code"),
+            }
+            for command in commands
+        ],
+    }
+    no_overwrite_write_json(capture_dir / "git-status.json", context)
+    return context, commands
+
+
+def maybe_capture_json_source(
+    *,
+    args: argparse.Namespace,
+    attr: str,
+    source_id: str,
+    command_id: str,
+    command: list[str],
+    output_path: Path,
+    repo_root: Path,
+    timeout_seconds: int,
+    commands: list[dict[str, Any]],
+    generated_source_paths: dict[str, str],
+) -> None:
+    if getattr(args, attr) is not None:
+        generated_source_paths[source_id] = str(getattr(args, attr))
+        return
+    result, stdout = capture_command(
+        command_id,
+        command,
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(result)
+    payload = json_object_from_stdout(stdout)
+    if payload is None:
+        return
+    no_overwrite_write_json(output_path, payload)
+    setattr(args, attr, output_path)
+    generated_source_paths[source_id] = str(output_path)
+
+
+def maybe_capture_agent_mail(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    timeout_seconds: int,
+    commands: list[dict[str, Any]],
+    capture_dir: Path,
+) -> None:
+    am_path = shutil.which("am")
+    if am_path is None:
+        result, _ = capture_unavailable(
+            "agent_mail_status",
+            ["am", "robot", "status", "--format", "json", "--project", str(repo_root)],
+            cwd=repo_root,
+            reason="am CLI was not found",
+        )
+        commands.append(result)
+        return
+    agent_name = args.agent_name or os.environ.get("AGENT_NAME") or os.environ.get("USER")
+    status_command = [
+        am_path,
+        "robot",
+        "status",
+        "--format",
+        "json",
+        "--project",
+        str(repo_root),
+    ]
+    reservation_command = [
+        am_path,
+        "robot",
+        "reservations",
+        "--format",
+        "json",
+        "--project",
+        str(repo_root),
+    ]
+    if agent_name:
+        status_command.extend(["--agent", agent_name])
+        reservation_command.extend(["--agent", agent_name])
+    status_result, status_stdout = capture_command(
+        "agent_mail_status",
+        status_command,
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(status_result)
+    if json_object_from_stdout(status_stdout) is not None:
+        no_overwrite_write_text(capture_dir / "agent-mail-status.json", status_stdout)
+    reservation_result, reservation_stdout = capture_command(
+        "agent_mail_reservations",
+        reservation_command,
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(reservation_result)
+    if json_object_from_stdout(reservation_stdout) is not None:
+        no_overwrite_write_text(capture_dir / "agent-mail-reservations.json", reservation_stdout)
+
+
+def maybe_capture_rch(
+    *,
+    repo_root: Path,
+    timeout_seconds: int,
+    commands: list[dict[str, Any]],
+    capture_dir: Path,
+) -> None:
+    rch_path = shutil.which("rch")
+    if rch_path is None:
+        result, _ = capture_unavailable(
+            "rch_queue",
+            ["rch", "queue", "--json"],
+            cwd=repo_root,
+            reason="rch CLI was not found",
+        )
+        commands.append(result)
+        return
+    queue_result, queue_stdout = capture_command(
+        "rch_queue",
+        [rch_path, "queue", "--json"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(queue_result)
+    if json_object_from_stdout(queue_stdout) is not None:
+        no_overwrite_write_text(capture_dir / "rch-queue.json", queue_stdout)
+    status_result, status_stdout = capture_command(
+        "rch_status",
+        [rch_path, "status"],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(status_result)
+    no_overwrite_write_text(capture_dir / "rch-status.txt", status_stdout)
+
+
+def capture_current_sources(args: argparse.Namespace) -> None:
+    if not getattr(args, "capture_current", False):
+        args.capture_manifest = None
+        return
+    repo_root = args.project_root.resolve()
+    capture_dir = (
+        args.capture_dir.resolve()
+        if args.capture_dir is not None
+        else Path(tempfile.mkdtemp(prefix="pi_swarm_runpack_capture_")).resolve()
+    )
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+    generated_source_paths: dict[str, str] = {}
+    timeout_seconds = args.capture_timeout_seconds
+
+    if args.git_status_file is None:
+        _, git_commands = capture_git_context(repo_root, capture_dir, timeout_seconds)
+        commands.extend(git_commands)
+        args.git_status_file = capture_dir / "git-status.json"
+        generated_source_paths["git_status"] = str(args.git_status_file)
+    else:
+        generated_source_paths["git_status"] = str(args.git_status_file)
+
+    maybe_capture_json_source(
+        args=args,
+        attr="claim_readiness_json",
+        source_id="claim_readiness",
+        command_id="claim_readiness",
+        command=[
+            sys.executable,
+            "scripts/report_swarm_claim_readiness.py",
+            "--repo-root",
+            str(repo_root),
+            "--json",
+        ],
+        output_path=capture_dir / "claim-readiness.json",
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+        commands=commands,
+        generated_source_paths=generated_source_paths,
+    )
+
+    maybe_capture_json_source(
+        args=args,
+        attr="beads_json",
+        source_id="beads",
+        command_id="beads_list",
+        command=["br", "list", "--json"],
+        output_path=capture_dir / "beads.json",
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+        commands=commands,
+        generated_source_paths=generated_source_paths,
+    )
+
+    cargo_headroom = repo_root / "scripts" / "cargo_headroom.sh"
+    if args.cargo_admission_json is None and cargo_headroom.exists():
+        maybe_capture_json_source(
+            args=args,
+            attr="cargo_admission_json",
+            source_id="cargo_admission",
+            command_id="cargo_admission",
+            command=[
+                str(cargo_headroom),
+                "--runner",
+                "rch",
+                "--admit-only",
+                "check",
+                "--all-targets",
+            ],
+            output_path=capture_dir / "cargo-admission.json",
+            repo_root=repo_root,
+            timeout_seconds=timeout_seconds,
+            commands=commands,
+            generated_source_paths=generated_source_paths,
+        )
+    elif args.cargo_admission_json is not None:
+        generated_source_paths["cargo_admission"] = str(args.cargo_admission_json)
+
+    pi_path = shutil.which("pi")
+    if args.doctor_json is None and pi_path is not None:
+        maybe_capture_json_source(
+            args=args,
+            attr="doctor_json",
+            source_id="doctor_swarm",
+            command_id="doctor_swarm",
+            command=[pi_path, "doctor", "--only", "swarm", "--format", "json"],
+            output_path=capture_dir / "doctor-swarm.json",
+            repo_root=repo_root,
+            timeout_seconds=timeout_seconds,
+            commands=commands,
+            generated_source_paths=generated_source_paths,
+        )
+    elif args.doctor_json is not None:
+        generated_source_paths["doctor_swarm"] = str(args.doctor_json)
+    else:
+        result, _ = capture_unavailable(
+            "doctor_swarm",
+            ["pi", "doctor", "--only", "swarm", "--format", "json"],
+            cwd=repo_root,
+            reason="pi CLI was not found in PATH",
+        )
+        commands.append(result)
+
+    default_activity = repo_root / "tests" / "full_suite_gate" / "swarm_activity_digest.json"
+    if args.activity_digest_json is None and default_activity.exists():
+        args.activity_digest_json = default_activity
+        generated_source_paths["activity_digest"] = str(default_activity)
+    elif args.activity_digest_json is not None:
+        generated_source_paths["activity_digest"] = str(args.activity_digest_json)
+
+    maybe_capture_agent_mail(
+        args=args,
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+        commands=commands,
+        capture_dir=capture_dir,
+    )
+    maybe_capture_rch(
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+        commands=commands,
+        capture_dir=capture_dir,
+    )
+
+    statuses = [str(command.get("status")) for command in commands]
+    args.capture_manifest = {
+        "schema": RUNPACK_CAPTURE_SCHEMA,
+        "mode": "current",
+        "status": "ok" if all(status == "ok" for status in statuses) else "degraded",
+        "generated_at": utc_now_iso(),
+        "capture_dir": str(capture_dir),
+        "project_root": str(repo_root),
+        "generated_source_paths": generated_source_paths,
+        "commands": commands,
+    }
+
+
+def capture_summary_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = getattr(args, "capture_manifest", None)
+    if isinstance(manifest, dict):
+        return manifest
+    provided_paths = {
+        "doctor_swarm": args.doctor_json,
+        "claim_readiness": args.claim_readiness_json,
+        "smoke_harness": args.smoke_summary_json,
+        "activity_digest": args.activity_digest_json,
+        "cargo_admission": args.cargo_admission_json,
+        "beads": args.beads_json,
+        "git_status": args.git_status_file,
+    }
+    return {
+        "schema": RUNPACK_CAPTURE_SCHEMA,
+        "mode": "provided_sources",
+        "status": "not_run",
+        "generated_at": None,
+        "capture_dir": None,
+        "project_root": None,
+        "generated_source_paths": {
+            key: str(value) for key, value in provided_paths.items() if value is not None
+        },
+        "commands": [],
+    }
+
+
+def summarize_agent_mail_read_state(
+    capture_summary: dict[str, Any],
+    doctor_summary: dict[str, Any],
+    max_items: int,
+) -> dict[str, Any]:
+    commands = [
+        command
+        for command in capture_summary.get("commands", [])
+        if isinstance(command, dict) and str(command.get("id", "")).startswith("agent_mail")
+    ]
+    command_statuses = [str(command.get("status")) for command in commands]
+    if not commands:
+        status = "not_captured"
+    elif all(command_status == "ok" for command_status in command_statuses):
+        status = "ok"
+    elif any(command_status in {"failed", "timeout"} for command_status in command_statuses):
+        status = "degraded"
+    else:
+        status = "not_available"
+    return {
+        "status": status,
+        "capture_mode": capture_summary.get("mode"),
+        "doctor_finding_count": len(doctor_summary.get("agent_mail_findings") or []),
+        "build_slots_observed": doctor_summary.get("agent_mail_build_slots") is not None,
+        "commands": bounded(
+            [
+                {
+                    "id": command.get("id"),
+                    "status": command.get("status"),
+                    "exit_code": command.get("exit_code"),
+                    "issue": command.get("issue"),
+                }
+                for command in commands
+            ],
+            max_items,
+        ),
+    }
+
+
+def infer_validation_status(text: str) -> str:
+    lowered = text.lower()
+    if "error:" in lowered or "failed" in lowered or "exit code: 1" in lowered:
+        return "failed"
+    if "warning:" in lowered:
+        return "warning"
+    if "self-test pass" in lowered or "finished" in lowered or "pass" in lowered:
+        return "passed"
+    return "unknown"
+
+
+def summarize_validation_outputs(
+    paths: list[Path],
+    max_items: int,
+) -> tuple[dict[str, Any], RedactionStats]:
+    stats = RedactionStats()
+    if not paths:
+        return {"status": "not_provided", "outputs": []}, stats
+    outputs: list[dict[str, Any]] = []
+    for index, path in enumerate(paths):
+        if not path.exists():
+            raise RunpackError(f"validation output path does not exist: {path}")
+        size_bytes, sha256 = file_fingerprint(path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        snippet, child_stats = redact_string(
+            bounded_text(text), f"validation_outputs[{index}].snippet"
+        )
+        stats.merge(child_stats)
+        outputs.append(
+            {
+                "path": str(path),
+                "size_bytes": size_bytes,
+                "sha256": sha256,
+                "inferred_status": infer_validation_status(text),
+                "snippet": snippet,
+            }
+        )
+    status_counts = Counter(output["inferred_status"] for output in outputs)
+    if status_counts.get("failed"):
+        status = "failed"
+    elif status_counts.get("warning"):
+        status = "warning"
+    elif outputs and all(output["inferred_status"] == "passed" for output in outputs):
+        status = "passed"
+    else:
+        status = "unknown"
+    return {
+        "status": status,
+        "outputs": bounded(outputs, max_items),
+        "redaction_summary": stats.to_json(),
+    }, stats
+
+
+def build_resume_commands(args: argparse.Namespace) -> list[dict[str, str]]:
+    if getattr(args, "capture_dir", None) is not None:
+        capture_dir = (
+            str(args.capture_dir).rstrip("/")
+            + "-next-$(date -u +%Y%m%dT%H%M%SZ)"
+        )
+    else:
+        capture_dir = "/data/tmp/pi_swarm_runpack/${USER:-agent}-$(date -u +%Y%m%dT%H%M%SZ)"
+    target_root = "/data/tmp/pi_agent_rust_cargo/${USER:-agent}"
+    return [
+        {
+            "purpose": "Inspect branch and dirty files",
+            "command": "git status --short --branch",
+        },
+        {
+            "purpose": "Inspect active Beads ownership",
+            "command": "br list --status=in_progress --json",
+        },
+        {
+            "purpose": "Find next ready work",
+            "command": "br ready --json",
+        },
+        {
+            "purpose": "Regenerate this handoff bundle",
+            "command": (
+                f"capture_dir={capture_dir}; "
+                "python3 scripts/build_swarm_operator_runpack.py "
+                '--capture-current --capture-dir "$capture_dir" '
+                '--out-json "$capture_dir/operator-runpack.json" '
+                '--out-md "$capture_dir/operator-runpack.md"'
+            ),
+        },
+        {
+            "purpose": "Check Beads/drop-in ledger invariant",
+            "command": "./scripts/reconcile_beads_ledger.sh",
+        },
+        {
+            "purpose": "Run compiler check through RCH",
+            "command": (
+                f"CARGO_TARGET_DIR={target_root}/target TMPDIR={target_root}/tmp "
+                "rch exec -- cargo check --all-targets"
+            ),
+        },
+        {
+            "purpose": "Run clippy through RCH",
+            "command": (
+                f"CARGO_TARGET_DIR={target_root}/target TMPDIR={target_root}/tmp "
+                "rch exec -- cargo clippy --all-targets -- -D warnings"
+            ),
+        },
+    ]
 
 
 def bounded(items: list[Any], max_items: int) -> list[Any]:
@@ -1051,11 +1763,26 @@ def summarize_git_status(source: SourcePayload, max_items: int) -> dict[str, Any
     for line in lines:
         text = str(line)
         entries.append({"status": text[:2], "path": text[3:] if len(text) > 3 else text})
+    upstream = payload.get("upstream") if isinstance(payload.get("upstream"), dict) else {}
     return {
         "status": source.status,
+        "schema": payload.get("schema"),
+        "generated_at": payload.get("generated_at"),
+        "branch": payload.get("branch"),
+        "head": payload.get("head"),
+        "upstream": {
+            "name": upstream.get("name"),
+            "ahead": upstream.get("ahead"),
+            "behind": upstream.get("behind"),
+            "status": upstream.get("status"),
+        },
         "dirty": bool(lines),
         "change_count": len(lines),
         "sample": bounded(entries, max_items),
+        "recent_commits": bounded(payload.get("recent_commits") or [], max_items),
+        "recent_remote_commits": bounded(
+            payload.get("recent_remote_commits") or [], max_items
+        ),
     }
 
 
@@ -1448,11 +2175,18 @@ def build_runpack(args: argparse.Namespace) -> dict[str, Any]:
         redaction.fields.update(source.redacted_fields)
     doctor_summary = summarize_doctor(by_id["doctor_swarm"], args.max_items)
     smoke_summary = summarize_smoke_harness(by_id["smoke_harness"], args.max_items)
+    capture_summary = capture_summary_from_args(args)
+    validation_summary, validation_redaction = summarize_validation_outputs(
+        getattr(args, "validation_outputs", []) or [],
+        args.max_items,
+    )
+    redaction.merge(validation_redaction)
     runpack = {
         "schema": RUNPACK_SCHEMA,
         "generated_at": generated_at.isoformat(),
         "status": "unknown",
         "purpose": "operator_handoff_not_release_performance_claim",
+        "capture": capture_summary,
         "source_statuses": [source.to_status() for source in sources],
         "doctor_swarm": doctor_summary,
         "beads": summarize_beads(
@@ -1466,11 +2200,18 @@ def build_runpack(args: argparse.Namespace) -> dict[str, Any]:
             "build_slots": doctor_summary.get("agent_mail_build_slots"),
             "smoke_reservation_count": smoke_summary.get("reservation_count"),
         },
+        "agent_mail_read_state": summarize_agent_mail_read_state(
+            capture_summary,
+            doctor_summary,
+            args.max_items,
+        ),
         "rch_admission": summarize_cargo_admission(by_id["cargo_admission"]),
         "evidence_readiness": summarize_claim_readiness(by_id["claim_readiness"], args.max_items),
         "git_state": summarize_git_status(by_id["git_status"], args.max_items),
         "activity_digest": summarize_activity_digest(by_id["activity_digest"], args.max_items),
         "smoke_harness": smoke_summary,
+        "validation_outputs": validation_summary,
+        "resume_commands": build_resume_commands(args),
         "redaction_summary": redaction.to_json(),
     }
     if "tail_latency" in by_id:
@@ -1515,6 +2256,10 @@ def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
         actions.append("Use activity-digest saturation evidence to narrow or redirect the swarm")
     if runpack["git_state"].get("dirty"):
         actions.append("Account for dirty files before using the runpack as handoff evidence")
+    if runpack.get("agent_mail_read_state", {}).get("status") in {"degraded", "not_available"}:
+        actions.append("Treat Agent Mail read state as unavailable and fall back to Beads ownership evidence")
+    if runpack.get("validation_outputs", {}).get("status") == "failed":
+        actions.append("Inspect failed validation output before resuming or closing the active bead")
     bottleneck = runpack.get("bottleneck_attribution")
     if isinstance(bottleneck, dict) and bottleneck.get("status") != "ready":
         actions.append(
@@ -1553,8 +2298,40 @@ def render_markdown(runpack: dict[str, Any]) -> str:
     lines.append(f"- RCH queue forecast: `{runpack['rch_admission'].get('queue_forecast', {}).get('recommended_action')}`")
     lines.append(f"- Evidence readiness: `{runpack['evidence_readiness'].get('overall_status')}`")
     lines.append(f"- Git dirty: `{runpack['git_state'].get('dirty')}`")
+    lines.append(f"- Agent Mail read state: `{runpack['agent_mail_read_state'].get('status')}`")
+    lines.append(f"- Validation outputs: `{runpack['validation_outputs'].get('status')}`")
     lines.append(f"- Activity saturated: `{runpack['activity_digest'].get('saturated')}`")
     lines.append(f"- Bottleneck attribution: `{runpack['bottleneck_attribution'].get('status')}`")
+    git_state = runpack["git_state"]
+    lines.extend(["", "## Git Context"])
+    lines.append(f"- Branch: `{git_state.get('branch')}`")
+    lines.append(f"- HEAD: `{git_state.get('head')}`")
+    upstream = git_state.get("upstream") if isinstance(git_state.get("upstream"), dict) else {}
+    lines.append(
+        f"- Upstream: `{upstream.get('name')}` "
+        f"(ahead `{upstream.get('ahead')}`, behind `{upstream.get('behind')}`)"
+    )
+    for commit in git_state.get("recent_commits") or []:
+        lines.append(f"- Recent: `{commit}`")
+    capture = runpack["capture"]
+    lines.extend(["", "## Capture"])
+    lines.append(f"- Mode: `{capture.get('mode')}`")
+    lines.append(f"- Status: `{capture.get('status')}`")
+    if capture.get("capture_dir"):
+        lines.append(f"- Directory: `{capture.get('capture_dir')}`")
+    for command in capture.get("commands", []):
+        lines.append(
+            f"- `{command.get('id')}`: `{command.get('status')}`"
+            + (f" ({command.get('issue')})" if command.get("issue") else "")
+        )
+    validation = runpack["validation_outputs"]
+    if validation.get("outputs"):
+        lines.extend(["", "## Validation Outputs"])
+        for output in validation.get("outputs", []):
+            lines.append(
+                f"- `{output.get('path')}`: `{output.get('inferred_status')}` "
+                f"({output.get('size_bytes')} bytes)"
+            )
     if isinstance(runpack.get("tail_latency"), dict):
         tail_latency = runpack["tail_latency"]
         lines.append(
@@ -1581,6 +2358,9 @@ def render_markdown(runpack: dict[str, Any]) -> str:
             f"- `{item.get('surface')}` from `{item.get('source')}`: "
             f"{item.get('signal')}"
         )
+    lines.extend(["", "## Resume Commands"])
+    for item in runpack.get("resume_commands", []):
+        lines.append(f"- {item.get('purpose')}: `{item.get('command')}`")
     lines.append("")
     return "\n".join(lines)
 
@@ -1868,8 +2648,24 @@ def run_self_test() -> int:
             ]
         },
     )
-    git_path = workspace / "git-status.txt"
-    git_path.write_text(" M src/doctor.rs\n?? scripts/new-tool.py\n", encoding="utf-8")
+    git_path = write_json(
+        workspace / "git-status.json",
+        {
+            "schema": GIT_CONTEXT_SCHEMA,
+            "generated_at": generated_at,
+            "branch": "main",
+            "head": "abc123fixture",
+            "upstream": {
+                "name": "origin/main",
+                "ahead": 1,
+                "behind": 0,
+                "status": "ok",
+            },
+            "porcelain_lines": [" M src/doctor.rs", "?? scripts/new-tool.py"],
+            "recent_commits": ["abc123fixture bd-fixture closeout"],
+            "recent_remote_commits": ["def456fixture origin/main prior closeout"],
+        },
+    )
     tail_latency_path = write_json(
         workspace / "tail-latency.json",
         {
@@ -1990,6 +2786,11 @@ def run_self_test() -> int:
             "violations": [],
         },
     )
+    validation_path = workspace / "validation.log"
+    validation_path.write_text(
+        "cargo clippy failed\nerror: token=super-secret-value should be redacted\n",
+        encoding="utf-8",
+    )
 
     args = argparse.Namespace(
         doctor_json=doctor_path,
@@ -2006,6 +2807,37 @@ def run_self_test() -> int:
         session_recovery_swarm_profile_json=session_profile_path,
         rpc_swarm_e2e_json=rpc_swarm_path,
         rch_artifact_sync_json=rch_artifact_sync_path,
+        validation_outputs=[validation_path],
+        capture_manifest={
+            "schema": RUNPACK_CAPTURE_SCHEMA,
+            "mode": "current",
+            "status": "degraded",
+            "generated_at": generated_at,
+            "capture_dir": str(workspace / "capture"),
+            "project_root": str(workspace),
+            "generated_source_paths": {
+                "git_status": str(git_path),
+                "beads": str(beads_path),
+                "cargo_admission": str(cargo_path),
+            },
+            "commands": [
+                {
+                    "id": "agent_mail_status",
+                    "command": "am robot status --format json",
+                    "status": "failed",
+                    "exit_code": 2,
+                    "issue": "database schema missing required tables",
+                },
+                {
+                    "id": "rch_queue",
+                    "command": "rch queue --json",
+                    "status": "ok",
+                    "exit_code": 0,
+                    "issue": None,
+                },
+            ],
+        },
+        capture_dir=workspace / "capture",
         out_json=workspace / "runpack.json",
         out_md=workspace / "runpack.md",
         generated_at=generated_at,
@@ -2022,6 +2854,15 @@ def run_self_test() -> int:
         assert runpack["rch_admission"]["queue_forecast"]["recommended_action"] == "backoff"
         assert runpack["activity_digest"]["saturated"] is True
         assert runpack["git_state"]["dirty"] is True
+        assert runpack["git_state"]["branch"] == "main"
+        assert runpack["git_state"]["upstream"]["ahead"] == 1
+        assert runpack["agent_mail_read_state"]["status"] == "degraded"
+        assert runpack["validation_outputs"]["status"] == "failed"
+        assert runpack["validation_outputs"]["outputs"][0]["inferred_status"] == "failed"
+        assert any(
+            item["purpose"] == "Regenerate this handoff bundle"
+            for item in runpack["resume_commands"]
+        )
         dashboard = runpack["bottleneck_attribution"]
         assert dashboard["schema"] == BOTTLENECK_ATTRIBUTION_SCHEMA
         assert dashboard["purpose"] == "operator_diagnostic_not_release_performance_claim"
@@ -2074,8 +2915,11 @@ def run_self_test() -> int:
             assert len(source["sha256"]) == 64
         assert runpack["redaction_summary"]["redacted_count"] >= 1
         assert args.out_json.exists() and args.out_md.exists()
-        assert "Tail latency telemetry" in args.out_md.read_text(encoding="utf-8")
-        assert "Bottleneck Attribution" in args.out_md.read_text(encoding="utf-8")
+        markdown = args.out_md.read_text(encoding="utf-8")
+        assert "Tail latency telemetry" in markdown
+        assert "Bottleneck Attribution" in markdown
+        assert "Resume Commands" in markdown
+        assert "Git Context" in markdown
         assert_runpack_contract(runpack)
         assert_runpack_golden(runpack, workspace)
         malformed = workspace / "malformed.json"
@@ -2114,6 +2958,57 @@ def run_self_test() -> int:
             in no_optional_runpack["bottleneck_attribution"]["missing_optional_diagnostics"]
         )
         assert_runpack_contract(no_optional_runpack)
+        clean_git_path = write_json(
+            workspace / "git-status-clean.json",
+            {
+                "schema": GIT_CONTEXT_SCHEMA,
+                "generated_at": generated_at,
+                "branch": "main",
+                "head": "cleanfixture",
+                "upstream": {"name": "origin/main", "ahead": 0, "behind": 0, "status": "ok"},
+                "porcelain_lines": [],
+                "recent_commits": [],
+                "recent_remote_commits": [],
+            },
+        )
+        empty_beads_path = write_json(workspace / "beads-empty.json", {"issues": []})
+        clean_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "git_status_file": clean_git_path,
+                "beads_json": empty_beads_path,
+                "validation_outputs": [],
+                "capture_manifest": {
+                    "schema": RUNPACK_CAPTURE_SCHEMA,
+                    "mode": "current",
+                    "status": "degraded",
+                    "generated_at": generated_at,
+                    "capture_dir": str(workspace / "capture-clean"),
+                    "project_root": str(workspace),
+                    "generated_source_paths": {},
+                    "commands": [
+                        {
+                            "id": "agent_mail_status",
+                            "command": "am robot status --format json",
+                            "status": "failed",
+                            "exit_code": 2,
+                            "issue": "corrupt mailbox database",
+                        }
+                    ],
+                },
+            }
+        )
+        clean_runpack = build_runpack(clean_args)
+        assert clean_runpack["git_state"]["dirty"] is False
+        assert clean_runpack["beads"]["active_count"] == 0
+        assert clean_runpack["agent_mail_read_state"]["status"] == "degraded"
+        assert clean_runpack["validation_outputs"]["status"] == "not_provided"
+        text_git_path = workspace / "git-status-text.txt"
+        text_git_path.write_text(" M src/main.rs\n", encoding="utf-8")
+        text_git_runpack = build_runpack(
+            argparse.Namespace(**{**vars(args), "git_status_file": text_git_path})
+        )
+        assert text_git_runpack["git_state"]["dirty"] is True
         stale_rpc_path = write_json(
             workspace / "stale-rpc-swarm-e2e.json",
             {
@@ -2218,6 +3113,40 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="pi.rch.artifact_sync_preflight.v1 JSON",
     )
+    parser.add_argument(
+        "--validation-output",
+        dest="validation_outputs",
+        action="append",
+        type=Path,
+        default=[],
+        help="captured validation log/output to summarize in the handoff bundle",
+    )
+    parser.add_argument(
+        "--capture-current",
+        action="store_true",
+        help="capture current git, Beads, Agent Mail, RCH, and safe evidence sources before building",
+    )
+    parser.add_argument(
+        "--capture-dir",
+        type=Path,
+        help="directory for --capture-current source artifacts; files must not already exist",
+    )
+    parser.add_argument(
+        "--capture-timeout-seconds",
+        type=int,
+        default=DEFAULT_CAPTURE_TIMEOUT_SECONDS,
+        help="per-command timeout for --capture-current probes",
+    )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path("."),
+        help="repository root for --capture-current commands",
+    )
+    parser.add_argument(
+        "--agent-name",
+        help="Agent Mail agent name for --capture-current robot reads",
+    )
     parser.add_argument("--out-json", type=Path, help="write runpack JSON; refuses to overwrite")
     parser.add_argument("--out-md", type=Path, help="write runpack Markdown; refuses to overwrite")
     parser.add_argument("--generated-at", help="override generated timestamp for deterministic tests")
@@ -2238,7 +3167,11 @@ def main() -> int:
     if args.max_items < 0:
         print("ERROR: --max-items must be non-negative", file=sys.stderr)
         return 2
+    if args.capture_timeout_seconds <= 0:
+        print("ERROR: --capture-timeout-seconds must be positive", file=sys.stderr)
+        return 2
     try:
+        capture_current_sources(args)
         runpack = build_runpack(args)
         write_outputs(args, runpack)
     except (RunpackError, ValueError) as exc:

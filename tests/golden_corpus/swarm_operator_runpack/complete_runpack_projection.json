@@ -43,6 +43,20 @@
     ],
     "smoke_reservation_count": 1
   },
+  "agent_mail_read_state": {
+    "build_slots_observed": true,
+    "capture_mode": "current",
+    "commands": [
+      {
+        "exit_code": 2,
+        "id": "agent_mail_status",
+        "issue": "database schema missing required tables",
+        "status": "failed"
+      }
+    ],
+    "doctor_finding_count": 1,
+    "status": "degraded"
+  },
   "beads": {
     "active_count": 2,
     "stale": [
@@ -410,6 +424,35 @@
       }
     }
   },
+  "capture": {
+    "capture_dir": "[WORKSPACE]/capture",
+    "commands": [
+      {
+        "command": "am robot status --format json",
+        "exit_code": 2,
+        "id": "agent_mail_status",
+        "issue": "database schema missing required tables",
+        "status": "failed"
+      },
+      {
+        "command": "rch queue --json",
+        "exit_code": 0,
+        "id": "rch_queue",
+        "issue": null,
+        "status": "ok"
+      }
+    ],
+    "generated_at": "2026-05-09T09:00:00+00:00",
+    "generated_source_paths": {
+      "beads": "[WORKSPACE]/beads.json",
+      "cargo_admission": "[WORKSPACE]/cargo.json",
+      "git_status": "[WORKSPACE]/git-status.json"
+    },
+    "mode": "current",
+    "project_root": "[WORKSPACE]",
+    "schema": "pi.swarm.operator_runpack_capture.v1",
+    "status": "degraded"
+  },
   "doctor_swarm": {
     "agent_mail_build_slots": {
       "data": {
@@ -472,8 +515,17 @@
   },
   "generated_at": "2026-05-09T09:00:00+00:00",
   "git_state": {
+    "branch": "main",
     "change_count": 2,
     "dirty": true,
+    "generated_at": "2026-05-09T09:00:00+00:00",
+    "head": "abc123fixture",
+    "recent_commits": [
+      "abc123fixture bd-fixture closeout"
+    ],
+    "recent_remote_commits": [
+      "def456fixture origin/main prior closeout"
+    ],
     "sample": [
       {
         "path": "src/doctor.rs",
@@ -484,7 +536,14 @@
         "status": "??"
       }
     ],
-    "status": "ok"
+    "schema": "pi.swarm.git_context.v1",
+    "status": "ok",
+    "upstream": {
+      "ahead": 1,
+      "behind": 0,
+      "name": "origin/main",
+      "status": "ok"
+    }
   },
   "operator_next_actions": [
     "Review stale in-progress Beads before assigning more work",
@@ -492,6 +551,8 @@
     "Back off heavy cargo validation until the RCH queue forecast recovers",
     "Use activity-digest saturation evidence to narrow or redirect the swarm",
     "Account for dirty files before using the runpack as handoff evidence",
+    "Treat Agent Mail read state as unavailable and fall back to Beads ownership evidence",
+    "Inspect failed validation output before resuming or closing the active bead",
     "Review degraded swarm-scale safety scorecard dimensions before release runpack signoff"
   ],
   "purpose": "operator_handoff_not_release_performance_claim",
@@ -523,10 +584,41 @@
   },
   "redaction_summary": {
     "fields": [
-      "doctor_swarm.findings[0].detail"
+      "doctor_swarm.findings[0].detail",
+      "validation_outputs[0].snippet"
     ],
-    "redacted_count": 1
+    "redacted_count": 2
   },
+  "resume_commands": [
+    {
+      "command": "git status --short --branch",
+      "purpose": "Inspect branch and dirty files"
+    },
+    {
+      "command": "br list --status=in_progress --json",
+      "purpose": "Inspect active Beads ownership"
+    },
+    {
+      "command": "br ready --json",
+      "purpose": "Find next ready work"
+    },
+    {
+      "command": "capture_dir=[WORKSPACE]/capture-next-$(date -u +%Y%m%dT%H%M%SZ); python3 scripts/build_swarm_operator_runpack.py --capture-current --capture-dir \"$capture_dir\" --out-json \"$capture_dir/operator-runpack.json\" --out-md \"$capture_dir/operator-runpack.md\"",
+      "purpose": "Regenerate this handoff bundle"
+    },
+    {
+      "command": "./scripts/reconcile_beads_ledger.sh",
+      "purpose": "Check Beads/drop-in ledger invariant"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/target TMPDIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/tmp rch exec -- cargo check --all-targets",
+      "purpose": "Run compiler check through RCH"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/target TMPDIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/tmp rch exec -- cargo clippy --all-targets -- -D warnings",
+      "purpose": "Run clippy through RCH"
+    }
+  ],
   "schema": "pi.swarm.operator_runpack.v1",
   "smoke_harness": {
     "artifact_manifest": [
@@ -608,10 +700,10 @@
     {
       "id": "git_status",
       "issue": null,
-      "path": "[WORKSPACE]/git-status.txt",
-      "schema": null,
+      "path": "[WORKSPACE]/git-status.json",
+      "schema": "pi.swarm.git_context.v1",
       "sha256": "[SHA256]",
-      "size_bytes": 40,
+      "size_bytes": 465,
       "status": "ok"
     },
     {
@@ -932,5 +1024,23 @@
     "schema": "pi.operator_tail_latency.v1",
     "status": "ok",
     "telemetry_enabled": true
+  },
+  "validation_outputs": {
+    "outputs": [
+      {
+        "inferred_status": "failed",
+        "path": "[WORKSPACE]/validation.log",
+        "sha256": "[SHA256]",
+        "size_bytes": 71,
+        "snippet": "cargo clippy failed\nerror: [REDACTED] should be redacted\n"
+      }
+    ],
+    "redaction_summary": {
+      "fields": [
+        "validation_outputs[0].snippet"
+      ],
+      "redacted_count": 1
+    },
+    "status": "failed"
   }
 }
