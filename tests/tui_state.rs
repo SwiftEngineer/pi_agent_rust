@@ -2596,7 +2596,7 @@ fn tui_login_no_args_shows_provider_table() {
     let test_name = "tui_login_no_args_shows_provider_table";
     let harness = TestHarness::new(test_name);
     let mut app = build_app(&harness, Vec::new());
-    app.set_terminal_size(80, 32);
+    app.set_terminal_size(80, 80);
     log_initial_state(&harness, &app);
     log_auth_test_event(
         test_name,
