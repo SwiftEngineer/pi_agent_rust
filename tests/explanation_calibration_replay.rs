@@ -14,9 +14,9 @@ use pi::connectors::http::HttpConnector;
 use pi::extensions::{
     ExtensionManager, ExtensionPolicy, ExtensionPolicyMode, HostCallContext, HostCallPayload,
     RUNTIME_RISK_EXPLANATION_SCHEMA_VERSION, RUNTIME_RISK_LEDGER_SCHEMA_VERSION,
-    RuntimeRiskActionValue, RuntimeRiskConfig, RuntimeRiskExplanationLevelValue,
-    dispatch_host_call_shared, replay_runtime_risk_ledger_artifact,
-    verify_runtime_risk_ledger_artifact,
+    RuntimeRiskActionValue, RuntimeRiskConfig, RuntimeRiskExplanationBudgetState,
+    RuntimeRiskExplanationLevelValue, dispatch_host_call_shared,
+    replay_runtime_risk_ledger_artifact, verify_runtime_risk_ledger_artifact,
 };
 use pi::tools::ToolRegistry;
 use serde_json::json;
@@ -79,6 +79,45 @@ fn make_ctx<'a>(
         js_runtime: None,
         interceptor: None,
     }
+}
+
+fn assert_budget_state_matches_except_elapsed(
+    left: &RuntimeRiskExplanationBudgetState,
+    right: &RuntimeRiskExplanationBudgetState,
+    entry_index: usize,
+) {
+    assert_eq!(
+        left.time_budget_ms, right.time_budget_ms,
+        "time_budget_ms mismatch at entry {entry_index}"
+    );
+    assert!(
+        left.elapsed_ms <= left.time_budget_ms,
+        "left elapsed_ms exceeded budget at entry {entry_index}: {} > {}",
+        left.elapsed_ms,
+        left.time_budget_ms
+    );
+    assert!(
+        right.elapsed_ms <= right.time_budget_ms,
+        "right elapsed_ms exceeded budget at entry {entry_index}: {} > {}",
+        right.elapsed_ms,
+        right.time_budget_ms
+    );
+    assert_eq!(
+        left.term_budget, right.term_budget,
+        "term_budget mismatch at entry {entry_index}"
+    );
+    assert_eq!(
+        left.terms_emitted, right.terms_emitted,
+        "terms_emitted mismatch at entry {entry_index}"
+    );
+    assert_eq!(
+        left.exhausted, right.exhausted,
+        "exhausted mismatch at entry {entry_index}"
+    );
+    assert_eq!(
+        left.fallback_mode, right.fallback_mode,
+        "fallback_mode mismatch at entry {entry_index}"
+    );
 }
 
 fn benign_call(idx: usize) -> HostCallPayload {
@@ -218,10 +257,7 @@ fn replay_parity_identical_explanation_payloads() {
                 cb.signed_impact
             );
         }
-        assert_eq!(
-            ea.budget_state, eb.budget_state,
-            "budget_state mismatch at entry {i}"
-        );
+        assert_budget_state_matches_except_elapsed(&ea.budget_state, &eb.budget_state, i);
         assert_eq!(ea.triggers, eb.triggers, "triggers mismatch at entry {i}");
     }
 

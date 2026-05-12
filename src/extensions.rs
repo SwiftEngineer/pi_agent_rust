@@ -39679,7 +39679,13 @@ mod tests {
         assert_eq!(level_a, level_b);
         assert_eq!(summary_a, summary_b);
         assert_eq!(contributors_a, contributors_b);
-        assert_eq!(budget_a, budget_b);
+        assert!(budget_a.elapsed_ms <= budget_a.time_budget_ms);
+        assert!(budget_b.elapsed_ms <= budget_b.time_budget_ms);
+        let mut comparable_budget_a = budget_a.clone();
+        let mut comparable_budget_b = budget_b.clone();
+        comparable_budget_a.elapsed_ms = 0;
+        comparable_budget_b.elapsed_ms = 0;
+        assert_eq!(comparable_budget_a, comparable_budget_b);
         assert!(!budget_a.exhausted);
         assert!(
             contributors_a.len() >= 2,
