@@ -9,6 +9,7 @@
     "purpose",
     "input_pack_schema",
     "input_pack_status",
+    "work_partitions",
     "actions",
     "omitted_actions",
     "forbidden_actions",
@@ -29,6 +30,20 @@
     "omitted_commands",
     "forbidden_actions",
     "rationale"
+  ],
+  "required_partition_fields": [
+    "issue_id",
+    "title",
+    "status",
+    "priority",
+    "assignee",
+    "surface_ids",
+    "suggested_reservation",
+    "avoid",
+    "alternate_surfaces",
+    "confidence",
+    "degraded_caveats",
+    "evidence_paths"
   ],
   "allowed_statuses": [
     "ready",
@@ -97,6 +112,15 @@
       "validated_by": [
         "allowed_statuses",
         "allowed_actions"
+      ]
+    },
+    {
+      "id": "AUTOPILOT-PLAN-MUST-005",
+      "description": "Ready Beads include diagnostic-only file partition recommendations with reservation globs, avoid surfaces, confidence, and degraded caveats.",
+      "validated_by": [
+        "work_partitions",
+        "required_partition_fields",
+        "required_forbidden_actions"
       ]
     }
   ]

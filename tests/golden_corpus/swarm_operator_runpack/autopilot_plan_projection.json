@@ -193,7 +193,8 @@
     "commands_require_operator_execution": true,
     "dangerous_runnable_commands_blocked": true,
     "dry_run_only": true,
-    "source_of_truth": "upstream_source_artifacts"
+    "source_of_truth": "upstream_source_artifacts",
+    "work_partitions_are_diagnostic_only": true
   },
   "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
   "redaction_summary": {
@@ -204,5 +205,6 @@
     "redacted_count": 2
   },
   "schema": "pi.swarm.autopilot_plan.v1",
-  "status": "degraded"
+  "status": "degraded",
+  "work_partitions": []
 }

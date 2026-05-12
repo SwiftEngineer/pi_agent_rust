@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import difflib
+import fnmatch
 import hashlib
 import json
 import os
@@ -161,6 +162,117 @@ AUTOPILOT_PLAN_DANGEROUS_COMMAND_FRAGMENTS = (
     "git reset --hard",
     "git clean -fd",
     "rm -rf",
+)
+WORK_PARTITION_INSPECT_SENTINEL = "<inspect-bead-before-reserving>"
+WORK_SURFACE_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "autopilot_runpack",
+        "keywords": (
+            "autopilot",
+            "operator runpack",
+            "runpack",
+            "bead-to-file",
+            "work partition",
+            "partition",
+            "launch control",
+        ),
+        "suggested_reservation": (
+            "scripts/build_swarm_operator_runpack.py",
+            "docs/contracts/swarm-autopilot-*.json",
+            "docs/swarm-operations-runbook.md",
+            "tests/golden_corpus/swarm_operator_runpack/*.json",
+        ),
+    },
+    {
+        "id": "provider_streaming",
+        "keywords": (
+            "provider",
+            "streaming",
+            "openai",
+            "responses",
+            "anthropic",
+            "gemini",
+            "cohere",
+            "azure",
+            "bedrock",
+            "vertex",
+            "copilot",
+            "gitlab",
+        ),
+        "suggested_reservation": (
+            "src/provider.rs",
+            "src/providers/**/*.rs",
+            "tests/provider_streaming*.rs",
+        ),
+    },
+    {
+        "id": "builtin_tools",
+        "keywords": (
+            "tool",
+            "tools",
+            "read tool",
+            "write tool",
+            "bash tool",
+            "grep tool",
+            "find tool",
+            "ls tool",
+            "hashline",
+            "conformance",
+        ),
+        "suggested_reservation": (
+            "src/tools.rs",
+            "tests/conformance.rs",
+            "tests/conformance/**/*.json",
+        ),
+    },
+    {
+        "id": "session_persistence",
+        "keywords": (
+            "session",
+            "session index",
+            "sqlite",
+            "jsonl",
+            "persistence",
+            "compaction",
+            "replay",
+            "branching",
+        ),
+        "suggested_reservation": (
+            "src/session.rs",
+            "src/session_index.rs",
+            "tests/session*.rs",
+            "tests/storage*.rs",
+        ),
+    },
+    {
+        "id": "extension_runtime",
+        "keywords": (
+            "extension",
+            "extensions",
+            "quickjs",
+            "hostcall",
+            "hostcalls",
+            "capability",
+            "policy",
+            "shim",
+        ),
+        "suggested_reservation": (
+            "src/extensions.rs",
+            "src/extensions_js.rs",
+            "tests/extensions*.rs",
+        ),
+    },
+    {
+        "id": "interactive_surface",
+        "keywords": ("interactive", "tui", "terminal", "rpc", "stdin", "config", "resources"),
+        "suggested_reservation": (
+            "src/interactive.rs",
+            "src/tui.rs",
+            "src/rpc.rs",
+            "src/config.rs",
+            "src/resources.rs",
+        ),
+    },
 )
 TIMESTAMP_KEYS = (
     "generated_at",
@@ -1774,7 +1886,10 @@ def issue_priority(issue: dict[str, Any]) -> int:
 
 
 def normalized_bead_candidate(issue: dict[str, Any]) -> dict[str, Any]:
-    return {
+    description = issue.get("description")
+    if not isinstance(description, str):
+        description = issue.get("body") if isinstance(issue.get("body"), str) else None
+    candidate = {
         "id": issue.get("id"),
         "title": issue.get("title"),
         "status": issue.get("status"),
@@ -1783,6 +1898,9 @@ def normalized_bead_candidate(issue: dict[str, Any]) -> dict[str, Any]:
         "updated_at": issue.get("updated_at"),
         "labels": issue.get("labels") if isinstance(issue.get("labels"), list) else [],
     }
+    if description:
+        candidate["description"] = description
+    return candidate
 
 
 def sort_bead_candidates(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2063,6 +2181,41 @@ def reservation_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def first_non_empty(*values: Any) -> Any | None:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def reservation_path(item: dict[str, Any]) -> str | None:
+    value = first_non_empty(
+        item.get("path"),
+        item.get("path_pattern"),
+        item.get("pathPattern"),
+        item.get("glob"),
+        item.get("file"),
+    )
+    return str(value) if value is not None else None
+
+
+def summarize_reservation(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "agent": first_non_empty(
+            item.get("agent"),
+            item.get("agent_name"),
+            item.get("holder"),
+            item.get("owner"),
+        ),
+        "path": reservation_path(item),
+        "exclusive": item.get("exclusive"),
+        "reason": item.get("reason"),
+        "expires_ts": item.get("expires_ts"),
+        "released_ts": item.get("released_ts"),
+    }
+
+
 def summarize_agent_mail_autopilot(
     status_source: SourcePayload,
     reservations_source: SourcePayload,
@@ -2100,6 +2253,10 @@ def summarize_agent_mail_autopilot(
         "reservation_status": reservation_status,
         "reservation_count": len(reservations),
         "active_reservation_count": len(active_reservations),
+        "active_reservations": bounded(
+            [summarize_reservation(item) for item in active_reservations],
+            max_items,
+        ),
         "fallback_action": "use_beads_soft_lock" if status != "ok" else None,
         "commands": commands,
     }
@@ -2305,6 +2462,262 @@ def first_candidate(candidates: Any) -> dict[str, Any] | None:
     return candidate if isinstance(candidate, dict) else None
 
 
+def unique_strings(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def issue_search_text(issue: dict[str, Any]) -> str:
+    fragments: list[str] = []
+    for key in ("title", "description", "body"):
+        value = issue.get(key)
+        if isinstance(value, str):
+            fragments.append(value)
+    labels = issue.get("labels")
+    if isinstance(labels, list):
+        fragments.extend(str(label) for label in labels)
+    return " ".join(fragments).lower()
+
+
+def infer_issue_work_surfaces(issue: dict[str, Any]) -> list[dict[str, Any]]:
+    search_text = issue_search_text(issue)
+    matches: list[dict[str, Any]] = []
+    for rule in WORK_SURFACE_RULES:
+        keywords = rule.get("keywords")
+        if not isinstance(keywords, tuple):
+            continue
+        if any(str(keyword).lower() in search_text for keyword in keywords):
+            matches.append(rule)
+    return matches
+
+
+def surface_reservation_globs(surfaces: list[dict[str, Any]]) -> list[str]:
+    globs: list[str] = []
+    for surface in surfaces:
+        suggested = surface.get("suggested_reservation")
+        if not isinstance(suggested, tuple):
+            continue
+        globs.extend(str(item) for item in suggested)
+    if not globs:
+        return [WORK_PARTITION_INSPECT_SENTINEL]
+    return unique_strings(tuple(globs))
+
+
+def glob_static_prefix(pattern: str) -> str:
+    wildcard_index = len(pattern)
+    for token in ("*", "?", "["):
+        found = pattern.find(token)
+        if found >= 0:
+            wildcard_index = min(wildcard_index, found)
+    return pattern[:wildcard_index].rstrip("/")
+
+
+def path_patterns_overlap(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == WORK_PARTITION_INSPECT_SENTINEL or right == WORK_PARTITION_INSPECT_SENTINEL:
+        return False
+    if left == right:
+        return True
+    if fnmatch.fnmatchcase(right, left) or fnmatch.fnmatchcase(left, right):
+        return True
+    left_prefix = glob_static_prefix(left)
+    right_prefix = glob_static_prefix(right)
+    if left_prefix and right_prefix:
+        return left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+    return False
+
+
+def overlaps_any(pattern: str, candidates: list[str]) -> bool:
+    return any(path_patterns_overlap(pattern, candidate) for candidate in candidates)
+
+
+def dedupe_avoid_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str | None]] = set()
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        key = (
+            str(entry.get("source") or ""),
+            str(entry.get("path") or ""),
+            entry.get("holder") if isinstance(entry.get("holder"), str) else None,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
+def alternate_surface_options(
+    surface_ids: set[str],
+    hot_patterns: list[str],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    for rule in WORK_SURFACE_RULES:
+        surface_id = str(rule.get("id") or "")
+        if surface_id in surface_ids:
+            continue
+        suggested = rule.get("suggested_reservation")
+        if not isinstance(suggested, tuple):
+            continue
+        globs = [str(item) for item in suggested]
+        if any(overlaps_any(pattern, hot_patterns) for pattern in globs):
+            continue
+        options.append(
+            {
+                "surface_id": surface_id,
+                "suggested_reservation": globs,
+            }
+        )
+    return bounded(options, max_items)
+
+
+def build_work_partition_recommendations(
+    input_pack: dict[str, Any],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    beads_ready = normalized_section(input_pack, "beads_ready")
+    ready_candidates = beads_ready.get("candidates")
+    if not isinstance(ready_candidates, list):
+        return []
+    agent_mail = normalized_section(input_pack, "agent_mail")
+    git_state = normalized_section(input_pack, "git_state")
+    beads = normalized_section(input_pack, "beads")
+    active_reservations = agent_mail.get("active_reservations")
+    if not isinstance(active_reservations, list):
+        active_reservations = []
+    dirty_entries = git_state.get("sample") if isinstance(git_state.get("sample"), list) else []
+    stale_candidates = beads.get("stale") if isinstance(beads.get("stale"), list) else []
+    reservation_evidence_degraded = (
+        agent_mail.get("status") != "ok" or agent_mail.get("reservation_status") != "ok"
+    )
+    git_evidence_degraded = git_state.get("status") not in {"ok", None}
+    partitions: list[dict[str, Any]] = []
+    for candidate in ready_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        issue_id = str(candidate.get("id") or "<issue-id>")
+        surfaces = infer_issue_work_surfaces(candidate)
+        surface_ids = {str(surface.get("id") or "") for surface in surfaces}
+        suggested_reservation = surface_reservation_globs(surfaces)
+        avoid: list[dict[str, Any]] = []
+        degraded_caveats: list[str] = []
+        if reservation_evidence_degraded:
+            degraded_caveats.append(
+                "Agent Mail reservation evidence is degraded or unavailable; verify Beads ownership before trusting exclusivity."
+            )
+        if git_evidence_degraded:
+            degraded_caveats.append(
+                "Git dirty-path evidence is degraded or unavailable; inspect git status before reserving."
+            )
+        if not surfaces:
+            degraded_caveats.append(
+                "No known file family matched the bead labels, title, or body; inspect the bead before reserving files."
+            )
+        for reservation in active_reservations:
+            if not isinstance(reservation, dict):
+                continue
+            path = reservation_path(reservation)
+            if path is None:
+                continue
+            if any(path_patterns_overlap(pattern, path) for pattern in suggested_reservation):
+                avoid.append(
+                    {
+                        "source": "agent_mail",
+                        "path": path,
+                        "holder": reservation.get("agent"),
+                        "reason": "active Agent Mail reservation overlaps the suggested file family",
+                    }
+                )
+        for dirty_entry in dirty_entries:
+            if not isinstance(dirty_entry, dict):
+                continue
+            path = dirty_entry.get("path")
+            if not isinstance(path, str):
+                continue
+            if any(path_patterns_overlap(pattern, path) for pattern in suggested_reservation):
+                avoid.append(
+                    {
+                        "source": "git_state",
+                        "path": path,
+                        "holder": None,
+                        "reason": f"worktree already has a dirty path with status {dirty_entry.get('status')}",
+                    }
+                )
+        for stale in stale_candidates:
+            if not isinstance(stale, dict) or str(stale.get("id") or "") == issue_id:
+                continue
+            stale_surfaces = infer_issue_work_surfaces(stale)
+            stale_surface_ids = {str(surface.get("id") or "") for surface in stale_surfaces}
+            if not surface_ids.intersection(stale_surface_ids):
+                continue
+            for path in surface_reservation_globs(stale_surfaces):
+                if any(path_patterns_overlap(pattern, path) for pattern in suggested_reservation):
+                    avoid.append(
+                        {
+                            "source": "beads",
+                            "path": path,
+                            "holder": stale.get("assignee"),
+                            "reason": f"stale in-progress bead {stale.get('id')} may already own this surface",
+                        }
+                    )
+        avoid = dedupe_avoid_entries(avoid)
+        confidence = "high"
+        if not surfaces:
+            confidence = "low"
+        elif avoid or degraded_caveats or len(surface_ids) > 1:
+            confidence = "medium"
+        hot_patterns = [entry["path"] for entry in avoid if isinstance(entry.get("path"), str)]
+        hot_patterns.extend(
+            reservation_path(item)
+            for item in active_reservations
+            if isinstance(item, dict) and reservation_path(item) is not None
+        )
+        hot_patterns.extend(
+            entry.get("path")
+            for entry in dirty_entries
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        )
+        partitions.append(
+            {
+                "issue_id": issue_id,
+                "title": candidate.get("title"),
+                "status": candidate.get("status"),
+                "priority": candidate.get("priority"),
+                "assignee": candidate.get("assignee"),
+                "surface_ids": sorted(surface_ids) if surface_ids else ["unknown"],
+                "suggested_reservation": suggested_reservation,
+                "avoid": avoid,
+                "alternate_surfaces": alternate_surface_options(
+                    surface_ids,
+                    [str(pattern) for pattern in hot_patterns if pattern],
+                    max_items=2,
+                )
+                if avoid
+                else [],
+                "confidence": confidence,
+                "degraded_caveats": degraded_caveats,
+                "evidence_paths": [
+                    "normalized_inputs.beads_ready.candidates",
+                    "normalized_inputs.agent_mail.active_reservations",
+                    "normalized_inputs.git_state.sample",
+                    "normalized_inputs.beads.stale",
+                ],
+            }
+        )
+    return bounded(partitions, max_items)
+
+
 def autopilot_plan_action(
     *,
     action: str,
@@ -2424,6 +2837,7 @@ def build_autopilot_plan(
 
     actions: list[dict[str, Any]] = []
     blockers = required_input_blockers(input_pack)
+    work_partitions = build_work_partition_recommendations(input_pack, max_items=max_items)
     if blockers:
         actions.append(
             autopilot_plan_action(
@@ -2505,6 +2919,7 @@ def build_autopilot_plan(
                 evidence_paths=[
                     "normalized_inputs.cargo_admission.queue_forecast.recommended_action",
                     "normalized_inputs.operator_runpack.operator_next_actions",
+                    "work_partitions",
                 ],
                 commands=[
                     plan_command("Inspect ready work", "br ready --json"),
@@ -2627,11 +3042,13 @@ def build_autopilot_plan(
                 preconditions=[
                     "The ready queue source is fresh and produced the candidate.",
                     "No active in-progress bead already owns the same work.",
+                    "Review the diagnostic work partition before requesting Agent Mail reservations.",
                     "Inspect the bead before editing files.",
                 ],
                 evidence_paths=[
                     "normalized_inputs.beads_ready.candidates",
                     "normalized_inputs.beads_ready.ready_count",
+                    "work_partitions",
                     "command_provenance",
                 ],
                 commands=[
@@ -2711,6 +3128,7 @@ def build_autopilot_plan(
         "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
         "input_pack_schema": input_pack.get("schema"),
         "input_pack_status": input_pack.get("status"),
+        "work_partitions": bounded(work_partitions, max_items),
         "actions": bounded(ranked_actions, max_items),
         "omitted_actions": [
             omitted_command("destructive cleanup", "planner never recommends destructive git or filesystem cleanup"),
@@ -2724,6 +3142,7 @@ def build_autopilot_plan(
             "source_of_truth": "upstream_source_artifacts",
             "commands_require_operator_execution": True,
             "dangerous_runnable_commands_blocked": True,
+            "work_partitions_are_diagnostic_only": True,
         },
         "degraded_reasons": input_pack.get("degraded_reasons", []),
     }
@@ -3520,9 +3939,25 @@ def assert_autopilot_plan_contract(plan: dict[str, Any]) -> None:
     for key in contract.get("required_top_level_keys", []):
         assert key in plan, f"missing top-level autopilot plan key: {key}"
     action_fields = set(contract.get("required_action_fields", []))
+    partition_fields = set(contract.get("required_partition_fields", []))
     allowed_actions = set(contract.get("allowed_actions", []))
     allowed_severities = set(contract.get("allowed_severities", []))
     allowed_confidence = set(contract.get("allowed_confidence", []))
+    partitions = plan.get("work_partitions")
+    assert isinstance(partitions, list)
+    for partition in partitions:
+        assert isinstance(partition, dict)
+        missing = partition_fields - set(partition)
+        assert not missing, f"autopilot plan work partition missing fields: {sorted(missing)}"
+        assert partition.get("confidence") in allowed_confidence
+        assert isinstance(partition.get("surface_ids"), list) and partition.get("surface_ids")
+        suggested = partition.get("suggested_reservation")
+        assert isinstance(suggested, list) and suggested
+        assert all(isinstance(item, str) and item for item in suggested)
+        assert isinstance(partition.get("avoid"), list)
+        assert isinstance(partition.get("degraded_caveats"), list)
+        evidence_paths = partition.get("evidence_paths")
+        assert isinstance(evidence_paths, list) and evidence_paths
     actions = plan.get("actions")
     assert isinstance(actions, list) and actions
     ranks = [action.get("rank") for action in actions if isinstance(action, dict)]
@@ -4110,6 +4545,7 @@ def run_self_test() -> int:
             "reopen_stale_bead_candidate",
             "capture_handoff",
         ]
+        assert plan["work_partitions"] == []
         assert_autopilot_plan_contract(plan)
         assert_autopilot_plan_golden(plan, workspace)
         plan_output_args = argparse.Namespace(
@@ -4266,6 +4702,229 @@ def run_self_test() -> int:
         assert healthy_input_pack["status"] == "ready"
         assert healthy_plan["status"] == "ready"
         assert [item["action"] for item in healthy_plan["actions"]] == ["claim_ready_bead"]
+        healthy_partition = healthy_plan["work_partitions"][0]
+        assert healthy_partition["issue_id"] == "bd-ready"
+        assert "autopilot_runpack" in healthy_partition["surface_ids"]
+        assert "scripts/build_swarm_operator_runpack.py" in healthy_partition["suggested_reservation"]
+        assert healthy_partition["avoid"] == []
+        assert healthy_partition["confidence"] == "high"
+        assert healthy_partition["degraded_caveats"] == []
+        assert_autopilot_plan_contract(healthy_plan)
+
+        independent_ready_path = write_json(
+            workspace / "beads-ready-independent.json",
+            [
+                {
+                    "id": "bd-provider",
+                    "title": "Add OpenAI provider streaming parity",
+                    "description": "Provider body for streaming fixture coverage",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": generated_at,
+                    "labels": ["provider", "openai"],
+                },
+                {
+                    "id": "bd-tools",
+                    "title": "Harden read tool conformance",
+                    "description": "Read tool body for conformance fixtures",
+                    "status": "open",
+                    "priority": 2,
+                    "updated_at": generated_at,
+                    "labels": ["tools", "conformance"],
+                },
+            ],
+        )
+        independent_args = argparse.Namespace(
+            **{
+                **vars(healthy_args),
+                "beads_ready_json": independent_ready_path,
+            }
+        )
+        independent_input_pack = build_autopilot_input_pack(independent_args)
+        independent_plan = build_autopilot_plan(independent_input_pack, max_items=args.max_items)
+        independent_partitions = {
+            item["issue_id"]: item for item in independent_plan["work_partitions"]
+        }
+        assert "src/providers/**/*.rs" in independent_partitions["bd-provider"][
+            "suggested_reservation"
+        ]
+        assert "src/tools.rs" in independent_partitions["bd-tools"]["suggested_reservation"]
+        assert set(independent_partitions["bd-provider"]["suggested_reservation"]).isdisjoint(
+            independent_partitions["bd-tools"]["suggested_reservation"]
+        )
+        assert independent_partitions["bd-provider"]["avoid"] == []
+        assert independent_partitions["bd-tools"]["avoid"] == []
+        assert_autopilot_plan_contract(independent_plan)
+
+        agent_mail_reservations_provider_path = write_json(
+            workspace / "agent-mail-reservations-provider.json",
+            {
+                "schema": "pi.agent_mail.robot_reservations.v1",
+                "generated_at": generated_at,
+                "status": "ok",
+                "reservations": [
+                    {
+                        "id": 11,
+                        "agent": "BlueLake",
+                        "path": "src/providers/**/*.rs",
+                        "exclusive": True,
+                        "reason": "bd-provider-owner",
+                        "released_ts": None,
+                    }
+                ],
+            },
+        )
+        overlapping_args = argparse.Namespace(
+            **{
+                **vars(independent_args),
+                "agent_mail_reservations_json": agent_mail_reservations_provider_path,
+            }
+        )
+        overlapping_plan = build_autopilot_plan(
+            build_autopilot_input_pack(overlapping_args),
+            max_items=args.max_items,
+        )
+        overlapping_provider = {
+            item["issue_id"]: item for item in overlapping_plan["work_partitions"]
+        }["bd-provider"]
+        assert overlapping_provider["confidence"] == "medium"
+        assert any(
+            item["source"] == "agent_mail" and item["path"] == "src/providers/**/*.rs"
+            for item in overlapping_provider["avoid"]
+        )
+        assert overlapping_provider["alternate_surfaces"]
+        assert_autopilot_plan_contract(overlapping_plan)
+
+        stale_provider_beads_path = write_json(
+            workspace / "beads-stale-provider.json",
+            {
+                "issues": [
+                    {
+                        "id": "bd-stale-provider",
+                        "title": "Provider streaming stale owner",
+                        "status": "in_progress",
+                        "assignee": "StaleOwner",
+                        "updated_at": "2026-05-08T00:00:00+00:00",
+                    }
+                ]
+            },
+        )
+        stale_provider_args = argparse.Namespace(
+            **{
+                **vars(independent_args),
+                "beads_json": stale_provider_beads_path,
+            }
+        )
+        stale_provider_plan = build_autopilot_plan(
+            build_autopilot_input_pack(stale_provider_args),
+            max_items=args.max_items,
+        )
+        stale_provider_partition = {
+            item["issue_id"]: item for item in stale_provider_plan["work_partitions"]
+        }["bd-provider"]
+        assert stale_provider_partition["confidence"] == "medium"
+        assert any(
+            item["source"] == "beads" and item["holder"] == "StaleOwner"
+            for item in stale_provider_partition["avoid"]
+        )
+        assert_autopilot_plan_contract(stale_provider_plan)
+
+        mail_unavailable_args = argparse.Namespace(
+            **{
+                **vars(independent_args),
+                "agent_mail_status_json": None,
+                "agent_mail_reservations_json": None,
+            }
+        )
+        mail_unavailable_plan = build_autopilot_plan(
+            build_autopilot_input_pack(mail_unavailable_args),
+            max_items=args.max_items,
+        )
+        mail_unavailable_provider = {
+            item["issue_id"]: item for item in mail_unavailable_plan["work_partitions"]
+        }["bd-provider"]
+        assert mail_unavailable_plan["status"] == "blocked"
+        assert mail_unavailable_provider["confidence"] == "medium"
+        assert any(
+            "Agent Mail reservation evidence" in caveat
+            for caveat in mail_unavailable_provider["degraded_caveats"]
+        )
+        assert_autopilot_plan_contract(mail_unavailable_plan)
+
+        if shutil.which("br") is not None:
+            real_beads_workspace = workspace / "real-beads-workspace"
+            real_beads_workspace.mkdir()
+
+            def run_real_br(*command: str) -> str:
+                completed = subprocess.run(
+                    ["br", *command],
+                    cwd=real_beads_workspace,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    raise AssertionError(
+                        f"br {' '.join(command)} failed: {completed.stderr}"
+                    )
+                return completed.stdout
+
+            run_real_br("init", "--prefix", "smoke", "--json")
+            run_real_br(
+                "create",
+                "--title",
+                "Add OpenAI provider fixture",
+                "--type",
+                "task",
+                "--priority",
+                "2",
+                "--labels",
+                "provider,openai",
+                "--description",
+                "provider streaming body",
+                "--json",
+            )
+            run_real_br(
+                "create",
+                "--title",
+                "Harden read tool conformance",
+                "--type",
+                "task",
+                "--priority",
+                "2",
+                "--labels",
+                "tools,conformance",
+                "--description",
+                "read tool body",
+                "--json",
+            )
+            real_beads_path = write_json(
+                workspace / "beads-real-smoke.json",
+                json.loads(run_real_br("list", "--json")),
+            )
+            real_ready_path = write_json(
+                workspace / "beads-ready-real-smoke.json",
+                json.loads(run_real_br("ready", "--json")),
+            )
+            real_smoke_args = argparse.Namespace(
+                **{
+                    **vars(healthy_args),
+                    "beads_json": real_beads_path,
+                    "beads_ready_json": real_ready_path,
+                }
+            )
+            real_smoke_plan = build_autopilot_plan(
+                build_autopilot_input_pack(real_smoke_args),
+                max_items=args.max_items,
+            )
+            real_smoke_reservations = [
+                tuple(item["suggested_reservation"])
+                for item in real_smoke_plan["work_partitions"]
+            ]
+            assert len(real_smoke_reservations) >= 2
+            assert any("src/providers/**/*.rs" in item for item in real_smoke_reservations)
+            assert any("src/tools.rs" in item for item in real_smoke_reservations)
+            assert_autopilot_plan_contract(real_smoke_plan)
         empty_ready_path = write_json(workspace / "beads-ready-empty.json", [])
         empty_plan_args = argparse.Namespace(
             **{

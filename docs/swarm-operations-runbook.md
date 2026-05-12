@@ -205,6 +205,7 @@ python3 scripts/build_swarm_operator_runpack.py \
 The runpack schema is governed by `docs/contracts/swarm-operator-runpack-contract.json`. The runpack is a redacted index over existing evidence, not a release performance claim and not a replacement for the source artifacts.
 The autopilot input pack schema is governed by `docs/contracts/swarm-autopilot-input-pack-contract.json`. It normalizes source statuses for the dry-run planner, but it is still advisory and never replaces Doctor, Beads, Agent Mail, RCH, git, or the source artifacts themselves.
 The autopilot plan schema is governed by `docs/contracts/swarm-autopilot-plan-contract.json`. It maps the input pack to ordered dry-run actions such as `claim_ready_bead`, `wait_for_rch`, `use_beads_soft_lock`, `reopen_stale_bead_candidate`, `run_docs_only_work`, `capture_handoff`, or `stop_and_surface_blocker`.
+The plan also includes `work_partitions` for ready Beads. Those entries recommend reservation globs, likely collision surfaces to avoid, alternate file families, confidence, and degraded caveats. They are diagnostic only; operators still claim through Beads and reserve through Agent Mail when it is healthy.
 
 ## Completion Checklist
 
@@ -318,6 +319,22 @@ Autopilot plan evidence:
   "schema": "pi.swarm.autopilot_plan.v1",
   "purpose": "dry_run_swarm_autopilot_plan_not_source_of_truth",
   "status": "degraded",
+  "work_partitions": [
+    {
+      "issue_id": "bd-provider",
+      "surface_ids": [
+        "provider_streaming"
+      ],
+      "suggested_reservation": [
+        "src/provider.rs",
+        "src/providers/**/*.rs",
+        "tests/provider_streaming*.rs"
+      ],
+      "avoid": [],
+      "confidence": "high",
+      "degraded_caveats": []
+    }
+  ],
   "actions": [
     {
       "rank": 1,

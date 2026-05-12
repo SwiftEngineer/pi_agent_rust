@@ -42,6 +42,7 @@
     "normalized_inputs.agent_mail.status",
     "normalized_inputs.agent_mail.read_status",
     "normalized_inputs.agent_mail.reservation_status",
+    "normalized_inputs.agent_mail.active_reservations",
     "normalized_inputs.git_state.status",
     "normalized_inputs.git_state.dirty",
     "normalized_inputs.activity_digest.status",
