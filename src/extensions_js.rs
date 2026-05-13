@@ -10705,7 +10705,7 @@ export function readdirSync(path, opts) {
       }
     } catch (e) {
       const message = String((e && e.message) ? e.message : e);
-      if (message.includes("host readdir denied")) {
+      if (message.includes("host readdir denied") && !foundDir) {
         throw e;
       }
       hostError = message;
@@ -21432,6 +21432,11 @@ mod tests {
         clock: &Arc<DeterministicClock>,
     ) {
         for _ in 0..10_000 {
+            let jobs_drained = runtime.drain_microtasks().await.expect("drain microtasks");
+            if jobs_drained > 0 {
+                continue;
+            }
+
             if !runtime.has_pending() {
                 break;
             }
@@ -25551,14 +25556,23 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                         globalThis.fsRoundTrip.isDir = dirStat.isDirectory();
                         globalThis.fsRoundTrip.isFile = fileStat.isFile();
                         globalThis.fsRoundTrip.done = true;
+                    }).catch((err) => {
+                        globalThis.fsRoundTrip.error = String((err && err.stack) ? err.stack : err);
+                        globalThis.fsRoundTrip.done = false;
                     });
                     ",
                 )
                 .await
                 .expect("eval fs sync roundtrip");
 
+            drain_until_idle(&runtime, &clock).await;
+
             let r = get_global_json(&runtime, "fsRoundTrip").await;
-            assert_eq!(r["done"], serde_json::json!(true));
+            assert_eq!(
+                r["done"],
+                serde_json::json!(true),
+                "fs roundtrip result: {r}"
+            );
             assert_eq!(r["exists"], serde_json::json!(true));
             assert_eq!(r["readText"], serde_json::json!("hello world"));
             assert_eq!(r["rawLen"], serde_json::json!(4));
@@ -25720,6 +25734,8 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                 )
                 .await
                 .expect("eval fs promises test");
+
+            drain_until_idle(&runtime, &clock).await;
 
             let r = get_global_json(&runtime, "fsPromisesResults").await;
             assert_eq!(r["done"], serde_json::json!(true));
@@ -27334,6 +27350,8 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                 )
                 .await
                 .expect("eval fs edge cases");
+
+            drain_until_idle(&runtime, &clock).await;
 
             let r = get_global_json(&runtime, "fsEdge").await;
             assert_eq!(r["done"], serde_json::json!(true));
