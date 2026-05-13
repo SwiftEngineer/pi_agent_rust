@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pi::swarm_replay::{
-    SWARM_REPLAY_REPORT_SCHEMA, SWARM_REPLAY_TRACE_SCHEMA, SwarmReplayEvent,
-    SwarmReplayEventUncertainty, SwarmReplayGuards, SwarmReplayIngestRequest, SwarmReplayOrdering,
+    SWARM_REPLAY_POLICY_REPORT_SCHEMA, SWARM_REPLAY_REPORT_SCHEMA, SWARM_REPLAY_TRACE_SCHEMA,
+    SwarmReplayBaselinePolicy, SwarmReplayEvent, SwarmReplayEventUncertainty, SwarmReplayGuards,
+    SwarmReplayIngestRequest, SwarmReplayOrdering, SwarmReplayPolicyDecision,
     SwarmReplayRedactionSummary, SwarmReplayTrace, SwarmReplayUncertaintySummary,
-    build_swarm_replay_trace, replay_swarm_trace,
+    build_swarm_replay_trace, default_swarm_replay_baseline_policies,
+    evaluate_swarm_replay_baseline_policies, replay_swarm_trace,
 };
 use serde_json::{Value, json};
 
@@ -329,6 +331,17 @@ fn diagnostic_codes(report: &pi::swarm_replay::SwarmReplayReport) -> BTreeSet<St
         .iter()
         .map(|diagnostic| diagnostic.code.clone())
         .collect()
+}
+
+fn decision<'a>(
+    decisions: &'a [SwarmReplayPolicyDecision],
+    policy_id: &str,
+    action: &str,
+) -> Result<&'a SwarmReplayPolicyDecision, String> {
+    decisions
+        .iter()
+        .find(|item| item.policy_id == policy_id && item.action == action)
+        .ok_or_else(|| format!("missing policy decision {policy_id}/{action}"))
 }
 
 #[test]
@@ -811,5 +824,285 @@ fn replay_engine_classifies_agent_mail_outage_without_live_mail() -> TestResult 
     assert!(report.final_state.coordination.missing_agent_mail_evidence);
     assert!(diagnostic_codes(&report).contains("agent_mail_source_unavailable"));
     assert!(report.replay_guards.consumed_trace_only);
+    Ok(())
+}
+
+#[test]
+fn policy_runner_is_deterministic_and_advisory_only() -> TestResult {
+    let trace = trace_from_events(vec![replay_event(
+        "ready-bead",
+        1,
+        "2026-05-13T18:00:00Z",
+        "bead_lifecycle",
+        "beads_jsonl",
+        json!({
+            "bead_id": "bd-ready",
+            "to_status": "open",
+            "priority": 3,
+            "assignee": "unassigned"
+        }),
+    )]);
+    let replay = replay_swarm_trace(&trace)?;
+    let policies = default_swarm_replay_baseline_policies();
+
+    let first = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+    let second = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+
+    assert_eq!(first, second);
+    assert_eq!(first.schema, SWARM_REPLAY_POLICY_REPORT_SCHEMA);
+    assert!(first.policy_guards.advisory_only);
+    assert!(first.policy_guards.no_live_mutation);
+    assert!(first.policy_guards.no_network_required);
+    assert!(first.policy_guards.consumed_replay_report_only);
+    assert_eq!(
+        first.policy_ids,
+        [
+            "build_slot_protective",
+            "conservative_manual",
+            "existing_autopilot",
+            "rch_fanout_limited",
+            "stale_bead_reclaiming"
+        ]
+    );
+    assert!(first.decisions.iter().all(|item| item.advisory_only));
+    assert!(
+        first
+            .decisions
+            .iter()
+            .all(|item| !item.reason_codes.is_empty())
+    );
+    assert!(
+        first
+            .decisions
+            .iter()
+            .all(|item| !item.source_evidence.is_empty())
+    );
+    Ok(())
+}
+
+#[test]
+fn baseline_policies_disagree_when_agent_mail_is_unavailable() -> TestResult {
+    let trace = trace_from_events(vec![
+        uncertain_replay_event(
+            "missing-mail",
+            1,
+            "agent_message",
+            "agent_mail_archive",
+            &["source_missing"],
+            &["mail_thread_completeness"],
+            json!({
+                "thread_id": "unknown",
+                "sender": "unknown",
+                "recipients": [],
+                "importance": "unknown",
+                "ack_required": false
+            }),
+        ),
+        replay_event(
+            "ready-bead",
+            2,
+            "2026-05-13T18:01:00Z",
+            "bead_lifecycle",
+            "beads_jsonl",
+            json!({
+                "bead_id": "bd-mail-red",
+                "to_status": "open",
+                "priority": 2,
+                "assignee": "unassigned"
+            }),
+        ),
+    ]);
+    let replay = replay_swarm_trace(&trace)?;
+    let policies = [
+        SwarmReplayBaselinePolicy::ConservativeManual,
+        SwarmReplayBaselinePolicy::ExistingAutopilot,
+        SwarmReplayBaselinePolicy::StaleBeadReclaiming,
+    ];
+    let report = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+
+    let manual = decision(&report.decisions, "conservative_manual", "handoff")?;
+    assert_eq!(manual.target_id, "agent_mail");
+    assert!(
+        manual
+            .reason_codes
+            .contains(&"agent_mail_unavailable_requires_manual_coordination".to_string())
+    );
+
+    let autopilot = decision(&report.decisions, "existing_autopilot", "claim_bead")?;
+    assert_eq!(autopilot.target_id, "bd-mail-red");
+    assert!(autopilot.would_require_live_mutation);
+    assert!(
+        autopilot
+            .reason_codes
+            .contains(&"agent_mail_unavailable_continue_via_beads".to_string())
+    );
+
+    let reclaiming = decision(
+        &report.decisions,
+        "stale_bead_reclaiming",
+        "refresh_evidence",
+    )?;
+    assert_eq!(reclaiming.target_id, "agent_mail");
+    assert!(!reclaiming.would_require_live_mutation);
+    Ok(())
+}
+
+#[test]
+fn baseline_policies_disagree_under_rch_queue_pressure() -> TestResult {
+    let trace = trace_from_events(vec![
+        replay_event(
+            "ready-bead",
+            1,
+            "2026-05-13T18:00:00Z",
+            "bead_lifecycle",
+            "beads_jsonl",
+            json!({
+                "bead_id": "bd-rch-pressure",
+                "to_status": "open",
+                "priority": 2,
+                "assignee": "unassigned"
+            }),
+        ),
+        replay_event(
+            "rch-queued",
+            2,
+            "2026-05-13T18:01:00Z",
+            "rch_job_state",
+            "rch_queue_status",
+            json!({
+                "job_id": "rch-queued",
+                "state": "queued",
+                "worker": "worker-1",
+                "command": "rch exec -- cargo check --all-targets",
+                "queue_position": 4
+            }),
+        ),
+    ]);
+    let replay = replay_swarm_trace(&trace)?;
+    let policies = [
+        SwarmReplayBaselinePolicy::ExistingAutopilot,
+        SwarmReplayBaselinePolicy::RchFanoutLimited,
+        SwarmReplayBaselinePolicy::BuildSlotProtective,
+    ];
+    let report = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+
+    let autopilot = decision(&report.decisions, "existing_autopilot", "claim_bead")?;
+    assert_eq!(autopilot.target_id, "bd-rch-pressure");
+
+    let limited = decision(&report.decisions, "rch_fanout_limited", "back_off_cargo")?;
+    assert_eq!(limited.target_id, "rch-queued");
+    assert!(
+        limited
+            .reason_codes
+            .contains(&"rch_queue_position_positive".to_string())
+    );
+
+    let protective = decision(&report.decisions, "build_slot_protective", "back_off_cargo")?;
+    assert_eq!(protective.target_id, "rch-queued");
+    assert!(
+        protective
+            .reason_codes
+            .contains(&"rch_pressure_protects_build_capacity".to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn baseline_policies_disagree_under_dirty_worktree_contention() -> TestResult {
+    let trace = trace_from_events(vec![
+        replay_event(
+            "dirty-worktree",
+            1,
+            "2026-05-13T18:00:00Z",
+            "worktree_state",
+            "git_refs",
+            json!({
+                "head": "abc123",
+                "branch": "main",
+                "dirty": true,
+                "changed_paths": ["tests/release_evidence_gate.rs"]
+            }),
+        ),
+        replay_event(
+            "ready-bead",
+            2,
+            "2026-05-13T18:01:00Z",
+            "bead_lifecycle",
+            "beads_jsonl",
+            json!({
+                "bead_id": "bd-dirty",
+                "to_status": "open",
+                "priority": 3,
+                "assignee": "unassigned"
+            }),
+        ),
+    ]);
+    let replay = replay_swarm_trace(&trace)?;
+    let policies = default_swarm_replay_baseline_policies();
+    let report = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+
+    let worktree = replay
+        .final_state
+        .worktree
+        .as_ref()
+        .ok_or("missing worktree")?;
+    assert!(worktree.dirty);
+    assert_eq!(worktree.changed_paths, ["tests/release_evidence_gate.rs"]);
+
+    assert!(
+        decision(&report.decisions, "conservative_manual", "wait")?
+            .reason_codes
+            .contains(&"dirty_worktree_requires_manual_review".to_string())
+    );
+    assert!(
+        decision(&report.decisions, "existing_autopilot", "wait")?
+            .reason_codes
+            .contains(&"dirty_worktree_contention".to_string())
+    );
+    assert!(
+        decision(&report.decisions, "rch_fanout_limited", "wait")?
+            .reason_codes
+            .contains(&"dirty_worktree_avoid_validation_fanout".to_string())
+    );
+    assert_eq!(
+        decision(&report.decisions, "stale_bead_reclaiming", "claim_bead")?.target_id,
+        "bd-dirty"
+    );
+    Ok(())
+}
+
+#[test]
+fn stale_bead_reclaiming_flags_absent_assignee() -> TestResult {
+    let trace = trace_from_events(vec![replay_event(
+        "stale-bead",
+        1,
+        "2026-05-13T18:00:00Z",
+        "bead_lifecycle",
+        "beads_jsonl",
+        json!({
+            "bead_id": "bd-stale",
+            "to_status": "in_progress",
+            "priority": 1,
+            "assignee": "LongGoneAgent"
+        }),
+    )]);
+    let replay = replay_swarm_trace(&trace)?;
+    let report = evaluate_swarm_replay_baseline_policies(
+        &replay,
+        &[SwarmReplayBaselinePolicy::StaleBeadReclaiming],
+    )?;
+
+    let reclaim = decision(
+        &report.decisions,
+        "stale_bead_reclaiming",
+        "reclaim_stale_bead",
+    )?;
+    assert_eq!(reclaim.target_id, "bd-stale");
+    assert!(reclaim.would_require_live_mutation);
+    assert!(
+        reclaim
+            .reason_codes
+            .contains(&"in_progress_assignee_absent_from_replay_agents".to_string())
+    );
     Ok(())
 }

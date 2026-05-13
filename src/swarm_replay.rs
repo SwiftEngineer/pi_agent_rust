@@ -355,6 +355,7 @@ pub struct SwarmReplayState {
     pub validation_gates: BTreeMap<String, SwarmReplayValidationGateState>,
     pub runpack_recommendations: BTreeMap<String, SwarmReplayRunpackRecommendationState>,
     pub operator_handoffs: BTreeMap<String, SwarmReplayOperatorHandoffState>,
+    pub worktree: Option<SwarmReplayWorktreeState>,
     pub coordination: SwarmReplayCoordinationState,
 }
 
@@ -369,6 +370,7 @@ impl Default for SwarmReplayState {
             validation_gates: BTreeMap::new(),
             runpack_recommendations: BTreeMap::new(),
             operator_handoffs: BTreeMap::new(),
+            worktree: None,
             coordination: SwarmReplayCoordinationState {
                 agent_mail_available: true,
                 missing_agent_mail_evidence: false,
@@ -455,11 +457,611 @@ pub struct SwarmReplayOperatorHandoffState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayWorktreeState {
+    pub head: String,
+    pub branch: String,
+    pub dirty: bool,
+    pub changed_paths: Vec<String>,
+    pub last_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmReplayCoordinationState {
     pub agent_mail_available: bool,
     pub missing_agent_mail_evidence: bool,
     pub reservation_conflict_count: u64,
     pub last_operator_action: Option<String>,
+}
+
+/// Schema emitted by the replay policy evaluator.
+pub const SWARM_REPLAY_POLICY_REPORT_SCHEMA: &str = "pi.swarm.policy_report.v1";
+
+/// Offline report comparing replay policy decisions over one replay output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPolicyReport {
+    pub schema: String,
+    pub trace_id: String,
+    pub policy_ids: Vec<String>,
+    pub decision_count: u64,
+    pub decisions: Vec<SwarmReplayPolicyDecision>,
+    pub policy_guards: SwarmReplayPolicyGuards,
+}
+
+/// Guards proving policy evaluation stayed advisory and replay-only.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPolicyGuards {
+    pub advisory_only: bool,
+    pub no_live_mutation: bool,
+    pub no_network_required: bool,
+    pub consumed_replay_report_only: bool,
+}
+
+/// One advisory policy decision for one replay snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPolicyDecision {
+    pub policy_id: String,
+    pub logical_clock: u64,
+    pub event_id: String,
+    pub action: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub reason_codes: Vec<String>,
+    pub source_evidence: Vec<SwarmReplayPolicyEvidenceRef>,
+    pub expected_risk: String,
+    pub would_require_live_mutation: bool,
+    pub advisory_only: bool,
+}
+
+/// Source evidence attached to an advisory policy decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPolicyEvidenceRef {
+    pub evidence_kind: String,
+    pub evidence_id: String,
+    pub event_id: String,
+    pub logical_clock: u64,
+    pub detail: String,
+}
+
+/// Context supplied to policy adapters for each replay snapshot.
+pub struct SwarmReplayPolicyContext<'a> {
+    pub trace_id: &'a str,
+    pub final_state: &'a SwarmReplayState,
+    pub diagnostics: &'a [SwarmReplayDiagnostic],
+}
+
+/// Advisory replay-time policy adapter.
+pub trait SwarmReplayPolicyAdapter {
+    /// Stable policy identifier used in reports.
+    fn policy_id(&self) -> &'static str;
+
+    /// Evaluate one replay snapshot without mutating live systems.
+    fn evaluate_snapshot(
+        &self,
+        snapshot: &SwarmReplayStateSnapshot,
+        context: &SwarmReplayPolicyContext<'_>,
+    ) -> Vec<SwarmReplayPolicyDecision>;
+}
+
+/// Built-in baseline replay policies used for comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayBaselinePolicy {
+    ConservativeManual,
+    ExistingAutopilot,
+    RchFanoutLimited,
+    StaleBeadReclaiming,
+    BuildSlotProtective,
+}
+
+impl SwarmReplayPolicyAdapter for SwarmReplayBaselinePolicy {
+    fn policy_id(&self) -> &'static str {
+        match self {
+            Self::ConservativeManual => "conservative_manual",
+            Self::ExistingAutopilot => "existing_autopilot",
+            Self::RchFanoutLimited => "rch_fanout_limited",
+            Self::StaleBeadReclaiming => "stale_bead_reclaiming",
+            Self::BuildSlotProtective => "build_slot_protective",
+        }
+    }
+
+    fn evaluate_snapshot(
+        &self,
+        snapshot: &SwarmReplayStateSnapshot,
+        context: &SwarmReplayPolicyContext<'_>,
+    ) -> Vec<SwarmReplayPolicyDecision> {
+        match self {
+            Self::ConservativeManual => conservative_manual_decisions(self.policy_id(), snapshot),
+            Self::ExistingAutopilot => existing_autopilot_decisions(self.policy_id(), snapshot),
+            Self::RchFanoutLimited => rch_fanout_limited_decisions(self.policy_id(), snapshot),
+            Self::StaleBeadReclaiming => {
+                stale_bead_reclaiming_decisions(self.policy_id(), snapshot, context)
+            }
+            Self::BuildSlotProtective => {
+                build_slot_protective_decisions(self.policy_id(), snapshot)
+            }
+        }
+    }
+}
+
+/// Return the full built-in replay policy set in deterministic order.
+pub const fn default_swarm_replay_baseline_policies() -> [SwarmReplayBaselinePolicy; 5] {
+    [
+        SwarmReplayBaselinePolicy::ConservativeManual,
+        SwarmReplayBaselinePolicy::ExistingAutopilot,
+        SwarmReplayBaselinePolicy::RchFanoutLimited,
+        SwarmReplayBaselinePolicy::StaleBeadReclaiming,
+        SwarmReplayBaselinePolicy::BuildSlotProtective,
+    ]
+}
+
+/// Evaluate the built-in baseline policies over a replay report.
+pub fn evaluate_swarm_replay_baseline_policies(
+    report: &SwarmReplayReport,
+    policies: &[SwarmReplayBaselinePolicy],
+) -> Result<SwarmReplayPolicyReport> {
+    let adapters = policies
+        .iter()
+        .map(|policy| policy as &dyn SwarmReplayPolicyAdapter)
+        .collect::<Vec<_>>();
+    evaluate_swarm_replay_policies(report, &adapters)
+}
+
+/// Evaluate advisory replay policy adapters over a replay report.
+pub fn evaluate_swarm_replay_policies(
+    report: &SwarmReplayReport,
+    policies: &[&dyn SwarmReplayPolicyAdapter],
+) -> Result<SwarmReplayPolicyReport> {
+    if report.schema != SWARM_REPLAY_REPORT_SCHEMA {
+        return Err(Error::validation(format!(
+            "unsupported swarm replay report schema {}",
+            report.schema
+        )));
+    }
+
+    let context = SwarmReplayPolicyContext {
+        trace_id: report.trace_id.as_str(),
+        final_state: &report.final_state,
+        diagnostics: &report.diagnostics,
+    };
+    let mut policy_ids = BTreeSet::new();
+    let mut decisions = Vec::new();
+    for policy in policies {
+        policy_ids.insert(policy.policy_id().to_string());
+        for snapshot in &report.snapshots {
+            decisions.extend(policy.evaluate_snapshot(snapshot, &context));
+        }
+    }
+    decisions.sort_by(|left, right| {
+        left.policy_id
+            .cmp(&right.policy_id)
+            .then_with(|| left.logical_clock.cmp(&right.logical_clock))
+            .then_with(|| left.action.cmp(&right.action))
+            .then_with(|| left.target_kind.cmp(&right.target_kind))
+            .then_with(|| left.target_id.cmp(&right.target_id))
+            .then_with(|| left.reason_codes.cmp(&right.reason_codes))
+    });
+
+    Ok(SwarmReplayPolicyReport {
+        schema: SWARM_REPLAY_POLICY_REPORT_SCHEMA.to_string(),
+        trace_id: report.trace_id.clone(),
+        policy_ids: policy_ids.into_iter().collect(),
+        decision_count: u64::try_from(decisions.len()).unwrap_or(u64::MAX),
+        decisions,
+        policy_guards: SwarmReplayPolicyGuards {
+            advisory_only: true,
+            no_live_mutation: true,
+            no_network_required: true,
+            consumed_replay_report_only: true,
+        },
+    })
+}
+
+fn conservative_manual_decisions(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+) -> Vec<SwarmReplayPolicyDecision> {
+    let state = &snapshot.state;
+    if worktree_is_dirty(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait",
+                target_kind: "worktree",
+                target_id: "current",
+                reason_codes: &["dirty_worktree_requires_manual_review"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "dirty worktree evidence requires operator review before new work",
+            },
+        )];
+    }
+    if mail_is_unavailable(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "handoff",
+                target_kind: "coordination",
+                target_id: "agent_mail",
+                reason_codes: &["agent_mail_unavailable_requires_manual_coordination"],
+                expected_risk: "high",
+                would_require_live_mutation: false,
+                evidence_detail: "Agent Mail evidence is unavailable; avoid autonomous claims",
+            },
+        )];
+    }
+    if let Some(slot) = active_build_slot(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait",
+                target_kind: "build_slot",
+                target_id: &slot.slot,
+                reason_codes: &["active_build_slot_requires_operator_review"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "active build slot is already held",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["open"]) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "operator_review",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["ready_bead_available_but_manual_policy_does_not_claim"],
+                expected_risk: "low",
+                would_require_live_mutation: false,
+                evidence_detail: "ready bead exists; conservative policy leaves claim to operator",
+            },
+        )];
+    }
+    Vec::new()
+}
+
+fn existing_autopilot_decisions(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+) -> Vec<SwarmReplayPolicyDecision> {
+    let state = &snapshot.state;
+    if worktree_is_dirty(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait",
+                target_kind: "worktree",
+                target_id: "current",
+                reason_codes: &["dirty_worktree_contention"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "dirty worktree suggests another lane is active",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["open"]) {
+        let reason = if mail_is_unavailable(state) {
+            "agent_mail_unavailable_continue_via_beads"
+        } else {
+            "ready_bead_available"
+        };
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "claim_bead",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &[reason],
+                expected_risk: "medium",
+                would_require_live_mutation: true,
+                evidence_detail: "autopilot baseline would claim the next ready bead",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["in_progress"]) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "continue_current_work",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["in_progress_work_observed"],
+                expected_risk: "low",
+                would_require_live_mutation: false,
+                evidence_detail: "work is already in progress in the replay state",
+            },
+        )];
+    }
+    Vec::new()
+}
+
+fn rch_fanout_limited_decisions(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+) -> Vec<SwarmReplayPolicyDecision> {
+    let state = &snapshot.state;
+    if let Some(job) = pressured_rch_job(state) {
+        let reason = if job.stale_progress {
+            "rch_progress_stale"
+        } else {
+            "rch_queue_position_positive"
+        };
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "back_off_cargo",
+                target_kind: "rch_job",
+                target_id: &job.job_id,
+                reason_codes: &[reason],
+                expected_risk: "high",
+                would_require_live_mutation: false,
+                evidence_detail: "RCH pressure means this policy would avoid starting more cargo work",
+            },
+        )];
+    }
+    if worktree_is_dirty(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait",
+                target_kind: "worktree",
+                target_id: "current",
+                reason_codes: &["dirty_worktree_avoid_validation_fanout"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "dirty worktree blocks parallel validation fanout",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["open", "in_progress"]) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "split_validation",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["rch_capacity_available_for_bounded_validation"],
+                expected_risk: "medium",
+                would_require_live_mutation: true,
+                evidence_detail: "policy would split validation into bounded RCH-backed slices",
+            },
+        )];
+    }
+    Vec::new()
+}
+
+fn stale_bead_reclaiming_decisions(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+    context: &SwarmReplayPolicyContext<'_>,
+) -> Vec<SwarmReplayPolicyDecision> {
+    let state = &snapshot.state;
+    if let Some(bead) = stale_in_progress_bead(state, context.final_state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "reclaim_stale_bead",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["in_progress_assignee_absent_from_replay_agents"],
+                expected_risk: "high",
+                would_require_live_mutation: true,
+                evidence_detail: "assigned in-progress bead has no matching active agent evidence in the trace",
+            },
+        )];
+    }
+    if mail_is_unavailable(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "refresh_evidence",
+                target_kind: "coordination",
+                target_id: "agent_mail",
+                reason_codes: &["agent_mail_missing_prevents_confident_reclaim"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "missing Agent Mail evidence prevents confident stale-work reclaim",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["open"]) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "claim_bead",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["ready_bead_available_after_stale_scan"],
+                expected_risk: "medium",
+                would_require_live_mutation: true,
+                evidence_detail: "no stale in-progress bead was found, so policy would claim ready work",
+            },
+        )];
+    }
+    Vec::new()
+}
+
+fn build_slot_protective_decisions(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+) -> Vec<SwarmReplayPolicyDecision> {
+    let state = &snapshot.state;
+    if let Some(slot) = active_build_slot(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait_for_build_slot",
+                target_kind: "build_slot",
+                target_id: &slot.slot,
+                reason_codes: &["active_build_slot_protected"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "policy protects an already-held build slot from additional fanout",
+            },
+        )];
+    }
+    if let Some(job) = pressured_rch_job(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "back_off_cargo",
+                target_kind: "rch_job",
+                target_id: &job.job_id,
+                reason_codes: &["rch_pressure_protects_build_capacity"],
+                expected_risk: "high",
+                would_require_live_mutation: false,
+                evidence_detail: "RCH pressure means build capacity should be protected",
+            },
+        )];
+    }
+    if worktree_is_dirty(state) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "wait",
+                target_kind: "worktree",
+                target_id: "current",
+                reason_codes: &["dirty_worktree_protect_existing_lane"],
+                expected_risk: "medium",
+                would_require_live_mutation: false,
+                evidence_detail: "dirty worktree indicates an existing lane should finish first",
+            },
+        )];
+    }
+    if let Some(bead) = best_bead_with_status(state, &["open", "in_progress"]) {
+        return vec![policy_decision(
+            policy_id,
+            snapshot,
+            PolicyDecisionSpec {
+                action: "acquire_build_slot_for_validation",
+                target_kind: "bead",
+                target_id: &bead.bead_id,
+                reason_codes: &["build_slot_available_for_bounded_validation"],
+                expected_risk: "medium",
+                would_require_live_mutation: true,
+                evidence_detail: "policy would acquire a build slot before validation work",
+            },
+        )];
+    }
+    Vec::new()
+}
+
+#[derive(Clone, Copy)]
+struct PolicyDecisionSpec<'a> {
+    action: &'a str,
+    target_kind: &'a str,
+    target_id: &'a str,
+    reason_codes: &'a [&'a str],
+    expected_risk: &'a str,
+    would_require_live_mutation: bool,
+    evidence_detail: &'a str,
+}
+
+fn policy_decision(
+    policy_id: &str,
+    snapshot: &SwarmReplayStateSnapshot,
+    spec: PolicyDecisionSpec<'_>,
+) -> SwarmReplayPolicyDecision {
+    SwarmReplayPolicyDecision {
+        policy_id: policy_id.to_string(),
+        logical_clock: snapshot.logical_clock,
+        event_id: snapshot.event_id.clone(),
+        action: spec.action.to_string(),
+        target_kind: spec.target_kind.to_string(),
+        target_id: spec.target_id.to_string(),
+        reason_codes: spec.reason_codes.iter().map(ToString::to_string).collect(),
+        source_evidence: vec![SwarmReplayPolicyEvidenceRef {
+            evidence_kind: "snapshot".to_string(),
+            evidence_id: spec.target_id.to_string(),
+            event_id: snapshot.event_id.clone(),
+            logical_clock: snapshot.logical_clock,
+            detail: spec.evidence_detail.to_string(),
+        }],
+        expected_risk: spec.expected_risk.to_string(),
+        would_require_live_mutation: spec.would_require_live_mutation,
+        advisory_only: true,
+    }
+}
+
+fn worktree_is_dirty(state: &SwarmReplayState) -> bool {
+    state
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| worktree.dirty)
+}
+
+const fn mail_is_unavailable(state: &SwarmReplayState) -> bool {
+    !state.coordination.agent_mail_available || state.coordination.missing_agent_mail_evidence
+}
+
+fn active_build_slot(state: &SwarmReplayState) -> Option<&SwarmReplayBuildSlotState> {
+    state.build_slots.values().find(|slot| {
+        matches!(
+            slot.state.as_str(),
+            "active" | "acquired" | "held" | "running"
+        )
+    })
+}
+
+fn pressured_rch_job(state: &SwarmReplayState) -> Option<&SwarmReplayRchJobState> {
+    state
+        .rch_jobs
+        .values()
+        .find(|job| job.queue_position > 0 || job.stale_progress)
+}
+
+fn best_bead_with_status<'a>(
+    state: &'a SwarmReplayState,
+    statuses: &[&str],
+) -> Option<&'a SwarmReplayBeadState> {
+    state
+        .beads
+        .values()
+        .filter(|bead| statuses.iter().any(|status| *status == bead.status))
+        .min_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.bead_id.cmp(&right.bead_id))
+        })
+}
+
+fn stale_in_progress_bead<'a>(
+    state: &'a SwarmReplayState,
+    final_state: &SwarmReplayState,
+) -> Option<&'a SwarmReplayBeadState> {
+    state
+        .beads
+        .values()
+        .filter(|bead| bead.status == "in_progress")
+        .filter(|bead| {
+            let assignee = bead.assignee.trim();
+            !assignee.is_empty()
+                && assignee != "unassigned"
+                && !state.agents.contains_key(assignee)
+                && !final_state.agents.contains_key(assignee)
+        })
+        .min_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.bead_id.cmp(&right.bead_id))
+        })
 }
 
 /// Replay a normalized trace into deterministic state snapshots and diagnostics.
@@ -581,7 +1183,8 @@ fn apply_replay_event(
         "cargo_gate_result" => apply_cargo_gate_event(event, logical_clock, state, diagnostics),
         "runpack_recommendation" => apply_runpack_recommendation(event, state),
         "operator_handoff" => apply_operator_handoff(event, state),
-        "worktree_state" | "doctor_finding" | "validation_artifact" => {}
+        "worktree_state" => apply_worktree_event(event, state),
+        "doctor_finding" | "validation_artifact" => {}
         _ => diagnostics.push(replay_diagnostic(
             "unknown_event_type_ignored",
             "info",
@@ -868,6 +1471,20 @@ fn apply_operator_handoff(event: &SwarmReplayEvent, state: &mut SwarmReplayState
             last_event_id: event.event_id.clone(),
         },
     );
+}
+
+fn apply_worktree_event(event: &SwarmReplayEvent, state: &mut SwarmReplayState) {
+    state.worktree = Some(SwarmReplayWorktreeState {
+        head: payload_string(&event.payload, &["head"], "unknown"),
+        branch: payload_string(&event.payload, &["branch"], "unknown"),
+        dirty: event
+            .payload
+            .get("dirty")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        changed_paths: payload_string_array(&event.payload, "changed_paths"),
+        last_event_id: event.event_id.clone(),
+    });
 }
 
 fn emit_end_of_trace_invariants(
