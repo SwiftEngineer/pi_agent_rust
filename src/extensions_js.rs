@@ -10178,15 +10178,23 @@ const __pi_vfs = (() => {
     fds: new Map(),
     nextFd: 100,
   };
+  const extensionTmpRoot = "/__pi_extension_tmp";
 
   function checkWriteAccess(resolved) {
+    const normalized = normalizePath(resolved);
+    if (isCurrentExtensionTempPath(normalized)) {
+      return;
+    }
     if (typeof globalThis.__pi_host_check_write_access === "function") {
-      globalThis.__pi_host_check_write_access(resolved);
+      globalThis.__pi_host_check_write_access(normalized);
     }
   }
 
   function checkWorkspaceWriteAccess(resolved) {
     const normalized = normalizePath(resolved);
+    if (isCurrentExtensionTempPath(normalized)) {
+      return;
+    }
     const cwd = normalizePath(
       globalThis.process && typeof globalThis.process.cwd === "function"
         ? globalThis.process.cwd()
@@ -10196,6 +10204,68 @@ const __pi_vfs = (() => {
       throw new Error("host write denied: path outside extension root");
     }
     checkWriteAccess(normalized);
+  }
+
+  function currentExtensionId() {
+    if (typeof __pi_current_extension_id === "undefined") {
+      return "";
+    }
+    return String(__pi_current_extension_id || "").trim();
+  }
+
+  function encodeExtensionTempSegment(raw) {
+    let out = "";
+    for (const ch of String(raw || "")) {
+      if (/^[A-Za-z0-9._-]$/.test(ch)) {
+        out += ch;
+      } else {
+        out += "_" + ch.codePointAt(0).toString(16) + "_";
+      }
+    }
+    return out || "anonymous";
+  }
+
+  function currentExtensionTempRoot() {
+    const id = currentExtensionId();
+    if (!id) {
+      return "";
+    }
+    return `${extensionTmpRoot}/${encodeExtensionTempSegment(id)}`;
+  }
+
+  function isAbsoluteTmpInput(input) {
+    const raw = String(input ?? "").replace(/\\/g, "/");
+    return raw === "/tmp" || raw.startsWith("/tmp/");
+  }
+
+  function mapExtensionTempPath(input, normalized) {
+    const root = currentExtensionTempRoot();
+    if (!root || !isAbsoluteTmpInput(input)) {
+      return normalized;
+    }
+    if (normalized !== "/tmp" && !normalized.startsWith("/tmp/")) {
+      return normalized;
+    }
+    return `${root}${normalized.slice("/tmp".length)}`;
+  }
+
+  function unmapExtensionTempPath(normalized) {
+    const root = currentExtensionTempRoot();
+    if (!root) {
+      return normalized;
+    }
+    if (normalized === root) {
+      return "/tmp";
+    }
+    if (normalized.startsWith(`${root}/`)) {
+      return `/tmp${normalized.slice(root.length)}`;
+    }
+    return normalized;
+  }
+
+  function isCurrentExtensionTempPath(normalized) {
+    const root = currentExtensionTempRoot();
+    return !!root && (normalized === root || normalized.startsWith(`${root}/`));
   }
 
   function normalizePath(input) {
@@ -10314,7 +10384,7 @@ const __pi_vfs = (() => {
   }
 
   function resolvePath(path, followSymlinks = true) {
-    let normalized = normalizePath(path);
+    let normalized = mapExtensionTempPath(path, normalizePath(path));
     if (!followSymlinks) {
       return normalized;
     }
@@ -10439,7 +10509,7 @@ const __pi_vfs = (() => {
   }
 
   function makeStat(path, followSymlinks = true) {
-    const normalized = normalizePath(path);
+    const normalized = followSymlinks ? resolvePath(path, true) : resolvePath(path, false);
     const linkTarget = state.symlinks.get(normalized);
     if (linkTarget !== undefined) {
       if (!followSymlinks) {
@@ -10478,7 +10548,7 @@ const __pi_vfs = (() => {
     const isDir = state.dirs.has(normalized);
     let bytes = state.files.get(normalized);
     let hostStat = null;
-    if (!isDir && bytes === undefined && typeof globalThis.__pi_host_stat_sync === "function") {
+    if (!isDir && bytes === undefined && !isCurrentExtensionTempPath(normalized) && typeof globalThis.__pi_host_stat_sync === "function") {
       try {
         hostStat = JSON.parse(globalThis.__pi_host_stat_sync(normalized, !!followSymlinks));
       } catch (e) {
@@ -10537,6 +10607,9 @@ const __pi_vfs = (() => {
   state.makeDirent = makeDirent;
   state.makeStat = makeStat;
   state.resolvePath = resolvePath;
+  state.mapExtensionTempPath = mapExtensionTempPath;
+  state.unmapExtensionTempPath = unmapExtensionTempPath;
+  state.isCurrentExtensionTempPath = isCurrentExtensionTempPath;
   state.checkWriteAccess = checkWriteAccess;
   state.checkWorkspaceWriteAccess = checkWorkspaceWriteAccess;
   state.parseOpenFlags = parseOpenFlags;
@@ -10559,7 +10632,7 @@ export function readFileSync(path, encoding) {
   const resolved = __pi_vfs.resolvePath(path, true);
   let bytes = __pi_vfs.files.get(resolved);
   let hostError;
-  if (!bytes && typeof globalThis.__pi_host_read_file_sync === "function") {
+  if (!bytes && !__pi_vfs.isCurrentExtensionTempPath(resolved) && typeof globalThis.__pi_host_read_file_sync === "function") {
     try {
       const content = globalThis.__pi_host_read_file_sync(resolved);
       // Host read payload is base64-encoded to preserve binary file fidelity.
@@ -10621,7 +10694,7 @@ export function readdirSync(path, opts) {
   }
 
   let hostError;
-  if (typeof globalThis.__pi_host_read_dir_sync === "function") {
+  if (!__pi_vfs.isCurrentExtensionTempPath(resolved) && typeof globalThis.__pi_host_read_dir_sync === "function") {
     try {
       const hostEntries = JSON.parse(globalThis.__pi_host_read_dir_sync(resolved));
       foundDir = true;
@@ -10669,15 +10742,16 @@ export function lstatSync(path) { return __pi_vfs.makeStat(path, false); }
 export function mkdtempSync(prefix, _opts) {
   const p = String(prefix ?? "/tmp/tmp-");
   const out = `${p}${Date.now().toString(36)}`;
-  __pi_vfs.checkWorkspaceWriteAccess(__pi_vfs.normalizePath(out));
-  __pi_vfs.ensureDir(out);
-  return out;
+  const resolved = __pi_vfs.resolvePath(out, true);
+  __pi_vfs.checkWorkspaceWriteAccess(resolved);
+  __pi_vfs.ensureDir(resolved);
+  return __pi_vfs.normalizePath(out);
 }
 export function realpathSync(path, _opts) {
-  return __pi_vfs.resolvePath(path, true);
+  return __pi_vfs.unmapExtensionTempPath(__pi_vfs.resolvePath(path, true));
 }
 export function unlinkSync(path) {
-  const normalized = __pi_vfs.normalizePath(path);
+  const normalized = __pi_vfs.resolvePath(path, false);
   __pi_vfs.checkWriteAccess(normalized);
   if (__pi_vfs.symlinks.delete(normalized)) {
     return;
@@ -10687,7 +10761,7 @@ export function unlinkSync(path) {
   }
 }
 export function rmdirSync(path, _opts) {
-  const normalized = __pi_vfs.normalizePath(path);
+  const normalized = __pi_vfs.resolvePath(path, false);
   __pi_vfs.checkWriteAccess(normalized);
   if (normalized === "/") {
     throw new Error("EBUSY: resource busy or locked, rmdir '/'");
@@ -10715,7 +10789,7 @@ export function rmdirSync(path, _opts) {
   }
 }
 export function rmSync(path, opts) {
-  const normalized = __pi_vfs.normalizePath(path);
+  const normalized = __pi_vfs.resolvePath(path, false);
   __pi_vfs.checkWriteAccess(normalized);
   if (__pi_vfs.files.has(normalized)) {
     __pi_vfs.files.delete(normalized);
@@ -10757,8 +10831,8 @@ export function copyFileSync(src, dest, _mode) {
   writeFileSync(dest, readFileSync(src));
 }
 export function renameSync(oldPath, newPath) {
-  const src = __pi_vfs.normalizePath(oldPath);
-  const dst = __pi_vfs.normalizePath(newPath);
+  const src = __pi_vfs.resolvePath(oldPath, false);
+  const dst = __pi_vfs.resolvePath(newPath, false);
   __pi_vfs.checkWriteAccess(src);
   __pi_vfs.checkWriteAccess(dst);
   const linkTarget = __pi_vfs.symlinks.get(src);
@@ -10780,7 +10854,7 @@ export function renameSync(oldPath, newPath) {
 export function mkdirSync(path, _opts) {
   const resolved = __pi_vfs.resolvePath(path, true);
   __pi_vfs.checkWriteAccess(resolved);
-  __pi_vfs.ensureDir(path);
+  __pi_vfs.ensureDir(resolved);
   return __pi_vfs.normalizePath(path);
 }
 export function accessSync(path, _mode) {
@@ -10811,7 +10885,7 @@ export function readlinkSync(path, opts) {
   return target;
 }
 export function symlinkSync(target, path, _type) {
-  const normalized = __pi_vfs.normalizePath(path);
+  const normalized = __pi_vfs.resolvePath(path, false);
   __pi_vfs.checkWriteAccess(normalized);
   const parent = __pi_vfs.dirname(normalized);
   if (!__pi_vfs.dirs.has(parent)) {

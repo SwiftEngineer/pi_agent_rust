@@ -231,12 +231,34 @@ fn vfs_write_with_traversal_is_denied() {
 }
 
 #[test]
-fn vfs_mkdir_outside_workspace_is_denied() {
+fn vfs_mkdir_absolute_tmp_is_scoped_virtual() {
+    let unique_dir = format!("/tmp/pi_scoped_{}_dir", std::process::id());
+    let result = eval_fs(&format!(
+        r"(() => {{
+        try {{
+            fs.mkdirSync('{unique_dir}', {{ recursive: true }});
+            fs.writeFileSync('{unique_dir}/result.txt', 'scoped');
+            return fs.readFileSync('{unique_dir}/result.txt', 'utf8') + ':' + fs.existsSync('{unique_dir}');
+        }} catch (e) {{
+            return 'ERROR:' + e.message;
+        }}
+    }})()"
+    ));
+    assert_eq!(result, "scoped:true");
+
+    assert!(
+        !std::path::Path::new(&unique_dir).exists(),
+        "absolute /tmp writes must stay in the extension VFS namespace"
+    );
+}
+
+#[test]
+fn scoped_tmp_namespace_rejects_direct_peer_namespace() {
     let result = eval_fs(
         r"(() => {
         try {
-            fs.mkdirSync('/tmp/vfs_escape_test_dir', { recursive: true });
-            return 'created';
+            fs.writeFileSync('/__pi_extension_tmp/peer/result.txt', 'escape');
+            return 'wrote';
         } catch (e) {
             return 'ERROR:' + e.message;
         }
@@ -244,12 +266,7 @@ fn vfs_mkdir_outside_workspace_is_denied() {
     );
     assert!(
         result.contains("host write denied"),
-        "expected mkdir denial, got: {result}"
-    );
-
-    assert!(
-        !std::path::Path::new("/tmp/vfs_escape_test_dir").exists(),
-        "VFS mkdir should NOT create a real directory"
+        "expected peer namespace denial, got: {result}"
     );
 }
 
@@ -383,7 +400,7 @@ fn exists_sync_traversal_probe() {
 
 #[test]
 fn write_file_absolute_path_outside_workspace_is_denied() {
-    let unique_name = format!("/tmp/vfs_escape_abs_{}", std::process::id());
+    let unique_name = format!("/etc/vfs_escape_abs_{}", std::process::id());
     let result = eval_fs(&format!(
         r#"(() => {{
         try {{
