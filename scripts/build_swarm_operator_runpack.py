@@ -2339,16 +2339,24 @@ def extract_rch_sync_bottlenecks(source: SourcePayload) -> list[dict[str, Any]]:
     payload = source.payload if isinstance(source.payload, dict) else {}
     violations = payload.get("violations") if isinstance(payload.get("violations"), list) else []
     status = payload.get("status")
+    mode = payload.get("mode") if isinstance(payload.get("mode"), str) else "preflight"
     if not violations and status in {None, "pass", "ok"}:
         return []
+    first_violation = violations[0] if violations and isinstance(violations[0], dict) else {}
     return [
         {
             "surface": "rch_sync_retrieval",
             "source": source.id,
             "label": "rch_artifact_sync",
-            "signal": "artifact_sync_preflight",
+            "signal": "artifact_sync_postcondition"
+            if mode == "postcondition"
+            else "artifact_sync_preflight",
+            "mode": mode,
             "status": status,
             "violation_count": len(violations),
+            "path": first_violation.get("path"),
+            "reason": first_violation.get("reason"),
+            "recommended_action": first_violation.get("recommended_action"),
         }
     ]
 
@@ -2452,7 +2460,10 @@ def build_bottleneck_attribution(
         surface_id: summarize_surface(surface_id, source_ids, classifications_by_id)
         for surface_id, source_ids in BOTTLENECK_SURFACES.items()
     }
-    bottlenecks = extract_core_bottlenecks(runpack)
+    bottlenecks: list[dict[str, Any]] = []
+    if by_id.get("rch_artifact_sync") is not None:
+        bottlenecks.extend(extract_rch_sync_bottlenecks(by_id["rch_artifact_sync"]))
+    bottlenecks.extend(extract_core_bottlenecks(runpack))
     if by_id.get("tail_latency") is not None:
         bottlenecks.extend(extract_tail_latency_bottlenecks(by_id["tail_latency"], max_items))
     if by_id.get("flight_recorder") is not None:
@@ -2461,8 +2472,6 @@ def build_bottleneck_attribution(
         bottlenecks.extend(extract_hostcall_bottlenecks(by_id["hostcall_swarm_profile"], max_items))
     if by_id.get("session_recovery_swarm_profile") is not None:
         bottlenecks.extend(extract_session_bottlenecks(by_id["session_recovery_swarm_profile"]))
-    if by_id.get("rch_artifact_sync") is not None:
-        bottlenecks.extend(extract_rch_sync_bottlenecks(by_id["rch_artifact_sync"]))
     blocked_sources = [
         item["id"] for item in classifications if item.get("classification") == "blocker"
     ]
@@ -8437,6 +8446,37 @@ def run_self_test() -> int:
             item["id"] == "session_recovery_swarm_profile"
             and item["classification"] == "fresh"
             for item in dashboard["input_classification"]
+        )
+        postcondition_sync_path = write_json(
+            workspace / "rch-artifact-sync-postcondition.json",
+            {
+                "schema": RCH_ARTIFACT_SYNC_SCHEMA,
+                "generated_at": generated_at,
+                "mode": "postcondition",
+                "status": "fail",
+                "postconditions": [
+                    {
+                        "path": "tests/full_suite_gate/full_suite_verdict.json",
+                        "updated": False,
+                    }
+                ],
+                "violations": [
+                    {
+                        "path": "tests/full_suite_gate/full_suite_verdict.json",
+                        "reason": "generated_artifact_not_updated",
+                        "recommended_action": "Rerun locally or fix RCH artifact retrieval/writeback.",
+                    }
+                ],
+            },
+        )
+        postcondition_args = argparse.Namespace(**vars(args))
+        postcondition_args.rch_artifact_sync_json = postcondition_sync_path
+        postcondition_runpack = build_runpack(postcondition_args)
+        assert any(
+            item.get("signal") == "artifact_sync_postcondition"
+            and item.get("path") == "tests/full_suite_gate/full_suite_verdict.json"
+            and item.get("reason") == "generated_artifact_not_updated"
+            for item in postcondition_runpack["bottleneck_attribution"]["bottlenecks"]
         )
         scorecard = runpack["swarm_scale_safety_scorecard"]
         assert scorecard["schema"] == SAFETY_SCORECARD_SCHEMA

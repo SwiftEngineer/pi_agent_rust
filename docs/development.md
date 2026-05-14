@@ -99,6 +99,25 @@ the exact ignore line that caused a failure. Root artifact excludes must stay
 anchored as `/artifacts/` and `/artifacts/**` so they do not hide nested
 test-owned artifact directories.
 
+For RCH gates that generate checked-in evidence, also bracket the remote command
+with a generated-artifact postcondition:
+
+```bash
+before_manifest="/data/tmp/pi_agent_rust_cargo/${USER:-agent}/must-pass-before.json"
+python3 scripts/check_rch_artifact_sync.py --mode postcondition \
+  --generated-artifact tests/ext_conformance/reports/gate/must_pass_gate_verdict.json \
+  --write-before-manifest "$before_manifest" --json
+rch exec -- cargo test --test ext_conformance_generated --features ext-conformance -- conformance_must_pass_gate --nocapture --exact
+python3 scripts/check_rch_artifact_sync.py --mode postcondition \
+  --generated-artifact tests/ext_conformance/reports/gate/must_pass_gate_verdict.json \
+  --before-manifest "$before_manifest" --json
+```
+
+The postcondition compares pre/post mtimes and checksums. It fails closed when a
+remote generator completed but the local evidence file did not change, naming
+the stale artifact and recommending a local rerun or RCH retrieval/writeback
+fix.
+
 ### Conformance Tests
 
 Conformance tests validate that Pi behaves identically to the legacy TypeScript implementation for tools, extensions, and core logic. Tests are organized in tiers:

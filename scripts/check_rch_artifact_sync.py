@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,10 @@ from typing import Any
 
 
 SCHEMA = "pi.rch.artifact_sync_preflight.v1"
+POSTCONDITION_ACTION = (
+    "Rerun the gate locally or fix RCH artifact retrieval/writeback so the "
+    "checked-in evidence artifact updates after the remote command."
+)
 
 DEFAULT_REQUIRED_PATHS = (
     "tests/ext_conformance/artifacts",
@@ -142,6 +147,217 @@ def matched_rule_payload(rule: IgnoreRule, matched: bool) -> dict[str, Any]:
     }
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def artifact_snapshot(repo_root: Path, raw_path: str) -> dict[str, Any]:
+    rel_path, full_path = resolve_required_path(repo_root, raw_path)
+    snapshot: dict[str, Any] = {
+        "path": rel_path,
+        "exists": False,
+        "kind": "missing",
+        "size_bytes": None,
+        "mtime_ns": None,
+        "sha256": None,
+    }
+    try:
+        stat = full_path.stat()
+    except FileNotFoundError:
+        return snapshot
+    except OSError as exc:
+        snapshot["error"] = str(exc)
+        return snapshot
+
+    snapshot["exists"] = True
+    snapshot["kind"] = "directory" if full_path.is_dir() else "file" if full_path.is_file() else "other"
+    snapshot["size_bytes"] = stat.st_size
+    snapshot["mtime_ns"] = stat.st_mtime_ns
+    if full_path.is_file():
+        try:
+            snapshot["sha256"] = file_sha256(full_path)
+        except OSError as exc:
+            snapshot["error"] = str(exc)
+    return snapshot
+
+
+def build_postcondition_baseline(repo_root: Path, generated_artifacts: list[str]) -> dict[str, Any]:
+    snapshots = []
+    for raw_path in generated_artifacts:
+        snapshot = artifact_snapshot(repo_root, raw_path)
+        snapshots.append({"path": snapshot["path"], "snapshot": snapshot})
+    return {
+        "schema": SCHEMA,
+        "mode": "postcondition-baseline",
+        "status": "pass",
+        "repo_root": str(repo_root),
+        "generated_artifacts": snapshots,
+        "violations": [],
+        "summary": {
+            "generated_artifact_count": len(snapshots),
+            "violation_count": 0,
+        },
+    }
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def before_snapshots_by_path(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    items = manifest.get("generated_artifacts")
+    if not isinstance(items, list):
+        items = manifest.get("postconditions")
+    if not isinstance(items, list):
+        return {}
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        snapshot = item.get("snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = item.get("before")
+        if not isinstance(snapshot, dict):
+            snapshot = item
+        path = snapshot.get("path") or item.get("path")
+        if isinstance(path, str):
+            snapshots[normalize_posix_path(path)] = snapshot
+    return snapshots
+
+
+def snapshot_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if before.get("exists") != after.get("exists"):
+        return True
+    if not after.get("exists"):
+        return False
+    for key in ("kind", "size_bytes", "mtime_ns", "sha256"):
+        if before.get(key) != after.get(key):
+            return True
+    return False
+
+
+def build_missing_before_manifest_report(repo_root: Path, generated_artifacts: list[str]) -> dict[str, Any]:
+    violations = [
+        {
+            "path": normalize_posix_path(path),
+            "source": "postcondition",
+            "line": None,
+            "pattern": None,
+            "reason": "missing_before_manifest",
+            "message": "--before-manifest is required to verify generated artifact writeback",
+            "recommended_action": "Run this script before the remote gate with --write-before-manifest, then rerun it after the gate with --before-manifest.",
+        }
+        for path in generated_artifacts
+    ]
+    return {
+        "schema": SCHEMA,
+        "mode": "postcondition",
+        "status": "fail",
+        "repo_root": str(repo_root),
+        "postconditions": [],
+        "violations": violations,
+        "summary": {
+            "generated_artifact_count": len(generated_artifacts),
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "violation_count": len(violations),
+        },
+    }
+
+
+def build_postcondition_report(
+    repo_root: Path, generated_artifacts: list[str], before_manifest: Path
+) -> dict[str, Any]:
+    before_manifest_payload = load_json_file(before_manifest)
+    before_by_path = before_snapshots_by_path(before_manifest_payload)
+    if not generated_artifacts:
+        generated_artifacts = list(before_by_path)
+
+    postconditions: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    updated_count = 0
+    unchanged_count = 0
+
+    for raw_path in generated_artifacts:
+        rel_path, _ = resolve_required_path(repo_root, raw_path)
+        before = before_by_path.get(rel_path)
+        after = artifact_snapshot(repo_root, rel_path)
+        updated = before is not None and snapshot_changed(before, after)
+        if updated:
+            updated_count += 1
+        else:
+            unchanged_count += 1
+
+        item = {
+            "path": rel_path,
+            "before": before,
+            "after": after,
+            "updated": updated,
+        }
+        postconditions.append(item)
+
+        if before is None:
+            violations.append(
+                {
+                    "path": rel_path,
+                    "source": "postcondition",
+                    "line": None,
+                    "pattern": None,
+                    "reason": "missing_before_snapshot",
+                    "message": f"before manifest has no snapshot for generated artifact: {rel_path}",
+                    "recommended_action": POSTCONDITION_ACTION,
+                }
+            )
+        elif not after.get("exists"):
+            violations.append(
+                {
+                    "path": rel_path,
+                    "source": "postcondition",
+                    "line": None,
+                    "pattern": None,
+                    "reason": "generated_artifact_missing_after_run",
+                    "message": f"generated artifact is missing after remote run: {rel_path}",
+                    "recommended_action": POSTCONDITION_ACTION,
+                }
+            )
+        elif not updated:
+            violations.append(
+                {
+                    "path": rel_path,
+                    "source": "postcondition",
+                    "line": None,
+                    "pattern": None,
+                    "reason": "generated_artifact_not_updated",
+                    "message": (
+                        f"generated artifact did not update after remote run: {rel_path}; "
+                        "local evidence may still be stale"
+                    ),
+                    "recommended_action": POSTCONDITION_ACTION,
+                }
+            )
+
+    return {
+        "schema": SCHEMA,
+        "mode": "postcondition",
+        "status": "fail" if violations else "pass",
+        "repo_root": str(repo_root),
+        "before_manifest": str(before_manifest),
+        "postconditions": postconditions,
+        "violations": violations,
+        "summary": {
+            "generated_artifact_count": len(postconditions),
+            "updated_count": updated_count,
+            "unchanged_count": unchanged_count,
+            "violation_count": len(violations),
+        },
+    }
+
+
 def evaluate_required_paths(
     repo_root: Path, rules: list[IgnoreRule], required_paths: list[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -235,6 +451,25 @@ def build_report(repo_root: Path, ignore_file: Path, required_paths: list[str]) 
 
 
 def print_text_report(report: dict[str, Any]) -> None:
+    if report["mode"] == "postcondition-baseline":
+        print("RCH artifact sync postcondition baseline: PASS")
+        for item in report["generated_artifacts"]:
+            snapshot = item["snapshot"]
+            print(f"- {item['path']}: {snapshot['kind']}")
+        return
+
+    if report["mode"] == "postcondition":
+        print(f"RCH artifact sync postcondition: {report['status'].upper()}")
+        for item in report["postconditions"]:
+            state = "updated" if item["updated"] else "stale"
+            print(f"- {item['path']}: {state}")
+        if report["violations"]:
+            print("\nViolations:")
+            for violation in report["violations"]:
+                print(f"- {violation['message']}")
+                print(f"  action: {violation['recommended_action']}")
+        return
+
     print(f"RCH artifact sync preflight: {report['status'].upper()}")
     for item in report["required_paths"]:
         state = "included" if item["included"] else "blocked"
@@ -254,6 +489,12 @@ def print_text_report(report: dict[str, Any]) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--mode",
+        choices=("preflight", "postcondition"),
+        default="preflight",
+        help="Run the .rchignore preflight or verify generated artifacts changed after a remote gate.",
+    )
+    parser.add_argument(
         "--repo-root",
         default=".",
         help="Repository root to evaluate. Defaults to the current directory.",
@@ -269,6 +510,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         dest="required_paths",
         help="Repo-relative artifact path that must be present in the RCH mirror.",
     )
+    parser.add_argument(
+        "--generated-artifact",
+        action="append",
+        dest="generated_artifacts",
+        default=[],
+        help="Repo-relative artifact expected to be generated or rewritten by the remote gate.",
+    )
+    parser.add_argument(
+        "--write-before-manifest",
+        type=Path,
+        help="Write a pre-run snapshot manifest for --mode postcondition.",
+    )
+    parser.add_argument(
+        "--before-manifest",
+        type=Path,
+        help="Pre-run snapshot manifest to compare against in --mode postcondition.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     return parser.parse_args(argv)
 
@@ -279,7 +537,41 @@ def main(argv: list[str]) -> int:
     ignore_file = Path(args.ignore_file).resolve() if args.ignore_file else repo_root / ".rchignore"
     required_paths = args.required_paths or list(DEFAULT_REQUIRED_PATHS)
 
-    report = build_report(repo_root, ignore_file, required_paths)
+    if args.mode == "postcondition":
+        generated_artifacts = [normalize_posix_path(path) for path in args.generated_artifacts]
+        if args.write_before_manifest is not None:
+            if generated_artifacts:
+                report = build_postcondition_baseline(repo_root, generated_artifacts)
+            else:
+                report = build_missing_before_manifest_report(repo_root, generated_artifacts)
+                report["violations"] = [
+                    {
+                        "path": None,
+                        "source": "postcondition",
+                        "line": None,
+                        "pattern": None,
+                        "reason": "missing_generated_artifact",
+                        "message": "--generated-artifact is required when writing a before manifest",
+                        "recommended_action": "Pass at least one --generated-artifact path for the remote gate outputs.",
+                    }
+                ]
+                report["summary"]["violation_count"] = 1
+            args.write_before_manifest.parent.mkdir(parents=True, exist_ok=True)
+            args.write_before_manifest.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        elif args.before_manifest is None:
+            report = build_missing_before_manifest_report(repo_root, generated_artifacts)
+        else:
+            report = build_postcondition_report(
+                repo_root,
+                generated_artifacts,
+                args.before_manifest.resolve(),
+            )
+    else:
+        report = build_report(repo_root, ignore_file, required_paths)
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

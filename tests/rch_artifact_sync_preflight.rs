@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const REQUIRED_ARTIFACT: &str = "tests/ext_conformance/artifacts/PROVENANCE_VERIFICATION.json";
+const GENERATED_ARTIFACT: &str = "tests/full_suite_gate/full_suite_verdict.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +40,44 @@ fn run_preflight(repo: &Path, required_path: &str) -> Result<Output, Box<dyn Err
         .arg(repo.join(".rchignore"))
         .arg("--required-path")
         .arg(required_path)
+        .arg("--json")
+        .output()?)
+}
+
+fn run_postcondition_baseline(
+    repo: &Path,
+    generated_path: &str,
+    before_manifest: &Path,
+) -> Result<Output, Box<dyn Error>> {
+    Ok(Command::new("python3")
+        .arg(script_path())
+        .arg("--repo-root")
+        .arg(repo)
+        .arg("--mode")
+        .arg("postcondition")
+        .arg("--generated-artifact")
+        .arg(generated_path)
+        .arg("--write-before-manifest")
+        .arg(before_manifest)
+        .arg("--json")
+        .output()?)
+}
+
+fn run_postcondition(
+    repo: &Path,
+    generated_path: &str,
+    before_manifest: &Path,
+) -> Result<Output, Box<dyn Error>> {
+    Ok(Command::new("python3")
+        .arg(script_path())
+        .arg("--repo-root")
+        .arg(repo)
+        .arg("--mode")
+        .arg("postcondition")
+        .arg("--generated-artifact")
+        .arg(generated_path)
+        .arg("--before-manifest")
+        .arg(before_manifest)
         .arg("--json")
         .output()?)
 }
@@ -76,6 +115,12 @@ fn u64_field(value: &Value, key: &str) -> Result<u64, Box<dyn Error>> {
         .ok_or_else(|| test_error(format!("JSON field is not an unsigned integer: {key}")))
 }
 
+fn bool_field(value: &Value, key: &str) -> Result<bool, Box<dyn Error>> {
+    object_field(value, key)?
+        .as_bool()
+        .ok_or_else(|| test_error(format!("JSON field is not a boolean: {key}")))
+}
+
 fn array_field<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, Box<dyn Error>> {
     object_field(value, key)?
         .as_array()
@@ -107,6 +152,16 @@ fn write_required_artifact(repo: &Path) -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| test_error("required artifact path should have a parent"))?;
     fs::create_dir_all(parent)?;
     fs::write(artifact, "{\"schema\":\"fixture\"}\n")?;
+    Ok(())
+}
+
+fn write_generated_artifact(repo: &Path, body: &str) -> Result<(), Box<dyn Error>> {
+    let artifact = repo.join(GENERATED_ARTIFACT);
+    let parent = artifact
+        .parent()
+        .ok_or_else(|| test_error("generated artifact path should have a parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::write(artifact, body)?;
     Ok(())
 }
 
@@ -209,6 +264,116 @@ fn current_repo_required_artifacts_pass_sync_preflight() -> Result<(), Box<dyn E
     let report = parse_json(&output)?;
     require_string_field(&report, "status", "pass")?;
     let summary = object_field(&report, "summary")?;
+    require_u64_field(summary, "violation_count", 0)?;
+    Ok(())
+}
+
+#[test]
+fn postcondition_fails_when_remote_gate_does_not_update_local_artifact()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path();
+    fs::write(repo.join(".rchignore"), "/artifacts/\n")?;
+    write_generated_artifact(repo, "{\"generated_at\":\"old\",\"verdict\":\"fail\"}\n")?;
+
+    let preflight_output = run_preflight(repo, GENERATED_ARTIFACT)?;
+    if !preflight_output.status.success() {
+        return Err(test_error(format!(
+            "mirror inclusion preflight should pass before postcondition fails\n{}",
+            output_debug(&preflight_output)
+        )));
+    }
+
+    let before_manifest = repo.join("before-rch-artifacts.json");
+    let baseline_output = run_postcondition_baseline(repo, GENERATED_ARTIFACT, &before_manifest)?;
+    if !baseline_output.status.success() {
+        return Err(test_error(format!(
+            "postcondition baseline capture should pass\n{}",
+            output_debug(&baseline_output)
+        )));
+    }
+
+    let output = run_postcondition(repo, GENERATED_ARTIFACT, &before_manifest)?;
+    if output.status.success() {
+        return Err(test_error(format!(
+            "unchanged local artifact should fail the postcondition\n{}",
+            output_debug(&output)
+        )));
+    }
+
+    let report = parse_json(&output)?;
+    require_string_field(&report, "mode", "postcondition")?;
+    require_string_field(&report, "status", "fail")?;
+    let postconditions = array_field(&report, "postconditions")?;
+    let first_postcondition = postconditions
+        .first()
+        .ok_or_else(|| test_error("expected one postcondition entry"))?;
+    require_string_field(first_postcondition, "path", GENERATED_ARTIFACT)?;
+    if bool_field(first_postcondition, "updated")? {
+        return Err(test_error(
+            "unchanged artifact should not be marked updated",
+        ));
+    }
+
+    let violations = array_field(&report, "violations")?;
+    let has_expected_diagnostic = violations.iter().any(|violation| {
+        matches!(
+            (
+                string_field(violation, "path"),
+                string_field(violation, "reason"),
+            ),
+            (Ok(GENERATED_ARTIFACT), Ok("generated_artifact_not_updated"))
+        ) && string_field(violation, "message")
+            .is_ok_and(|message| message.contains(GENERATED_ARTIFACT))
+            && string_field(violation, "recommended_action")
+                .is_ok_and(|action| action.contains("RCH artifact retrieval/writeback"))
+    });
+    if !has_expected_diagnostic {
+        return Err(test_error(format!(
+            "postcondition should name stale local artifact and retrieval/writeback action:\n{}",
+            output_debug(&output)
+        )));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn postcondition_passes_when_local_generated_artifact_changes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path();
+    fs::write(repo.join(".rchignore"), "/artifacts/\n")?;
+    write_generated_artifact(repo, "{\"generated_at\":\"old\",\"verdict\":\"fail\"}\n")?;
+
+    let before_manifest = repo.join("before-rch-artifacts.json");
+    let baseline_output = run_postcondition_baseline(repo, GENERATED_ARTIFACT, &before_manifest)?;
+    if !baseline_output.status.success() {
+        return Err(test_error(format!(
+            "postcondition baseline capture should pass\n{}",
+            output_debug(&baseline_output)
+        )));
+    }
+
+    write_generated_artifact(repo, "{\"generated_at\":\"new\",\"verdict\":\"pass\"}\n")?;
+    let output = run_postcondition(repo, GENERATED_ARTIFACT, &before_manifest)?;
+    if !output.status.success() {
+        return Err(test_error(format!(
+            "changed local artifact should pass the postcondition\n{}",
+            output_debug(&output)
+        )));
+    }
+
+    let report = parse_json(&output)?;
+    require_string_field(&report, "status", "pass")?;
+    let postconditions = array_field(&report, "postconditions")?;
+    let first_postcondition = postconditions
+        .first()
+        .ok_or_else(|| test_error("expected one postcondition entry"))?;
+    if !bool_field(first_postcondition, "updated")? {
+        return Err(test_error("changed artifact should be marked updated"));
+    }
+    let summary = object_field(&report, "summary")?;
+    require_u64_field(summary, "updated_count", 1)?;
     require_u64_field(summary, "violation_count", 0)?;
     Ok(())
 }
