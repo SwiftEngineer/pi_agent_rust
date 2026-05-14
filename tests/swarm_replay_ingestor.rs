@@ -17,7 +17,7 @@ use pi::swarm_replay::{
     build_swarm_replay_trace, default_swarm_replay_baseline_policies,
     evaluate_swarm_replay_baseline_policies, replay_swarm_trace, swarm_replay_ordering_cost_units,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const GENERATED_AT: &str = "2026-05-13T18:40:00Z";
@@ -87,6 +87,20 @@ fn write_text(root: &Path, rel: &str, text: &str) -> std::io::Result<()> {
 
 fn write_json(root: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
     write_text(root, rel, &serde_json::to_string_pretty(value)?)
+}
+
+fn write_jsonl_rows<T: Serialize>(
+    root: &Path,
+    rel: &str,
+    rows: &[T],
+) -> Result<(), Box<dyn Error>> {
+    let mut text = String::new();
+    for row in rows {
+        text.push_str(&serde_json::to_string(row)?);
+        text.push('\n');
+    }
+    write_text(root, rel, &text)?;
+    Ok(())
 }
 
 fn load_json(rel: &str) -> Result<Value, Box<dyn Error>> {
@@ -270,6 +284,220 @@ fn write_clean_sources(root: &Path, include_agent_mail: bool) -> std::io::Result
     )
 }
 
+fn no_mock_e2e_request(root: &Path) -> SwarmReplayIngestRequest {
+    SwarmReplayIngestRequest::new("fixture-no-mock-swarm-replay-e2e", GENERATED_AT, root)
+        .with_git_identity("e2e123", "main")
+        .with_source_override("agent_mail_archive", "mail/archive.json")
+        .with_source_override("git_refs", "git/refs.json")
+        .with_source_override("validation_command_records", "validation/records.json")
+        .with_source_override("swarm_flight_recorder", "flight/events.jsonl")
+        .with_source_override("swarm_activity_ledger", "activity/events.jsonl")
+}
+
+fn write_no_mock_e2e_sources(root: &Path) -> std::io::Result<()> {
+    write_text(
+        root,
+        ".beads/issues.jsonl",
+        concat!(
+            r#"{"id":"bd-e2e-ready","status":"open","priority":1,"assignee":"unassigned","updated_at":"2026-05-13T18:00:00Z"}"#,
+            "\n",
+            r#"{"id":"bd-e2e-stale","status":"in_progress","priority":2,"assignee":"LongGoneAgent","updated_at":"2026-05-13T18:01:00Z"}"#,
+            "\n",
+            r#"{"id":"bd-e2e-closed","status":"closed","priority":3,"assignee":"AmberOsprey","updated_at":"2026-05-13T18:02:00Z"}"#,
+            "\n"
+        ),
+    )?;
+    write_text(
+        root,
+        ".beads/beads.db",
+        "sqlite fixture bytes for no-mock swarm replay e2e",
+    )?;
+    write_json(
+        root,
+        "mail/archive.json",
+        &json!({
+            "messages": [{
+                "thread_id": "bd-e2e-ready",
+                "sender": "AmberOsprey",
+                "recipients": ["SilentReef"],
+                "importance": "high",
+                "ack_required": true,
+                "created_at": "2026-05-13T18:03:00Z",
+                "body": "SECRET MAIL BODY MUST BE REDACTED"
+            }],
+            "reservations": [{
+                "id": "res-e2e-source",
+                "path_patterns": ["src/swarm_replay.rs", "tests/swarm_replay_ingestor.rs"],
+                "exclusive": true,
+                "ttl_seconds": 3600,
+                "reason": "bd-in57w.9",
+                "holder": "AmberOsprey",
+                "state": "active",
+                "created_at": "2026-05-13T18:04:00Z"
+            }],
+            "reservation_conflicts": [{
+                "path_pattern": "src/providers/**",
+                "holder": "OtherAgent",
+                "conflict_reason": "active exclusive lease",
+                "created_at": "2026-05-13T18:05:00Z"
+            }],
+            "build_slots": [{
+                "slot": "cargo-all-targets",
+                "holder": "AmberOsprey",
+                "state": "active",
+                "expires_at_utc": "2026-05-13T19:00:00Z",
+                "created_at": "2026-05-13T18:06:00Z"
+            }]
+        }),
+    )?;
+    write_json(
+        root,
+        "docs/evidence/doctor-swarm.json",
+        &json!({
+            "host_profile": {
+                "profile_id": "no-mock-e2e-64-core",
+                "cpu_cores": 64,
+                "memory_gib": 256,
+                "numa_nodes": 4,
+                "cgroup_cpu_quota": 48,
+                "cgroup_memory_gib": 192,
+                "max_agent_concurrency": 32,
+                "max_tool_concurrency": 16,
+                "extension_hostcall_lanes": 24,
+                "rch_worker_slots": 8,
+                "target_dir": "/data/tmp/pi_agent_rust_cargo/amberosprey/target",
+                "target_free_gib": 512,
+                "tmpdir": "/data/tmp/pi_agent_rust_cargo/amberosprey/tmp",
+                "tmpdir_free_gib": 256,
+                "numa_hint": "pin_rch_workers_by_socket",
+                "created_at": "2026-05-13T18:07:00Z"
+            },
+            "findings": [{
+                "finding_id": "agent_mail_degraded_but_readable",
+                "severity": "warn",
+                "surface": "agent_mail",
+                "status": "observed",
+                "created_at": "2026-05-13T18:08:00Z"
+            }]
+        }),
+    )?;
+    write_json(
+        root,
+        "docs/evidence/rch-queue-status.json",
+        &json!({
+            "jobs": [{
+                "job_id": "e2e-rch-queued",
+                "state": "queued",
+                "worker": "worker-redacted",
+                "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+                "queue_position": 4,
+                "created_at": "2026-05-13T18:09:00Z"
+            }]
+        }),
+    )?;
+    write_json(
+        root,
+        "docs/evidence/swarm-operator-runpack.json",
+        &json!({
+            "recommendations": [{
+                "action": "continue_bd_in57w_9",
+                "severity": "normal",
+                "evidence_paths": [
+                    "docs/contracts/swarm-operator-runpack-contract.json",
+                    "tests/golden_corpus/swarm_operator_runpack/complete_runpack_projection.json"
+                ],
+                "operator_notes": "offline replay lab harness; no network or live mutation",
+                "created_at": "2026-05-13T18:10:00Z"
+            }],
+            "operator_handoff": {
+                "handoff_id": "handoff-no-mock-e2e",
+                "summary": "Use replay evidence before claiming more swarm work",
+                "next_actions": [
+                    "inspect policy comparison report",
+                    "verify runpack recommendation references checked-in evidence"
+                ],
+                "evidence_paths": [
+                    "tests/golden_corpus/swarm_replay_trace/normalized_trace.json",
+                    "tests/e2e_results/20260422T201126Z/replay_bundle.json"
+                ],
+                "created_at": "2026-05-13T18:11:00Z"
+            }
+        }),
+    )?;
+    write_json(
+        root,
+        "git/refs.json",
+        &json!({
+            "head": "e2e123",
+            "branch": "main",
+            "dirty": false,
+            "changed_paths": [],
+            "created_at": "2026-05-13T18:12:00Z"
+        }),
+    )?;
+    write_json(
+        root,
+        "validation/records.json",
+        &json!({
+            "commands": [{
+                "command": "rch exec -- cargo test --test swarm_replay_ingestor",
+                "runner": "rch",
+                "exit_code": 0,
+                "target_dir": "/data/tmp/pi_agent_rust_cargo/amberosprey/target",
+                "tmpdir": "/data/tmp/pi_agent_rust_cargo/amberosprey/tmp",
+                "created_at": "2026-05-13T18:13:00Z"
+            }],
+            "artifacts": [
+                {
+                    "artifact_path": "tests/e2e_results/20260422T201126Z/replay_bundle.json",
+                    "artifact_schema": "pi.e2e.replay_bundle.v1",
+                    "verdict": "observed",
+                    "command": "scripts/e2e/run_all.sh",
+                    "created_at": "2026-05-13T18:14:00Z"
+                },
+                {
+                    "artifact_path": "tests/golden_corpus/swarm_replay_trace/normalized_trace.json",
+                    "artifact_schema": "pi.swarm.replay_trace.v1",
+                    "verdict": "pass",
+                    "command": "cargo test --test swarm_replay_ingestor",
+                    "created_at": "2026-05-13T18:15:00Z"
+                }
+            ]
+        }),
+    )?;
+    write_json(
+        root,
+        "docs/evidence/context-intelligence-closeout-gate.json",
+        &json!({
+            "schema": "pi.context_intelligence.closeout_gate.v1",
+            "verdict": "pass",
+            "generated_at": "2026-05-13T18:16:00Z"
+        }),
+    )?;
+    write_text(
+        root,
+        "flight/events.jsonl",
+        concat!(
+            r#"{"schema":"pi.swarm.flight_recorder.event.v1","event_kind":"agent_turn","agent_name":"AmberOsprey","created_at":"2026-05-13T18:17:00Z"}"#,
+            "\n",
+            r#"{"schema":"pi.swarm.flight_recorder.event.v1","event_kind":"validation_gate","agent_name":"AmberOsprey","created_at":"2026-05-13T18:18:00Z"}"#,
+            "\n"
+        ),
+    )?;
+    write_text(
+        root,
+        "activity/events.jsonl",
+        concat!(
+            r#"{"schema":"pi.swarm.activity_ledger.v1","event_kind":"operator_handoff","handoff_id":"activity-no-mock-e2e","summary":"activity ledger handoff","next_actions":["compare policies"],"evidence_paths":["tests/full_suite_gate/swarm_activity_digest.json"],"created_at":"2026-05-13T18:19:00Z"}"#,
+            "\n",
+            r#"{"schema":"pi.swarm.activity_ledger.v1","event_kind":"verification","agent_name":"AmberOsprey","created_at":"2026-05-13T18:20:00Z"}"#,
+            "\n"
+        ),
+    )?;
+    write_text(root, "negative/malformed-rch.json", "{\"jobs\":[")?;
+    Ok(())
+}
+
 fn source_row<'a>(
     trace: &'a SwarmReplayTrace,
     source_id: &str,
@@ -428,6 +656,103 @@ fn decision<'a>(
         .iter()
         .find(|item| item.policy_id == policy_id && item.action == action)
         .ok_or_else(|| format!("missing policy decision {policy_id}/{action}"))
+}
+
+fn write_no_mock_e2e_outputs(
+    root: &Path,
+    trace: &SwarmReplayTrace,
+    replay: &pi::swarm_replay::SwarmReplayReport,
+    policy_report: &pi::swarm_replay::SwarmReplayPolicyReport,
+) -> Result<Value, Box<dyn Error>> {
+    write_json(root, "evidence/trace.json", &serde_json::to_value(trace)?)?;
+    write_json(
+        root,
+        "evidence/replay-report.json",
+        &serde_json::to_value(replay)?,
+    )?;
+    write_json(
+        root,
+        "evidence/policy-report.json",
+        &serde_json::to_value(policy_report)?,
+    )?;
+    write_jsonl_rows(root, "evidence/replay-events.jsonl", &trace.events)?;
+
+    let comparison_report = json!({
+        "schema": "pi.swarm.replay_e2e_comparison_report.v1",
+        "trace_id": trace.trace_id,
+        "policy_count": policy_report.policy_ids.len(),
+        "decision_count": policy_report.decision_count,
+        "comparison_count": policy_report.comparison_count,
+        "policy_deltas": policy_report.policy_comparisons,
+        "guards": policy_report.policy_guards
+    });
+    write_json(
+        root,
+        "evidence/policy-comparison-report.json",
+        &comparison_report,
+    )?;
+
+    let replay_summary = json!({
+        "schema": "pi.swarm.replay_e2e_summary.v1",
+        "trace_id": trace.trace_id,
+        "source_count": trace.source_inventory.len(),
+        "event_count": trace.events.len(),
+        "replayed_event_count": replay.replayed_event_count,
+        "policy_count": policy_report.policy_ids.len(),
+        "decision_count": policy_report.decision_count,
+        "comparison_count": policy_report.comparison_count,
+        "runpack_recommendation_count": replay.final_state.runpack_recommendations.len(),
+        "operator_handoff_count": replay.final_state.operator_handoffs.len(),
+        "diagnostic_count": replay.diagnostics.len(),
+        "guards": {
+            "trace_read_only": trace.replay_guards.read_only,
+            "replay_no_live_mutation": replay.replay_guards.no_live_mutation,
+            "policy_advisory_only": policy_report.policy_guards.advisory_only
+        }
+    });
+    write_json(root, "evidence/replay-summary.json", &replay_summary)?;
+
+    let manifest = json!({
+        "schema": "pi.swarm.replay_e2e_artifact_manifest.v1",
+        "generated_at": GENERATED_AT,
+        "trace_id": trace.trace_id,
+        "entries": [
+            {
+                "path": "evidence/replay-events.jsonl",
+                "artifact_schema": "pi.swarm.replay_events_jsonl.v1",
+                "evidence_kind": "jsonl_event_log",
+                "record_count": trace.events.len()
+            },
+            {
+                "path": "evidence/replay-summary.json",
+                "artifact_schema": "pi.swarm.replay_e2e_summary.v1",
+                "evidence_kind": "replay_summary"
+            },
+            {
+                "path": "evidence/policy-comparison-report.json",
+                "artifact_schema": "pi.swarm.replay_e2e_comparison_report.v1",
+                "evidence_kind": "comparison_report"
+            },
+            {
+                "path": "evidence/trace.json",
+                "artifact_schema": SWARM_REPLAY_TRACE_SCHEMA,
+                "evidence_kind": "normalized_trace"
+            },
+            {
+                "path": "evidence/replay-report.json",
+                "artifact_schema": SWARM_REPLAY_REPORT_SCHEMA,
+                "evidence_kind": "replay_report"
+            },
+            {
+                "path": "evidence/policy-report.json",
+                "artifact_schema": SWARM_REPLAY_POLICY_REPORT_SCHEMA,
+                "evidence_kind": "policy_report"
+            }
+        ],
+        "source_inventory": trace.source_inventory
+    });
+    write_json(root, "evidence/artifact-manifest.json", &manifest)?;
+    Ok(manifest)
 }
 
 #[test]
@@ -812,6 +1137,262 @@ fn fault_injection_corpus_replays_coordination_failures() -> TestResult {
             "missing required fault scenario {required}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn no_mock_e2e_harness_emits_auditable_replay_evidence() -> TestResult {
+    let root = test_workspace("no_mock_e2e")?;
+    let source_root = root.join("source_fixture");
+    write_no_mock_e2e_sources(&source_root)?;
+
+    let trace = build_swarm_replay_trace(&no_mock_e2e_request(&source_root))?;
+    assert_eq!(trace.schema, SWARM_REPLAY_TRACE_SCHEMA);
+    assert!(trace.replay_guards.read_only);
+    assert!(trace.replay_guards.no_live_mutation);
+    assert!(trace.replay_guards.no_network_required);
+    assert_eq!(trace.redaction_summary.raw_secret_bytes_emitted, 0);
+    assert!(
+        trace
+            .redaction_summary
+            .redacted_fields
+            .iter()
+            .any(|field| field.contains("body")),
+        "Agent Mail bodies must be redacted from the replay trace"
+    );
+
+    for source_id in [
+        "beads_jsonl",
+        "beads_db",
+        "agent_mail_archive",
+        "doctor_swarm_diagnostics",
+        "rch_queue_status",
+        "operator_runpack",
+        "git_refs",
+        "validation_command_records",
+        "context_intelligence_evidence",
+        "swarm_flight_recorder",
+        "swarm_activity_ledger",
+    ] {
+        let source = source_row(&trace, source_id)?;
+        assert_ne!(
+            source.availability, "unavailable",
+            "source {source_id} should be present in the no-mock fixture"
+        );
+    }
+
+    let observed_events = event_types(&trace);
+    for required in [
+        "bead_lifecycle",
+        "agent_message",
+        "reservation_intent",
+        "reservation_conflict",
+        "build_slot_state",
+        "host_resource_profile",
+        "doctor_finding",
+        "rch_job_state",
+        "runpack_recommendation",
+        "operator_handoff",
+        "worktree_state",
+        "cargo_gate_result",
+        "validation_artifact",
+    ] {
+        assert!(
+            observed_events.contains(required),
+            "no-mock E2E trace missing event type {required}"
+        );
+    }
+    assert_monotonic_sequence(&trace)?;
+
+    let replay = replay_swarm_trace(&trace)?;
+    assert!(replay.replay_guards.consumed_trace_only);
+    assert!(replay.replay_guards.no_live_mutation);
+    assert!(replay.replay_guards.no_network_required);
+    assert_eq!(
+        replay.replayed_event_count,
+        u64::try_from(trace.events.len())?
+    );
+    assert!(
+        replay
+            .final_state
+            .runpack_recommendations
+            .contains_key("continue_bd_in57w_9"),
+        "runpack recommendation was not replayed into final state"
+    );
+    assert!(
+        replay
+            .final_state
+            .operator_handoffs
+            .values()
+            .any(|handoff| {
+                !handoff.next_actions.is_empty() && !handoff.evidence_paths.is_empty()
+            }),
+        "operator handoff should carry next actions and evidence paths"
+    );
+
+    let policies = [
+        SwarmReplayBaselinePolicy::ConservativeManual,
+        SwarmReplayBaselinePolicy::ExistingAutopilot,
+        SwarmReplayBaselinePolicy::RchFanoutLimited,
+        SwarmReplayBaselinePolicy::StaleBeadReclaiming,
+        SwarmReplayBaselinePolicy::BuildSlotProtective,
+    ];
+    let policy_report = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+    assert_eq!(policy_report.policy_ids.len(), 5);
+    assert!(policy_report.policy_guards.advisory_only);
+    assert!(policy_report.policy_guards.no_live_mutation);
+    assert!(policy_report.policy_guards.no_network_required);
+
+    let claim = decision(&policy_report.decisions, "existing_autopilot", "claim_bead")?;
+    assert_eq!(claim.target_id, "bd-e2e-ready");
+    assert!(claim.would_require_live_mutation);
+    assert!(
+        decision(
+            &policy_report.decisions,
+            "rch_fanout_limited",
+            "back_off_cargo",
+        )?
+        .reason_codes
+        .contains(&"rch_queue_position_positive".to_string())
+    );
+    let stale_scan_claim = decision(
+        &policy_report.decisions,
+        "stale_bead_reclaiming",
+        "claim_bead",
+    );
+    let stale_scan_claim = stale_scan_claim?;
+    assert_eq!(stale_scan_claim.target_id, "bd-e2e-ready");
+    assert!(
+        stale_scan_claim
+            .reason_codes
+            .contains(&"ready_bead_available_after_stale_scan".to_string())
+    );
+    assert_eq!(
+        decision(
+            &policy_report.decisions,
+            "build_slot_protective",
+            "wait_for_build_slot",
+        )?
+        .target_id,
+        "cargo-all-targets"
+    );
+
+    let comparison_policies = policy_report
+        .policy_comparisons
+        .iter()
+        .map(|comparison| comparison.policy_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "existing_autopilot",
+        "rch_fanout_limited",
+        "stale_bead_reclaiming",
+    ] {
+        assert!(
+            comparison_policies.contains(required),
+            "comparison report missing policy {required}"
+        );
+    }
+    let rch_delta = policy_report
+        .policy_comparisons
+        .iter()
+        .find(|comparison| comparison.policy_id == "rch_fanout_limited")
+        .ok_or("missing rch policy comparison")?;
+    assert!(
+        rch_delta.metrics.validation_commands_deferred > 0,
+        "RCH policy delta should record deferred validation under queue pressure"
+    );
+
+    let manifest = write_no_mock_e2e_outputs(&root, &trace, &replay, &policy_report)?;
+    let event_log_path = root.join("evidence/replay-events.jsonl");
+    let event_log = fs::read_to_string(&event_log_path)?;
+    assert!(!event_log.contains("SECRET"));
+    assert!(!event_log.contains("Bearer "));
+    let replayed_events = event_log
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<SwarmReplayEvent>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(replayed_events.len(), trace.events.len());
+
+    let entries = manifest
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or("manifest entries missing")?;
+    for evidence_kind in ["jsonl_event_log", "replay_summary", "comparison_report"] {
+        assert!(
+            entries.iter().any(|entry| {
+                entry
+                    .get("evidence_kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == evidence_kind)
+            }),
+            "manifest missing {evidence_kind}"
+        );
+    }
+
+    let checked_in_paths = [
+        "docs/contracts/swarm-operator-runpack-contract.json",
+        "tests/golden_corpus/swarm_operator_runpack/complete_runpack_projection.json",
+        "tests/e2e_results/20260422T201126Z/replay_bundle.json",
+    ];
+    for path in checked_in_paths {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(path).exists(),
+            "checked-in evidence path referenced by E2E fixture is missing: {path}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn no_mock_e2e_harness_fails_closed_on_missing_and_malformed_artifacts() -> TestResult {
+    let root = test_workspace("no_mock_e2e_negative")?;
+    let source_root = root.join("source_fixture");
+    write_no_mock_e2e_sources(&source_root)?;
+
+    let missing_runpack = build_swarm_replay_trace(
+        &no_mock_e2e_request(&source_root)
+            .with_source_override("operator_runpack", "missing/runpack.json"),
+    )?;
+    let runpack = source_row(&missing_runpack, "operator_runpack")?;
+    assert_eq!(runpack.availability, "unavailable");
+    assert_eq!(runpack.freshness_state, "missing");
+    assert!(
+        missing_runpack
+            .uncertainty_summary
+            .missing_sources
+            .contains(&"operator_runpack".to_string())
+    );
+    assert!(
+        missing_runpack
+            .uncertainty_summary
+            .suppressed_claims
+            .contains(&"operator_next_action".to_string())
+    );
+
+    let malformed_rch = build_swarm_replay_trace(
+        &no_mock_e2e_request(&source_root)
+            .with_source_override("rch_queue_status", "negative/malformed-rch.json"),
+    )?;
+    let rch = source_row(&malformed_rch, "rch_queue_status")?;
+    assert_eq!(rch.availability, "malformed");
+    assert_eq!(rch.freshness_state, "malformed");
+    assert!(
+        malformed_rch
+            .uncertainty_summary
+            .malformed_sources
+            .contains(&"rch_queue_status".to_string())
+    );
+    assert!(
+        malformed_rch
+            .uncertainty_summary
+            .suppressed_claims
+            .contains(&"queue_depth".to_string())
+    );
+    assert!(
+        !event_types(&malformed_rch).contains("rch_job_state"),
+        "malformed RCH artifact should not produce queue state events"
+    );
     Ok(())
 }
 
