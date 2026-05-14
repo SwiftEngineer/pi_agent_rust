@@ -1,0 +1,5 @@
+Build Queue
+  - 8 Active Build(s)
+  - 2 Queued Build(s)
+Worker Availability
+  -> 0 / 8 slots free

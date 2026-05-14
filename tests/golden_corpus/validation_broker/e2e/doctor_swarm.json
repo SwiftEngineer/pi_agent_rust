@@ -1,0 +1,137 @@
+{
+  "schema": "pi.doctor.report.v1",
+  "generated_at": "2026-05-14T08:30:00Z",
+  "overall": "warn",
+  "summary": {
+    "pass": 1,
+    "info": 0,
+    "warn": 2,
+    "fail": 0
+  },
+  "checks": [
+    {
+      "name": "swarm-resource-preflight",
+      "status": "ok",
+      "message": "fixture preflight ready"
+    }
+  ],
+  "findings": [
+    {
+      "category": "swarm",
+      "severity": "warn",
+      "title": "Agent Mail reservations expire soon",
+      "detail": "reservation token=fixture-secret-value expires soon",
+      "remediation": "Renew active reservations before long-running validation",
+      "data": {
+        "schema": "pi.doctor.agent_mail_build_slots.v1",
+        "active": 1,
+        "expiring_soon": 1
+      },
+      "fixability": "not_fixable"
+    },
+    {
+      "category": "swarm",
+      "severity": "warn",
+      "title": "Validation broker has stale slot warnings",
+      "detail": "store=validation-slots.jsonl slots=3 active=1 reusable=1 stale_warnings=1 duplicate_opportunities=1",
+      "remediation": "Recover stale validation slots through owner-visible broker workflow",
+      "data": {
+        "schema": "pi.doctor.validation_broker_posture.v1",
+        "mode": "advisory_projection",
+        "mutation_performed": false,
+        "source_status": {
+          "validation_slot_store": "available",
+          "source_of_truth": "validation_broker_slot_store",
+          "doctor_authority": "environment_diagnostics_only"
+        },
+        "store": {
+          "path": "tests/golden_corpus/validation_broker/e2e/validation-slots.jsonl",
+          "configured": true,
+          "exists": true,
+          "schema": "pi.validation_broker.slot_store.v1",
+          "status": "available",
+          "total_records": 5,
+          "total_slots": 3,
+          "state_counts": {
+            "active": 1,
+            "reusable": 1,
+            "stale": 1
+          }
+        },
+        "current_slots": {
+          "total": 3,
+          "active": 1,
+          "reusable": 1,
+          "stale": 1,
+          "expired_at_report_time": 1,
+          "sample": [
+            {
+              "slot_id": "slot-status-active",
+              "state": "active",
+              "owner_agent": "Codex",
+              "bead_id": "bd-gusp4.8",
+              "command_class": "cargo_check",
+              "runner": "rch_required"
+            },
+            {
+              "slot_id": "slot-status-reusable",
+              "state": "reusable",
+              "owner_agent": "Codex",
+              "bead_id": "bd-gusp4.8",
+              "command_class": "cargo_check",
+              "runner": "rch_required"
+            },
+            {
+              "slot_id": "slot-status-stale",
+              "state": "stale",
+              "owner_agent": "Codex",
+              "bead_id": "bd-gusp4.8",
+              "command_class": "cargo_check",
+              "runner": "rch_required"
+            }
+          ]
+        },
+        "duplicate_gate_opportunities": {
+          "count": 1,
+          "active_equivalent_groups": [
+            {
+              "command_fingerprint": "fixture-broad-cargo-check",
+              "slot_ids": [
+                "slot-status-active",
+                "slot-status-reusable"
+              ]
+            }
+          ],
+          "reusable_slots": [
+            {
+              "slot_id": "slot-status-reusable",
+              "state": "reusable"
+            }
+          ]
+        },
+        "stale_build_warnings": {
+          "count": 1,
+          "expired_slots": [
+            {
+              "slot_id": "slot-status-stale",
+              "state": "stale"
+            }
+          ]
+        },
+        "degraded_reasons": [],
+        "recommended_next_actions": [
+          "Recover stale validation slots through owner-visible broker workflow",
+          "Consider coalescing equivalent validation gates only after matching provenance and required no-claim markers"
+        ],
+        "guards": {
+          "advisory_only": true,
+          "no_live_mutation": true,
+          "not_ci_success": true,
+          "not_release_claim_evidence": true,
+          "does_not_replace_rch_doctor_beads_agent_mail": true
+        }
+      },
+      "fixability": "not_fixable"
+    }
+  ]
+}

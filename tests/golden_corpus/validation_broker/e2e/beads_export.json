@@ -1,0 +1,29 @@
+{
+  "schema": "br.issue_export.v1",
+  "generated_at": "2026-05-14T08:30:00Z",
+  "issues": [
+    {
+      "id": "bd-stale-validation",
+      "title": "Stale validation owner fixture",
+      "status": "in_progress",
+      "priority": 2,
+      "assignee": "GreenStone",
+      "updated_at": "2026-05-12T00:00:00Z"
+    },
+    {
+      "id": "bd-gusp4.8",
+      "title": "[IDEA-WIZARD] Add no-mock validation broker E2E harness",
+      "status": "in_progress",
+      "priority": 4,
+      "assignee": "Codex",
+      "updated_at": "2026-05-14T08:30:00Z"
+    },
+    {
+      "id": "bd-gusp4.9",
+      "title": "[IDEA-WIZARD] Wire validation broker handoff into operator runpack",
+      "status": "open",
+      "priority": 4,
+      "updated_at": "2026-05-14T08:30:00Z"
+    }
+  ]
+}

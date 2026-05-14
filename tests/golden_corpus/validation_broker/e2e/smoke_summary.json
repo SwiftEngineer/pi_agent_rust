@@ -1,0 +1,29 @@
+{
+  "schema": "pi.swarm.smoke_harness.v1",
+  "generated_at": "2026-05-14T08:30:00Z",
+  "status": "pass",
+  "correlation_id": "validation-broker-e2e-fixture",
+  "reservation_ids": [
+    7
+  ],
+  "failed_scenarios": [],
+  "scenarios": {
+    "reservation_conflict": {
+      "status": "pass"
+    },
+    "dirty_worktree_preserved": {
+      "status": "pass"
+    }
+  },
+  "artifacts": {
+    "summary_json": "tests/golden_corpus/validation_broker/e2e/smoke_summary.json"
+  },
+  "artifact_manifest": [
+    {
+      "id": "events_jsonl",
+      "path": "tests/golden_corpus/validation_broker/e2e/fixture-events.jsonl",
+      "size_bytes": 128,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

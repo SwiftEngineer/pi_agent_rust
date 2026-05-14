@@ -1,0 +1,21 @@
+{
+  "schema": "pi.swarm.claim_readiness_report.v1",
+  "generated_at": "2026-05-14T08:30:00Z",
+  "overall_status": "ready",
+  "max_age_days": 14,
+  "artifact_statuses": [
+    {
+      "id": "validation_broker_e2e_harness",
+      "category": "test_coverage",
+      "status": "ready",
+      "release_blocking": true,
+      "issue_kinds": []
+    }
+  ],
+  "blocking_artifacts": [],
+  "stale_claims": {
+    "summary": {
+      "stale_count": 0
+    }
+  }
+}
