@@ -20,6 +20,8 @@ use crate::error::{Error, Result};
 pub const VALIDATION_BROKER_SLOT_SCHEMA: &str = "pi.validation_broker.slot.v1";
 pub const VALIDATION_BROKER_SLOT_STORE_SCHEMA: &str = "pi.validation_broker.slot_store.v1";
 pub const VALIDATION_BROKER_SLOT_RECORD_SCHEMA: &str = "pi.validation_broker.slot_store.record.v1";
+pub const VALIDATION_BROKER_REQUEST_SCHEMA: &str = "pi.validation_broker.request.v1";
+pub const VALIDATION_BROKER_DECISION_SCHEMA: &str = "pi.validation_broker.decision.v1";
 pub const VALIDATION_BROKER_INPUT_SCHEMA: &str = "pi.validation_broker.input_snapshot.v1";
 pub const VALIDATION_BROKER_SOURCE_PROVENANCE_SCHEMA: &str =
     "pi.validation_broker.source_provenance.v1";
@@ -980,6 +982,280 @@ impl ValidationBrokerInputSnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationAdmissionDecision {
+    Allow,
+    Wait,
+    Coalesce,
+    Narrow,
+    DenyLocalFallback,
+    StaleRecover,
+    DegradedBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationAdmissionPolicy {
+    pub max_active_builds: u64,
+    pub max_queued_builds: u64,
+    pub min_free_slots_for_broad_gate: u64,
+    pub max_active_broad_gates: usize,
+    pub reusable_artifact_freshness_seconds: i64,
+    pub request_age_boost_seconds: i64,
+    pub reuse_required: bool,
+    pub allow_narrow_scope: bool,
+}
+
+impl Default for ValidationAdmissionPolicy {
+    fn default() -> Self {
+        Self {
+            max_active_builds: 4,
+            max_queued_builds: 0,
+            min_free_slots_for_broad_gate: 2,
+            max_active_broad_gates: 1,
+            reusable_artifact_freshness_seconds: 86_400,
+            request_age_boost_seconds: 3_600,
+            reuse_required: false,
+            allow_narrow_scope: true,
+        }
+    }
+}
+
+impl ValidationAdmissionPolicy {
+    fn validate(&self) -> Result<()> {
+        if self.reusable_artifact_freshness_seconds < 0 {
+            return Err(Error::validation(
+                "reusable_artifact_freshness_seconds must be non-negative",
+            ));
+        }
+        if self.request_age_boost_seconds < 0 {
+            return Err(Error::validation(
+                "request_age_boost_seconds must be non-negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationAdmissionRequestContext {
+    pub request_id: String,
+    pub request: ValidationSlotRequest,
+    pub requested_at_utc: String,
+    pub bead_priority: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ValidationAdmissionPolicyFields {
+    pub request_age_seconds: i64,
+    pub bead_priority: u8,
+    pub age_priority_boosted: bool,
+    pub broad_gate: bool,
+    pub rch_required: bool,
+    pub rch_saturated: bool,
+    pub rch_local_fallback: bool,
+    pub low_cargo_headroom: bool,
+    pub low_scratch_headroom: bool,
+    pub doctor_failed: bool,
+    pub dirty_worktree: bool,
+    pub active_equivalent_slots: usize,
+    pub reusable_equivalent_slots: usize,
+    pub stale_equivalent_slots: usize,
+    pub active_broad_gates: usize,
+    pub stale_in_progress_beads: usize,
+    pub blocking_source_degraded: bool,
+    pub reuse_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationAdmissionSourceStatus {
+    pub source_id: String,
+    pub state: ValidationSourceState,
+    pub degraded_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationAdmissionDecisionRecord {
+    pub schema: String,
+    pub decision_id: String,
+    pub request_id: String,
+    pub generated_at: String,
+    pub decision: ValidationAdmissionDecision,
+    pub confidence: String,
+    pub reasons: Vec<String>,
+    pub source_statuses: Vec<ValidationAdmissionSourceStatus>,
+    pub required_actions: Vec<String>,
+    pub reusable_slot: Option<String>,
+    pub coalesced_artifacts: Vec<ValidationSlotArtifact>,
+    pub suppressed_claims: Vec<String>,
+    pub no_claims: Vec<String>,
+    pub policy: ValidationAdmissionPolicyFields,
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn decide_validation_admission(
+    context: ValidationAdmissionRequestContext,
+    inputs: &ValidationBrokerInputSnapshot,
+    slot_store: &ValidationSlotStoreSnapshot,
+    policy: &ValidationAdmissionPolicy,
+    now_utc: &str,
+) -> Result<ValidationAdmissionDecisionRecord> {
+    validate_request(&context.request)?;
+    policy.validate()?;
+    let now = parse_utc(now_utc)?;
+    let requested_at = parse_utc(&context.requested_at_utc)?;
+    let request_age_seconds = now.signed_duration_since(requested_at).num_seconds().max(0);
+    let broad_gate = is_broad_validation_request(&context.request);
+    let rch_required = is_rch_required(&context.request);
+    let age_priority_boosted =
+        context.bead_priority <= 1 || request_age_seconds >= policy.request_age_boost_seconds;
+    let matching = matching_slots(&context.request, slot_store, now_utc, policy)?;
+    let active_broad_gates = active_broad_gate_count(slot_store, now_utc)?;
+    let mut reasons = Vec::new();
+    let mut required_actions = Vec::new();
+    let mut reusable_slot = None;
+    let mut coalesced_artifacts = Vec::new();
+    let blocking_source_reasons = blocking_source_reasons(inputs, slot_store);
+    let source_statuses = admission_source_statuses(inputs, slot_store);
+    let hard_rch_backpressure = inputs.rch.free_slots == Some(0)
+        || inputs
+            .rch
+            .queued_builds
+            .is_some_and(|queued| queued > policy.max_queued_builds)
+        || inputs
+            .rch
+            .active_builds
+            .is_some_and(|active| active > policy.max_active_builds);
+    let soft_broad_backpressure = broad_gate
+        && (inputs.rch.saturated
+            || inputs
+                .rch
+                .free_slots
+                .is_some_and(|free| free < policy.min_free_slots_for_broad_gate)
+            || active_broad_gates >= policy.max_active_broad_gates);
+    let low_headroom = inputs.cargo_headroom.low_headroom || inputs.scratch_headroom.low_headroom;
+
+    let fields = ValidationAdmissionPolicyFields {
+        request_age_seconds,
+        bead_priority: context.bead_priority,
+        age_priority_boosted,
+        broad_gate,
+        rch_required,
+        rch_saturated: inputs.rch.saturated,
+        rch_local_fallback: inputs.rch.local_fallback,
+        low_cargo_headroom: inputs.cargo_headroom.low_headroom,
+        low_scratch_headroom: inputs.scratch_headroom.low_headroom,
+        doctor_failed: inputs.doctor.has_failures,
+        dirty_worktree: inputs.git.dirty,
+        active_equivalent_slots: matching.active.len(),
+        reusable_equivalent_slots: matching.reusable.len(),
+        stale_equivalent_slots: matching.stale.len(),
+        active_broad_gates,
+        stale_in_progress_beads: inputs.beads.stale_in_progress_ids.len(),
+        blocking_source_degraded: !blocking_source_reasons.is_empty(),
+        reuse_required: policy.reuse_required,
+    };
+
+    let decision = if rch_required && inputs.rch.local_fallback {
+        reasons.push("rch_required_but_local_fallback_detected".to_string());
+        required_actions.push("restore_remote_rch_or_run_later_do_not_run_locally".to_string());
+        ValidationAdmissionDecision::DenyLocalFallback
+    } else if let Some(lease) = matching.reusable.first().copied() {
+        reasons.push(format!(
+            "equivalent_reusable_slot_available:{}",
+            lease.slot_id
+        ));
+        reusable_slot = Some(lease.slot_id.clone());
+        coalesced_artifacts.clone_from(&lease.artifacts);
+        ValidationAdmissionDecision::Coalesce
+    } else if let Some(lease) = matching.stale.first().copied() {
+        reasons.push(format!(
+            "equivalent_stale_slot_recoverable:{}",
+            lease.slot_id
+        ));
+        required_actions.push("record_stale_recovery_without_killing_other_processes".to_string());
+        ValidationAdmissionDecision::StaleRecover
+    } else if !inputs.beads.stale_in_progress_ids.is_empty() {
+        reasons.push(format!(
+            "stale_in_progress_beads_detected:{}",
+            inputs.beads.stale_in_progress_ids.join(",")
+        ));
+        required_actions.push("recover_stale_beads_before_new_validation".to_string());
+        ValidationAdmissionDecision::StaleRecover
+    } else if let Some(lease) = matching.active.first().copied() {
+        reasons.push(format!(
+            "equivalent_active_slot_in_flight:{}",
+            lease.slot_id
+        ));
+        required_actions.push("wait_for_equivalent_validation_result".to_string());
+        ValidationAdmissionDecision::Wait
+    } else if !blocking_source_reasons.is_empty() {
+        reasons.extend(blocking_source_reasons);
+        required_actions.push("refresh_degraded_authoritative_sources".to_string());
+        ValidationAdmissionDecision::DegradedBlock
+    } else if inputs.doctor.has_failures {
+        reasons.push("doctor_preflight_has_failures".to_string());
+        required_actions.push("resolve_doctor_failures_before_validation".to_string());
+        ValidationAdmissionDecision::DegradedBlock
+    } else if low_headroom && broad_gate && policy.allow_narrow_scope {
+        reasons.push("broad_gate_has_insufficient_target_or_tmp_headroom".to_string());
+        required_actions.push("narrow_to_package_test_or_non_compile_gate".to_string());
+        ValidationAdmissionDecision::Narrow
+    } else if low_headroom {
+        reasons.push("target_or_tmp_headroom_below_required_bytes".to_string());
+        required_actions.push("restore_scratch_headroom_before_validation".to_string());
+        ValidationAdmissionDecision::DegradedBlock
+    } else if policy.reuse_required {
+        reasons.push("reuse_required_but_no_valid_reusable_slot".to_string());
+        required_actions.push("run_required_gate_or_wait_for_matching_artifact".to_string());
+        ValidationAdmissionDecision::DegradedBlock
+    } else if hard_rch_backpressure && broad_gate && policy.allow_narrow_scope {
+        reasons.push("hard_rch_backpressure_on_broad_gate".to_string());
+        required_actions.push("narrow_scope_or_wait_for_rch_capacity".to_string());
+        ValidationAdmissionDecision::Narrow
+    } else if hard_rch_backpressure {
+        reasons.push("hard_rch_backpressure".to_string());
+        required_actions.push("wait_for_rch_capacity".to_string());
+        ValidationAdmissionDecision::Wait
+    } else if soft_broad_backpressure && !age_priority_boosted && policy.allow_narrow_scope {
+        reasons.push("fresh_low_priority_broad_gate_under_global_backpressure".to_string());
+        required_actions.push("narrow_scope_or_wait_for_broad_gate_slot".to_string());
+        ValidationAdmissionDecision::Narrow
+    } else {
+        if soft_broad_backpressure && age_priority_boosted {
+            reasons.push("age_or_priority_boost_overrides_soft_backpressure".to_string());
+        } else {
+            reasons.push("validation_admission_allowed".to_string());
+        }
+        ValidationAdmissionDecision::Allow
+    };
+
+    let confidence = if fields.blocking_source_degraded || inputs.agent_mail.is_degraded() {
+        "medium"
+    } else {
+        "high"
+    }
+    .to_string();
+
+    Ok(ValidationAdmissionDecisionRecord {
+        schema: VALIDATION_BROKER_DECISION_SCHEMA.to_string(),
+        decision_id: admission_decision_id(&context, now_utc, &decision)?,
+        request_id: context.request_id,
+        generated_at: now_utc.to_string(),
+        decision,
+        confidence,
+        reasons,
+        source_statuses,
+        required_actions,
+        reusable_slot,
+        coalesced_artifacts,
+        suppressed_claims: default_suppressed_claims(),
+        no_claims: default_no_claims(),
+        policy: fields,
+    })
+}
+
 fn source_health(
     provenance: ValidationSourceProvenance,
     degraded_reasons: Vec<String>,
@@ -998,6 +1274,219 @@ fn collect_source_reasons(
     for reason in &source_health.degraded_reasons {
         degraded_reasons.push(format!("{}: {reason}", source_health.provenance.source));
     }
+}
+
+#[derive(Debug, Clone)]
+struct MatchingValidationSlots<'a> {
+    active: Vec<&'a ValidationSlotLease>,
+    reusable: Vec<&'a ValidationSlotLease>,
+    stale: Vec<&'a ValidationSlotLease>,
+}
+
+fn matching_slots<'a>(
+    request: &ValidationSlotRequest,
+    slot_store: &'a ValidationSlotStoreSnapshot,
+    now_utc: &str,
+    policy: &ValidationAdmissionPolicy,
+) -> Result<MatchingValidationSlots<'a>> {
+    let mut slots = MatchingValidationSlots {
+        active: Vec::new(),
+        reusable: Vec::new(),
+        stale: Vec::new(),
+    };
+
+    for lease in slot_store.latest_by_slot_id.values() {
+        if lease.state.is_terminal() || !lease.matches_request_equivalence(request)? {
+            continue;
+        }
+        let stale_now = lease.is_stale_at(now_utc)?;
+        match lease.state {
+            ValidationSlotState::Reusable
+                if !stale_now
+                    && !lease.artifacts.is_empty()
+                    && reusable_artifact_is_fresh(
+                        lease,
+                        now_utc,
+                        policy.reusable_artifact_freshness_seconds,
+                    )? =>
+            {
+                slots.reusable.push(lease);
+            }
+            ValidationSlotState::Reusable | ValidationSlotState::Stale => {
+                slots.stale.push(lease);
+            }
+            ValidationSlotState::Active | ValidationSlotState::Requested if stale_now => {
+                slots.stale.push(lease);
+            }
+            ValidationSlotState::Active | ValidationSlotState::Requested => {
+                slots.active.push(lease);
+            }
+            ValidationSlotState::Failed
+            | ValidationSlotState::Released
+            | ValidationSlotState::Expired
+            | ValidationSlotState::Degraded => {}
+        }
+    }
+
+    Ok(slots)
+}
+
+fn reusable_artifact_is_fresh(
+    lease: &ValidationSlotLease,
+    now_utc: &str,
+    freshness_seconds: i64,
+) -> Result<bool> {
+    let now = parse_utc(now_utc)?;
+    let heartbeat = parse_utc(&lease.heartbeat_at_utc)?;
+    let age_seconds = now.signed_duration_since(heartbeat).num_seconds().max(0);
+    Ok(age_seconds <= freshness_seconds)
+}
+
+fn active_broad_gate_count(
+    slot_store: &ValidationSlotStoreSnapshot,
+    now_utc: &str,
+) -> Result<usize> {
+    let mut count = 0;
+    for lease in slot_store.latest_by_slot_id.values() {
+        if matches!(
+            lease.state,
+            ValidationSlotState::Active | ValidationSlotState::Requested
+        ) && !lease.is_stale_at(now_utc)?
+            && is_broad_command(&lease.command, &lease.command_class)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn is_broad_validation_request(request: &ValidationSlotRequest) -> bool {
+    is_broad_command(&request.command, &request.command_class)
+}
+
+fn is_broad_command(command: &[String], command_class: &str) -> bool {
+    if command
+        .iter()
+        .any(|segment| matches!(segment.as_str(), "--all-targets" | "--workspace"))
+    {
+        return true;
+    }
+
+    let command_class = command_class.trim().to_ascii_lowercase();
+    let is_compile_gate = matches!(
+        command_class.as_str(),
+        "cargo_check" | "cargo_clippy" | "cargo_test"
+    );
+    is_compile_gate && !has_narrow_cargo_scope(command)
+}
+
+fn has_narrow_cargo_scope(command: &[String]) -> bool {
+    command.iter().any(|segment| {
+        matches!(
+            segment.as_str(),
+            "-p" | "--package" | "--test" | "--bin" | "--example" | "--bench"
+        ) || segment.starts_with("--package=")
+            || segment.starts_with("--test=")
+            || segment.starts_with("--bin=")
+            || segment.starts_with("--example=")
+            || segment.starts_with("--bench=")
+    })
+}
+
+fn is_rch_required(request: &ValidationSlotRequest) -> bool {
+    contains_any(&request.runner, &["rch_required", "rch required"])
+}
+
+fn blocking_source_reasons(
+    inputs: &ValidationBrokerInputSnapshot,
+    slot_store: &ValidationSlotStoreSnapshot,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    collect_source_reasons(&mut reasons, &inputs.rch.health);
+    collect_source_reasons(&mut reasons, &inputs.cargo_headroom.health);
+    collect_source_reasons(&mut reasons, &inputs.doctor.health);
+    collect_source_reasons(&mut reasons, &inputs.git.health);
+    collect_source_reasons(&mut reasons, &inputs.beads.health);
+    collect_source_reasons(&mut reasons, &inputs.scratch_headroom.health);
+    for reason in &slot_store.degraded_reasons {
+        reasons.push(format!("validation_slot_store: {reason}"));
+    }
+    reasons
+}
+
+fn admission_source_statuses(
+    inputs: &ValidationBrokerInputSnapshot,
+    slot_store: &ValidationSlotStoreSnapshot,
+) -> Vec<ValidationAdmissionSourceStatus> {
+    let mut statuses = Vec::with_capacity(8);
+    push_source_status(&mut statuses, &inputs.rch.health);
+    push_source_status(&mut statuses, &inputs.cargo_headroom.health);
+    push_source_status(&mut statuses, &inputs.doctor.health);
+    push_source_status(&mut statuses, &inputs.git.health);
+    push_source_status(&mut statuses, &inputs.beads.health);
+    push_source_status(&mut statuses, &inputs.scratch_headroom.health);
+    push_source_status(&mut statuses, &inputs.agent_mail);
+    statuses.push(ValidationAdmissionSourceStatus {
+        source_id: "validation_slot_store".to_string(),
+        state: if slot_store.is_degraded() {
+            ValidationSourceState::Degraded
+        } else {
+            ValidationSourceState::Available
+        },
+        degraded_reasons: slot_store.degraded_reasons.clone(),
+    });
+    statuses
+}
+
+fn push_source_status(
+    statuses: &mut Vec<ValidationAdmissionSourceStatus>,
+    source_health: &ValidationSourceHealth,
+) {
+    statuses.push(ValidationAdmissionSourceStatus {
+        source_id: source_health.provenance.source.clone(),
+        state: source_health.state.clone(),
+        degraded_reasons: source_health.degraded_reasons.clone(),
+    });
+}
+
+fn admission_decision_id(
+    context: &ValidationAdmissionRequestContext,
+    now_utc: &str,
+    decision: &ValidationAdmissionDecision,
+) -> Result<String> {
+    fingerprint_json(&json!({
+        "request_id": &context.request_id,
+        "slot_id": &context.request.slot_id,
+        "bead_id": &context.request.bead_id,
+        "generated_at": now_utc,
+        "decision": decision_key(decision),
+    }))
+}
+
+const fn decision_key(decision: &ValidationAdmissionDecision) -> &'static str {
+    match decision {
+        ValidationAdmissionDecision::Allow => "allow",
+        ValidationAdmissionDecision::Wait => "wait",
+        ValidationAdmissionDecision::Coalesce => "coalesce",
+        ValidationAdmissionDecision::Narrow => "narrow",
+        ValidationAdmissionDecision::DenyLocalFallback => "deny_local_fallback",
+        ValidationAdmissionDecision::StaleRecover => "stale_recover",
+        ValidationAdmissionDecision::DegradedBlock => "degraded_block",
+    }
+}
+
+fn default_suppressed_claims() -> Vec<String> {
+    default_no_claims()
+}
+
+fn default_no_claims() -> Vec<String> {
+    vec![
+        "not_ci_success".to_string(),
+        "not_release_performance_evidence".to_string(),
+        "not_dropin_certification_evidence".to_string(),
+        "not_permission_to_skip_required_gates".to_string(),
+        "not_permission_to_modify_other_agents_files".to_string(),
+    ]
 }
 
 fn count_from_line(raw: &str, marker: &str) -> Option<u64> {

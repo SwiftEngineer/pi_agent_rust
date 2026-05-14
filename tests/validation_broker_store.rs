@@ -8,13 +8,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pi::validation_broker::{
-    VALIDATION_BROKER_INPUT_SCHEMA, VALIDATION_BROKER_SLOT_RECORD_SCHEMA,
-    VALIDATION_BROKER_SLOT_SCHEMA, VALIDATION_BROKER_SLOT_STORE_SCHEMA, ValidationBrokerInputParts,
-    ValidationBrokerInputSnapshot, ValidationSlotArtifact, ValidationSlotLease,
-    ValidationSlotRequest, ValidationSlotState, ValidationSlotStore, ValidationSlotStoreStatus,
-    ValidationSourceProvenance, ValidationSourceState, normalize_available_source,
-    normalize_beads_json, normalize_doctor_json, normalize_git_status_text,
-    normalize_headroom_json, normalize_rch_queue_text, normalize_unavailable_source,
+    VALIDATION_BROKER_DECISION_SCHEMA, VALIDATION_BROKER_INPUT_SCHEMA,
+    VALIDATION_BROKER_SLOT_RECORD_SCHEMA, VALIDATION_BROKER_SLOT_SCHEMA,
+    VALIDATION_BROKER_SLOT_STORE_SCHEMA, ValidationAdmissionDecision, ValidationAdmissionPolicy,
+    ValidationAdmissionRequestContext, ValidationBrokerInputParts, ValidationBrokerInputSnapshot,
+    ValidationSlotArtifact, ValidationSlotLease, ValidationSlotRequest, ValidationSlotState,
+    ValidationSlotStore, ValidationSlotStoreSnapshot, ValidationSlotStoreStatus,
+    ValidationSourceProvenance, ValidationSourceState, decide_validation_admission,
+    normalize_available_source, normalize_beads_json, normalize_doctor_json,
+    normalize_git_status_text, normalize_headroom_json, normalize_rch_queue_text,
+    normalize_unavailable_source,
 };
 use serde_json::json;
 
@@ -112,6 +115,130 @@ fn provenance(source: &str) -> Result<ValidationSourceProvenance, String> {
         Some(format!("artifacts/{source}.json")),
     )
     .map_err(to_string)
+}
+
+fn admission_context(request_id: &str) -> ValidationAdmissionRequestContext {
+    admission_context_for(request_id, base_request("slot-request"), START, 4)
+}
+
+fn admission_context_for(
+    request_id: &str,
+    request: ValidationSlotRequest,
+    requested_at_utc: &str,
+    bead_priority: u8,
+) -> ValidationAdmissionRequestContext {
+    ValidationAdmissionRequestContext {
+        request_id: request_id.to_string(),
+        request,
+        requested_at_utc: requested_at_utc.to_string(),
+        bead_priority,
+    }
+}
+
+fn healthy_inputs() -> Result<ValidationBrokerInputSnapshot, String> {
+    inputs_with(
+        "Build Queue\n  - 1 Active Build(s)\n  - 0 Queued Build(s)\nWorker Availability\n  -> 4 / 18 slots free\n",
+        false,
+        false,
+        &json!({"issues": [
+            {"id": "bd-active", "status": "in_progress", "assignee": "Codex", "updated_at": RENEWED_EXPIRES}
+        ]}),
+    )
+}
+
+fn saturated_inputs() -> Result<ValidationBrokerInputSnapshot, String> {
+    inputs_with(
+        "Build Queue\n  - 4 Active Build(s)\n  - 2 Queued Build(s)\nWorker Availability\n  -> 0 / 18 slots free\n",
+        false,
+        false,
+        &json!({"issues": []}),
+    )
+}
+
+fn local_fallback_inputs() -> Result<ValidationBrokerInputSnapshot, String> {
+    inputs_with(
+        "Build Queue\n  - 1 Active Build(s)\n  - 0 Queued Build(s)\nWorker Availability\n  -> 4 / 18 slots free\nRCH fails open; command may run with local fallback\n",
+        false,
+        false,
+        &json!({"issues": []}),
+    )
+}
+
+fn low_scratch_inputs() -> Result<ValidationBrokerInputSnapshot, String> {
+    inputs_with(
+        "Build Queue\n  - 1 Active Build(s)\n  - 0 Queued Build(s)\nWorker Availability\n  -> 4 / 18 slots free\n",
+        false,
+        true,
+        &json!({"issues": []}),
+    )
+}
+
+fn stale_bead_inputs() -> Result<ValidationBrokerInputSnapshot, String> {
+    inputs_with(
+        "Build Queue\n  - 1 Active Build(s)\n  - 0 Queued Build(s)\nWorker Availability\n  -> 4 / 18 slots free\n",
+        false,
+        false,
+        &json!({"issues": [
+            {"id": "bd-stale", "status": "in_progress", "assignee": "Other", "updated_at": START}
+        ]}),
+    )
+}
+
+fn inputs_with(
+    rch_raw: &str,
+    low_cargo: bool,
+    low_scratch: bool,
+    beads_value: &serde_json::Value,
+) -> Result<ValidationBrokerInputSnapshot, String> {
+    let rch = normalize_rch_queue_text(provenance("rch")?, rch_raw).map_err(to_string)?;
+    let cargo_available = if low_cargo { 5_000_u64 } else { 50_000_u64 };
+    let scratch_available = if low_scratch { 5_000_u64 } else { 50_000_u64 };
+    let cargo_headroom = normalize_headroom_json(
+        provenance("cargo_headroom")?,
+        &json!({"available_bytes": cargo_available, "required_bytes": 10_000_u64}),
+    )
+    .map_err(to_string)?;
+    let doctor = normalize_doctor_json(
+        provenance("doctor")?,
+        &json!({"checks": [{"name": "scratch", "status": "ok"}]}),
+    )
+    .map_err(to_string)?;
+    let git = normalize_git_status_text(provenance("git")?, "3048e53f3", "## main...origin/main\n")
+        .map_err(to_string)?;
+    let beads = normalize_beads_json(provenance("beads")?, beads_value, STALE_AT, 3600)
+        .map_err(to_string)?;
+    let scratch_headroom = normalize_headroom_json(
+        provenance("scratch_headroom")?,
+        &json!({"available_bytes": scratch_available, "required_bytes": 10_000_u64}),
+    )
+    .map_err(to_string)?;
+    let agent_mail = normalize_available_source(provenance("agent_mail")?).map_err(to_string)?;
+
+    ValidationBrokerInputSnapshot::from_parts(ValidationBrokerInputParts {
+        captured_at_utc: STALE_AT.to_string(),
+        rch,
+        cargo_headroom,
+        doctor,
+        git,
+        beads,
+        scratch_headroom,
+        agent_mail,
+    })
+    .map_err(to_string)
+}
+
+fn slot_snapshot(leases: Vec<ValidationSlotLease>) -> ValidationSlotStoreSnapshot {
+    let latest_by_slot_id = leases
+        .iter()
+        .map(|lease| (lease.slot_id.clone(), lease.clone()))
+        .collect();
+    ValidationSlotStoreSnapshot {
+        schema: VALIDATION_BROKER_SLOT_STORE_SCHEMA.to_string(),
+        status: ValidationSlotStoreStatus::Available,
+        leases,
+        latest_by_slot_id,
+        degraded_reasons: Vec::new(),
+    }
 }
 
 #[test]
@@ -545,6 +672,307 @@ fn beads_normalizer_detects_stale_in_progress_work() -> TestResult {
             .iter()
             .any(|id| id == "bd-fresh"),
         "fresh bead not stale",
+    )
+}
+
+#[test]
+fn admission_allows_when_capacity_and_sources_are_healthy() -> TestResult {
+    let decision = decide_validation_admission(
+        admission_context("request-allow"),
+        &healthy_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy::default(),
+        STALE_AT,
+    )
+    .map_err(to_string)?;
+
+    require(
+        decision.schema == VALIDATION_BROKER_DECISION_SCHEMA,
+        "decision schema",
+    )?;
+    require(
+        matches!(&decision.decision, ValidationAdmissionDecision::Allow),
+        "healthy source admission allowed",
+    )?;
+    require(
+        decision
+            .no_claims
+            .iter()
+            .any(|claim| claim == "not_permission_to_skip_required_gates"),
+        "decision preserves no-claims",
+    )
+}
+
+#[test]
+fn admission_coalesces_reusable_and_waits_for_active_slots() -> TestResult {
+    let mut reusable = acquire("slot-reusable-decision")?;
+    reusable
+        .mark_reusable(
+            "SilentReef",
+            HEARTBEAT,
+            vec![ValidationSlotArtifact {
+                path: "target/debug/deps/pi.d".to_string(),
+                sha256: Some("artifact-hash-1".to_string()),
+                schema: Some("cargo_check_result.v1".to_string()),
+            }],
+        )
+        .map_err(to_string)?;
+    let reusable_decision = decide_validation_admission(
+        admission_context("request-reusable"),
+        &healthy_inputs()?,
+        &slot_snapshot(vec![reusable]),
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(
+            &reusable_decision.decision,
+            ValidationAdmissionDecision::Coalesce
+        ),
+        "equivalent reusable slot coalesces",
+    )?;
+    require(
+        reusable_decision.reusable_slot.as_deref() == Some("slot-reusable-decision"),
+        "reusable slot id recorded",
+    )?;
+    require(
+        reusable_decision.coalesced_artifacts.len() == 1,
+        "reusable artifacts carried",
+    )?;
+
+    let active = acquire("slot-active-decision")?;
+    let active_decision = decide_validation_admission(
+        admission_context("request-active"),
+        &saturated_inputs()?,
+        &slot_snapshot(vec![active]),
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(&active_decision.decision, ValidationAdmissionDecision::Wait),
+        "equivalent active slot waits instead of starting duplicate gate",
+    )?;
+    require(
+        active_decision.policy.active_equivalent_slots == 1,
+        "equivalent active slot counted",
+    )
+}
+
+#[test]
+fn admission_does_not_coalesce_non_equivalent_git_or_target() -> TestResult {
+    let mut different_git = acquire("slot-different-git")?;
+    different_git.git_head = "different-head".to_string();
+    let decision = decide_validation_admission(
+        admission_context("request-different-git"),
+        &healthy_inputs()?,
+        &slot_snapshot(vec![different_git]),
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+
+    require(
+        !matches!(&decision.decision, ValidationAdmissionDecision::Coalesce),
+        "git mismatch does not coalesce",
+    )?;
+    require(
+        matches!(&decision.decision, ValidationAdmissionDecision::Narrow),
+        "non-equivalent broad gate narrows under active broad-gate pressure",
+    )?;
+    require(
+        decision.policy.active_equivalent_slots == 0
+            && decision.policy.reusable_equivalent_slots == 0,
+        "non-equivalent slot not counted",
+    )
+}
+
+#[test]
+fn admission_recovers_stale_slots_and_stale_beads() -> TestResult {
+    let stale_slot = acquire("slot-stale-decision")?;
+    let slot_decision = decide_validation_admission(
+        admission_context("request-stale-slot"),
+        &healthy_inputs()?,
+        &slot_snapshot(vec![stale_slot]),
+        &ValidationAdmissionPolicy::default(),
+        STALE_AT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(
+            &slot_decision.decision,
+            ValidationAdmissionDecision::StaleRecover
+        ),
+        "stale slot triggers recovery",
+    )?;
+    require(
+        slot_decision.policy.stale_equivalent_slots == 1,
+        "stale equivalent counted",
+    )?;
+
+    let bead_decision = decide_validation_admission(
+        admission_context("request-stale-bead"),
+        &stale_bead_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy::default(),
+        STALE_AT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(
+            &bead_decision.decision,
+            ValidationAdmissionDecision::StaleRecover
+        ),
+        "stale bead triggers recovery",
+    )?;
+    require(
+        bead_decision.policy.stale_in_progress_beads == 1,
+        "stale bead policy field recorded",
+    )
+}
+
+#[test]
+fn admission_waits_or_narrows_under_rch_and_scratch_backpressure() -> TestResult {
+    let wait_decision = decide_validation_admission(
+        admission_context("request-saturated"),
+        &saturated_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy {
+            allow_narrow_scope: false,
+            ..ValidationAdmissionPolicy::default()
+        },
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(&wait_decision.decision, ValidationAdmissionDecision::Wait),
+        "saturated rch waits when narrowing disabled",
+    )?;
+
+    let narrow_decision = decide_validation_admission(
+        admission_context("request-low-scratch"),
+        &low_scratch_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(
+            &narrow_decision.decision,
+            ValidationAdmissionDecision::Narrow
+        ),
+        "low scratch headroom narrows broad gate",
+    )?;
+    require(
+        narrow_decision.policy.low_scratch_headroom,
+        "low scratch policy field recorded",
+    )
+}
+
+#[test]
+fn admission_priority_or_age_overrides_soft_broad_gate_backpressure() -> TestResult {
+    let mut active_request = base_request("slot-other-broad");
+    active_request.git_head = "different-head".to_string();
+    let active = ValidationSlotLease::acquire(active_request, START, "2026-05-14T10:00:00Z")
+        .map_err(to_string)?;
+    let store = slot_snapshot(vec![active]);
+
+    let priority_decision = decide_validation_admission(
+        admission_context_for("request-high-priority", base_request("slot-high"), START, 1),
+        &healthy_inputs()?,
+        &store,
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(
+            &priority_decision.decision,
+            ValidationAdmissionDecision::Allow
+        ),
+        "high priority broad gate can proceed under soft pressure",
+    )?;
+    require(
+        priority_decision.policy.age_priority_boosted,
+        "priority boost recorded",
+    )?;
+
+    let aged_decision = decide_validation_admission(
+        admission_context_for("request-aged", base_request("slot-aged"), START, 4),
+        &healthy_inputs()?,
+        &store,
+        &ValidationAdmissionPolicy::default(),
+        STALE_AT,
+    )
+    .map_err(to_string)?;
+    require(
+        matches!(&aged_decision.decision, ValidationAdmissionDecision::Allow),
+        "aged broad gate can proceed under soft pressure",
+    )?;
+    require(
+        aged_decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "age_or_priority_boost_overrides_soft_backpressure"),
+        "soft pressure override reason recorded",
+    )
+}
+
+#[test]
+fn admission_denies_required_rch_gate_on_local_fallback() -> TestResult {
+    let decision = decide_validation_admission(
+        admission_context("request-local-fallback"),
+        &local_fallback_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy::default(),
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+
+    require(
+        matches!(
+            &decision.decision,
+            ValidationAdmissionDecision::DenyLocalFallback
+        ),
+        "rch-required gate denies local fallback",
+    )?;
+    require(
+        decision.source_statuses.iter().any(|status| {
+            status.source_id == "rch" && status.state == ValidationSourceState::Degraded
+        }),
+        "degraded rch source status recorded",
+    )
+}
+
+#[test]
+fn admission_refuses_required_reuse_when_no_valid_artifact_exists() -> TestResult {
+    let decision = decide_validation_admission(
+        admission_context("request-reuse-required"),
+        &healthy_inputs()?,
+        &slot_snapshot(Vec::new()),
+        &ValidationAdmissionPolicy {
+            reuse_required: true,
+            ..ValidationAdmissionPolicy::default()
+        },
+        HEARTBEAT,
+    )
+    .map_err(to_string)?;
+
+    require(
+        matches!(
+            &decision.decision,
+            ValidationAdmissionDecision::DegradedBlock
+        ),
+        "required reusable evidence fails closed when absent",
+    )?;
+    require(
+        decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "reuse_required_but_no_valid_reusable_slot"),
+        "reuse-required reason recorded",
     )
 }
 
