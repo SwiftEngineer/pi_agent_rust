@@ -5292,7 +5292,7 @@ mod tests {
     use crate::auth::AuthCredential;
     use crate::model::{
         AssistantMessage, AssistantMessageEvent, ContentBlock, ImageContent, Message, StopReason,
-        TextContent, ThinkingLevel, Usage, UserContent, UserMessage,
+        TextContent, ThinkingLevel, ToolCall, Usage, UserContent, UserMessage,
     };
     use crate::package_manager::PackageManager;
     use crate::provider::{InputType, Model, ModelCost, Provider};
@@ -5543,6 +5543,70 @@ mod tests {
         }
     }
 
+    fn rpc_thinking_delta_event(full_text: &str, delta: &str) -> AgentEvent {
+        let partial = rpc_test_assistant_message(full_text);
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(Arc::clone(&partial)),
+            assistant_message_event: AssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: delta.to_string(),
+                partial,
+            },
+        }
+    }
+
+    fn rpc_tool_call_delta_event(full_text: &str, delta: &str) -> AgentEvent {
+        let partial = rpc_test_assistant_message(full_text);
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(Arc::clone(&partial)),
+            assistant_message_event: AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: delta.to_string(),
+                partial,
+            },
+        }
+    }
+
+    fn rpc_text_start_event(full_text: &str) -> AgentEvent {
+        let partial = rpc_test_assistant_message(full_text);
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(Arc::clone(&partial)),
+            assistant_message_event: AssistantMessageEvent::TextStart {
+                content_index: 0,
+                partial,
+            },
+        }
+    }
+
+    fn rpc_text_end_event(full_text: &str) -> AgentEvent {
+        let partial = rpc_test_assistant_message(full_text);
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(Arc::clone(&partial)),
+            assistant_message_event: AssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content: full_text.to_string(),
+                partial,
+            },
+        }
+    }
+
+    fn rpc_tool_call_end_event(full_text: &str) -> AgentEvent {
+        let partial = rpc_test_assistant_message(full_text);
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(Arc::clone(&partial)),
+            assistant_message_event: AssistantMessageEvent::ToolCallEnd {
+                content_index: 0,
+                tool_call: ToolCall {
+                    id: "tool-1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: json!({ "cmd": "printf hi" }),
+                    thought_signature: None,
+                },
+                partial,
+            },
+        }
+    }
+
     fn rpc_tool_update_event(output: &str) -> AgentEvent {
         AgentEvent::ToolExecutionUpdate {
             tool_call_id: "tool-1".to_string(),
@@ -5553,6 +5617,27 @@ mod tests {
                 details: None,
                 is_error: false,
             },
+        }
+    }
+
+    fn rpc_tool_start_event() -> AgentEvent {
+        AgentEvent::ToolExecutionStart {
+            tool_call_id: "tool-1".to_string(),
+            tool_name: "bash".to_string(),
+            args: json!({ "cmd": "printf hi" }),
+        }
+    }
+
+    fn rpc_tool_end_event(output: &str) -> AgentEvent {
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tool-1".to_string(),
+            tool_name: "bash".to_string(),
+            result: crate::tools::ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new(output.to_string()))],
+                details: None,
+                is_error: false,
+            },
+            is_error: false,
         }
     }
 
@@ -6779,6 +6864,156 @@ export default function init(pi) {
     }
 
     #[test]
+    fn rpc_output_pressure_conformance_matrix_classifies_event_families() {
+        let user = Message::User(UserMessage {
+            content: UserContent::Text("hello".to_string()),
+            timestamp: 0,
+        });
+        let assistant = Message::Assistant(rpc_test_assistant_message("done"));
+        let cases = vec![
+            (
+                "agent_start",
+                AgentEvent::AgentStart {
+                    session_id: Arc::from("rpc-pressure-session"),
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "turn_start",
+                AgentEvent::TurnStart {
+                    session_id: Arc::from("rpc-pressure-session"),
+                    turn_index: 0,
+                    timestamp: 0,
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "message_start",
+                AgentEvent::MessageStart { message: user },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "message_text_start",
+                rpc_text_start_event("hello"),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "message_text_delta",
+                rpc_text_delta_event("hello", "o"),
+                RpcOutputPressureClass::MessageDelta,
+            ),
+            (
+                "message_thinking_delta",
+                rpc_thinking_delta_event("thinking", "ink"),
+                RpcOutputPressureClass::MessageDelta,
+            ),
+            (
+                "message_tool_call_delta",
+                rpc_tool_call_delta_event("tool", "{\"arg\""),
+                RpcOutputPressureClass::MessageDelta,
+            ),
+            (
+                "message_text_end",
+                rpc_text_end_event("hello"),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "message_tool_call_end",
+                rpc_tool_call_end_event("tool"),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "message_end",
+                AgentEvent::MessageEnd {
+                    message: assistant.clone(),
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "tool_start",
+                rpc_tool_start_event(),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "tool_update",
+                rpc_tool_update_event("partial output"),
+                RpcOutputPressureClass::ToolUpdate,
+            ),
+            (
+                "tool_end",
+                rpc_tool_end_event("final output"),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "turn_end",
+                AgentEvent::TurnEnd {
+                    session_id: Arc::from("rpc-pressure-session"),
+                    turn_index: 0,
+                    message: assistant,
+                    tool_results: Vec::new(),
+                    latency_breakdown: None,
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "agent_end",
+                rpc_agent_end_event("done"),
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "auto_compaction_start",
+                AgentEvent::AutoCompactionStart {
+                    reason: "manual".to_string(),
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "auto_retry_start",
+                AgentEvent::AutoRetryStart {
+                    attempt: 1,
+                    max_attempts: 3,
+                    delay_ms: 10,
+                    error_message: "temporary".to_string(),
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+            (
+                "extension_error",
+                AgentEvent::ExtensionError {
+                    extension_id: Some("ext.test".to_string()),
+                    event: "onAgentEvent".to_string(),
+                    error: "failed".to_string(),
+                },
+                RpcOutputPressureClass::Semantic,
+            ),
+        ];
+
+        let matrix = cases
+            .iter()
+            .map(|(name, event, expected)| {
+                let actual = rpc_output_pressure_class(event);
+                assert_eq!(actual, *expected, "unexpected class for {name}");
+                json!({
+                    "event": name,
+                    "class": format!("{actual:?}"),
+                    "expected": format!("{expected:?}"),
+                    "verdict": "pass",
+                })
+            })
+            .collect::<Vec<_>>();
+
+        write_rpc_pressure_evidence(&json!({
+            "schema": RPC_OUTPUT_PRESSURE_SCHEMA_V1,
+            "case": "event_classification_conformance_matrix",
+            "event_count": matrix.len(),
+            "matrix": matrix,
+            "coalescible_classes": ["MessageDelta", "ToolUpdate"],
+            "semantic_preservation": "all non-delta lifecycle events are classified Semantic",
+            "verdict": "pass",
+        }));
+    }
+
+    #[test]
     fn rpc_output_pressure_coalesces_stream_deltas_without_blocking() {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<String>(1);
         tx.try_send("occupied".to_string())
@@ -6881,6 +7116,107 @@ export default function init(pi) {
             "latest full content"
         );
         assert_eq!(pressure.snapshot().pending, 0);
+    }
+
+    #[test]
+    fn rpc_output_pressure_conformance_matrix_flushes_each_coalesced_class_before_semantic() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+        tx.try_send("occupied".to_string())
+            .expect("seed occupied output slot");
+        let mut pressure = RpcOutputPressureState::default();
+
+        let stale_delta = rpc_text_delta_event("first full text", "first");
+        pressure.send_agent_event(&tx, &stale_delta, agent_event(stale_delta.clone()));
+        let latest_delta = rpc_thinking_delta_event("latest thinking text", "latest-thinking");
+        pressure.send_agent_event(&tx, &latest_delta, agent_event(latest_delta.clone()));
+        let stale_tool = rpc_tool_update_event("first tool output");
+        pressure.send_agent_event(&tx, &stale_tool, agent_event(stale_tool.clone()));
+        let latest_tool = rpc_tool_update_event("latest tool output");
+        pressure.send_agent_event(&tx, &latest_tool, agent_event(latest_tool.clone()));
+
+        let before_flush = pressure.snapshot();
+        assert_eq!(before_flush.pending, 2);
+        assert_eq!(before_flush.message_deltas_coalesced, 2);
+        assert_eq!(before_flush.tool_updates_coalesced, 2);
+
+        let recv_handle = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while received.len() < 4 && Instant::now() < deadline {
+                match rx.try_recv() {
+                    Ok(line) => received.push(line),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+            received
+        });
+
+        let semantic = rpc_agent_end_event("semantic final text");
+        pressure.send_agent_event(&tx, &semantic, agent_event(semantic.clone()));
+        drop(tx);
+
+        let received = recv_handle.join().expect("receiver thread should finish");
+        assert_eq!(
+            received.first().map(String::as_str),
+            Some("occupied"),
+            "pre-existing output remains first"
+        );
+        assert_eq!(
+            received.len(),
+            4,
+            "both pending classes and semantic event flush"
+        );
+
+        let message_update: Value =
+            serde_json::from_str(&received[1]).expect("parse flushed message update");
+        assert_eq!(message_update["type"], "message_update");
+        assert_eq!(
+            message_update["assistantMessageEvent"]["type"],
+            "thinking_delta"
+        );
+        assert_eq!(
+            message_update["assistantMessageEvent"]["delta"],
+            "latest-thinking"
+        );
+
+        let tool_update: Value =
+            serde_json::from_str(&received[2]).expect("parse flushed tool update");
+        assert_eq!(tool_update["type"], "tool_execution_update");
+        assert_eq!(
+            tool_update["partialResult"]["content"][0]["text"],
+            "latest tool output"
+        );
+
+        let agent_end: Value = serde_json::from_str(&received[3]).expect("parse semantic end");
+        assert_eq!(agent_end["type"], "agent_end");
+        assert_eq!(
+            agent_end["messages"][0]["content"][0]["text"],
+            "semantic final text"
+        );
+
+        let after_flush = pressure.snapshot();
+        assert_eq!(after_flush.pending, 0);
+
+        write_rpc_pressure_evidence(&json!({
+            "schema": RPC_OUTPUT_PRESSURE_SCHEMA_V1,
+            "case": "mixed_class_coalescing_flushes_before_semantic",
+            "event_count": 5,
+            "class_count": 3,
+            "coalesced_count_by_class": {
+                "MessageDelta": before_flush.message_deltas_coalesced,
+                "ToolUpdate": before_flush.tool_updates_coalesced,
+                "Semantic": 0,
+            },
+            "pending_class_count_before_semantic": before_flush.pending,
+            "pending_class_count_after_semantic": after_flush.pending,
+            "preserved_semantic_count": 1,
+            "flushed_before_semantic": ["MessageDelta", "ToolUpdate"],
+            "latency_budget_us": RPC_OUTPUT_PRESSURE_DEBUG_BUDGET_US,
+            "verdict": "pass",
+        }));
     }
 
     // -----------------------------------------------------------------------
