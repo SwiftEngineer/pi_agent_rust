@@ -49,8 +49,10 @@ Green startup means:
 - `br ready --json` has a real open issue, not a tombstone or deleted item.
 - `scripts/report_empty_queue_convergence.py --json` reports
   `status=ready_work_available` before claiming a new bead, or
+  `status=work_to_plan` when only deferred roadmap/planning epics remain and
+  new/refined child Beads should be created, or
   `status=queue_clean` only when no ready/in-progress work remains and
-  closeout freshness is available.
+  no deferred planning epic still needs child backlog.
 - `pi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
 - `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns
   `decision=allow` with `admission_action=allow`. `admission_action=defer`

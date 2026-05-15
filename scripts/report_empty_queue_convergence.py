@@ -25,6 +25,17 @@ POLICY = "read_only_no_mutation"
 IW_DRIFT_T1_PREFIX = "IW-DRIFT-T1:"
 DEFAULT_STALE_IN_PROGRESS_HOURS = 2
 NON_BLOCKING_DEP_TYPES = {"parent-child", "related"}
+DEFERRED_PLANNING_LABELS = {
+    "idea-wizard",
+    "planning",
+    "roadmap",
+}
+DEFERRED_PLANNING_TERMS = (
+    "backlog",
+    "idea-wizard",
+    "roadmap",
+    "work_to_plan",
+)
 
 
 @dataclass(frozen=True)
@@ -157,6 +168,64 @@ def compute_ready_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(ready, key=lambda item: (int(item.get("priority", 99)), str(item.get("id", ""))))
 
 
+def child_issues_by_parent(issues: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    children: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        for dep in issue.get("dependencies") or []:
+            if not isinstance(dep, dict):
+                continue
+            if dep.get("type") != "parent-child":
+                continue
+            parent_id = dep.get("depends_on_id") or dep.get("id")
+            if parent_id:
+                children.setdefault(str(parent_id), []).append(issue)
+    return children
+
+
+def is_deferred_planning_epic(issue: dict[str, Any]) -> bool:
+    if issue.get("status") != "deferred":
+        return False
+    if issue.get("issue_type") != "epic":
+        return False
+    labels = {str(label).lower() for label in issue.get("labels") or []}
+    if labels & DEFERRED_PLANNING_LABELS:
+        return True
+    haystack = " ".join(
+        str(issue.get(field, "")).lower()
+        for field in ("title", "description", "notes")
+    )
+    return any(term in haystack for term in DEFERRED_PLANNING_TERMS)
+
+
+def deferred_planning_items(
+    issues: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    children_by_parent = child_issues_by_parent(issues)
+    items: list[dict[str, Any]] = []
+    for issue in issues:
+        if not is_deferred_planning_epic(issue):
+            continue
+        children = children_by_parent.get(str(issue.get("id")), [])
+        child_statuses: dict[str, int] = {}
+        for child in children:
+            status = str(child.get("status", "unknown"))
+            child_statuses[status] = child_statuses.get(status, 0) + 1
+        active_child_count = child_statuses.get("open", 0) + child_statuses.get("in_progress", 0)
+        if active_child_count:
+            continue
+        items.append(
+            {
+                **issue_summary(issue, now=now),
+                "child_count": len(children),
+                "child_statuses": dict(sorted(child_statuses.items())),
+                "planning_reason": "deferred roadmap/planning epic has no open or in-progress child work",
+            }
+        )
+    return sorted(items, key=lambda item: (int(item.get("priority", 99)), str(item.get("id", ""))))
+
+
 def analyze_beads(
     issues: list[dict[str, Any]],
     *,
@@ -174,6 +243,7 @@ def analyze_beads(
     in_progress = [issue for issue in issues if issue.get("status") == "in_progress"]
     deferred = [issue for issue in issues if issue.get("status") == "deferred"]
     tombstones = [issue for issue in issues if issue.get("status") == "tombstone"]
+    planning_items = deferred_planning_items(issues, now=now)
 
     stale_in_progress = []
     for issue in in_progress:
@@ -193,12 +263,14 @@ def analyze_beads(
         "open_count": by_status.get("open", 0),
         "in_progress_count": len(in_progress),
         "deferred_count": len(deferred),
+        "deferred_planning_count": len(planning_items),
         "tombstone_count": len(tombstones),
         "stale_in_progress_count": len(stale_in_progress),
         "ready_items": [issue_summary(issue, now=now) for issue in ready_issues[:25]],
         "in_progress_items": [issue_summary(issue, now=now) for issue in in_progress[:25]],
         "stale_in_progress_items": stale_in_progress[:25],
         "deferred_only_items": [issue_summary(issue, now=now) for issue in deferred[:25]],
+        "deferred_planning_items": planning_items[:25],
     }
 
 
@@ -417,7 +489,22 @@ def build_next_actions(
             }
         )
     if not beads["ready_count"] and not beads["in_progress_count"]:
-        if closeout["status"] in {"pass", "ready", "ok"}:
+        if beads["deferred_planning_count"]:
+            actions.append(
+                {
+                    "action": "create_or_refine_backlog",
+                    "issue_ids": [item.get("id") for item in beads["deferred_planning_items"]],
+                    "epics": [
+                        {"id": item.get("id"), "title": item.get("title")}
+                        for item in beads["deferred_planning_items"]
+                    ],
+                    "reason": (
+                        "deferred roadmap/planning epics remain without open child work; create "
+                        "or refine actionable child Beads before declaring the queue clean."
+                    ),
+                }
+            )
+        elif closeout["status"] in {"pass", "ready", "ok"}:
             actions.append(
                 {
                     "action": "stop_queue_clean",
@@ -448,6 +535,8 @@ def overall_status(beads: dict[str, Any], bv: dict[str, Any], closeout: dict[str
         return "ready_work_available"
     if beads["in_progress_count"]:
         return "work_in_progress"
+    if beads["deferred_planning_count"]:
+        return "work_to_plan"
     if closeout["status"] in {"pass", "ready", "ok"}:
         return "queue_clean"
     return "needs_attention"
@@ -517,6 +606,7 @@ def build_report(
             "ready_count": beads["ready_count"],
             "in_progress_count": beads["in_progress_count"],
             "deferred_count": beads["deferred_count"],
+            "deferred_planning_count": beads["deferred_planning_count"],
             "tombstone_count": beads["tombstone_count"],
             "bv_actionable_count": bv["actionable_count"],
             "bv_tombstone_mismatch_count": bv["tombstone_mismatch_count"],
@@ -539,11 +629,13 @@ def print_text_report(report: dict[str, Any]) -> None:
     summary = report["summary"]
     print(
         "status={status} ready={ready} in_progress={in_progress} deferred={deferred} "
-        "bv_tombstone_mismatches={mismatches} agent_mail={agent_mail} closeout={closeout}".format(
+        "deferred_planning={deferred_planning} bv_tombstone_mismatches={mismatches} "
+        "agent_mail={agent_mail} closeout={closeout}".format(
             status=report["status"],
             ready=summary["ready_count"],
             in_progress=summary["in_progress_count"],
             deferred=summary["deferred_count"],
+            deferred_planning=summary["deferred_planning_count"],
             mismatches=summary["bv_tombstone_mismatch_count"],
             agent_mail=summary["agent_mail_status"],
             closeout=summary["closeout_freshness_status"],
@@ -645,6 +737,55 @@ def run_self_test() -> int:
             clean_report["next_actions"][0]["action"] == "stop_queue_clean",
             "clean queue should tell operator to stop",
             clean_report,
+        )
+
+        planning_beads = root / "planning/.beads/issues.jsonl"
+        planning_epic = fixture_issue(
+            "bd-plan",
+            "Swarm operations follow-up roadmap",
+            status="deferred",
+            labels=["idea-wizard", "swarm"],
+        )
+        planning_epic["issue_type"] = "epic"
+        closed_child = fixture_issue(
+            "bd-plan.1",
+            "Closed child",
+            status="closed",
+        )
+        closed_child["dependencies"] = [
+            {"type": "parent-child", "depends_on_id": "bd-plan"},
+        ]
+        write_issues(planning_beads, [planning_epic, closed_child])
+        planning_report = build_report(
+            repo_root=root,
+            beads_path=planning_beads,
+            br_ready_json=LoadedJson(None, [], None),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=read_json(closeout_json),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            planning_report["status"] == "work_to_plan",
+            "deferred planning epic should block queue_clean",
+            planning_report,
+        )
+        assert_condition(
+            planning_report["summary"]["deferred_planning_count"] == 1,
+            "planning epic should be counted explicitly",
+            planning_report,
+        )
+        assert_condition(
+            planning_report["next_actions"][0]["action"] == "create_or_refine_backlog",
+            "planning epic should ask for backlog refinement",
+            planning_report,
+        )
+        assert_condition(
+            planning_report["next_actions"][0]["issue_ids"] == ["bd-plan"],
+            "planning next action should name the deferred epic",
+            planning_report,
         )
 
         stale_beads = root / "stale/.beads/issues.jsonl"
