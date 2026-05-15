@@ -6176,8 +6176,24 @@ fn agent_mail_degraded_mode_probe(
         .and_then(|value| value.get("overall"))
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string);
+    let health_status = health
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
     let health_level = health
         .and_then(|value| value.get("health_level"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let semantic_readiness_status = health
+        .and_then(|value| value.pointer("/semantic_readiness/status"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let semantic_readiness_detail = health
+        .and_then(|value| value.pointer("/semantic_readiness/detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(|detail| truncate_chars(detail, 240));
+    let recovery_mode = health
+        .and_then(|value| value.pointer("/recovery/mode"))
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string);
     let alert_summaries = health.map(agent_mail_alert_summaries).unwrap_or_default();
@@ -6188,8 +6204,14 @@ fn agent_mail_degraded_mode_probe(
     let health_is_unhealthy = health_overall
         .as_deref()
         .is_some_and(|overall| !overall.eq_ignore_ascii_case("healthy"));
+    let health_status_is_unhealthy = health_status.as_deref().is_some_and(|status| {
+        ["error", "failed", "fail", "degraded", "red", "unhealthy"]
+            .iter()
+            .any(|unhealthy| status.eq_ignore_ascii_case(unhealthy))
+    });
     let degraded = health_error.is_some()
         || health_is_unhealthy
+        || health_status_is_unhealthy
         || !missing_schema_tables.is_empty()
         || agent_roster_error.is_some();
     let blocked_operations = agent_mail_degraded_blocked_operations(&missing_schema_tables);
@@ -6208,7 +6230,15 @@ fn agent_mail_degraded_mode_probe(
         "mail_health": {
             "reachable": health.is_some(),
             "overall": health_overall,
+            "status": health_status,
             "health_level": health_level,
+            "semantic_readiness": {
+                "status": semantic_readiness_status,
+                "detail": semantic_readiness_detail,
+            },
+            "recovery": {
+                "mode": recovery_mode,
+            },
             "missing_schema_tables": missing_schema_tables,
             "alerts": alert_summaries,
             "actions": actions,
@@ -6246,6 +6276,7 @@ fn agent_mail_degraded_blocked_operations(missing_schema_tables: &[String]) -> V
     } else {
         vec![
             "register_agent",
+            "fetch_inbox",
             "send_message",
             "acknowledge_message",
             "file_reservation_paths",

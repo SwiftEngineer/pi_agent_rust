@@ -111,6 +111,7 @@
         "normalized_inputs.agent_mail.status",
         "normalized_inputs.agent_mail.read_status",
         "normalized_inputs.agent_mail.reservation_status",
+        "normalized_inputs.agent_mail.unavailable_operations",
         "normalized_inputs.beads.active_count"
       ],
       "forbidden_actions": [
@@ -119,16 +120,20 @@
       "id": "AUTO-003-use_beads_soft_lock",
       "omitted_commands": [
         {
+          "action": "Agent Mail messages",
+          "reason": "message read/write paths are unavailable; use Beads status/comments until health is green"
+        },
+        {
           "action": "Agent Mail reservation",
           "reason": "coordination transport is degraded; retry after health is green"
         }
       ],
       "preconditions": [
-        "Agent Mail read/reservation status is degraded or unavailable.",
+        "Agent Mail message read/write and reservation status is degraded or unavailable.",
         "Announce/reserve through Agent Mail only after health recovers."
       ],
       "rank": 3,
-      "rationale": "Agent Mail status=degraded; fallback=use_beads_soft_lock",
+      "rationale": "Agent Mail status=degraded; fallback=use_beads_soft_lock; unavailable_operations=fetch_inbox,send_message,acknowledge_message,file_reservation_paths",
       "severity": "high",
       "title": "Use Beads assignment as the coordination lock"
     },

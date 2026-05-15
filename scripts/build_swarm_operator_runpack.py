@@ -3255,6 +3255,25 @@ def agent_mail_source_status(source: SourcePayload) -> str:
     return status
 
 
+def agent_mail_unavailable_operations(
+    read_status: str,
+    reservation_status: str,
+) -> list[str]:
+    operations: list[str] = []
+    if read_status != "ok":
+        operations.extend(
+            [
+                "fetch_inbox",
+                "send_message",
+                "acknowledge_message",
+                "file_reservation_paths",
+            ]
+        )
+    elif reservation_status != "ok":
+        operations.append("file_reservation_paths")
+    return unique_strings(operations)
+
+
 def reservation_items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -3328,6 +3347,10 @@ def summarize_agent_mail_autopilot(
         status = "ok"
         if read_status != "ok" or reservation_status != "ok":
             status = "degraded"
+    unavailable_operations = agent_mail_unavailable_operations(
+        read_status,
+        reservation_status,
+    )
     reservations = reservation_items(reservations_source.payload)
     active_reservations = [
         item for item in reservations if item.get("released_ts") in {None, ""}
@@ -3339,6 +3362,8 @@ def summarize_agent_mail_autopilot(
         "reservation_status": reservation_status,
         "reservation_count": len(reservations),
         "active_reservation_count": len(active_reservations),
+        "soft_lock": "beads" if status != "ok" else None,
+        "unavailable_operations": unavailable_operations,
         "active_reservations": bounded(
             [summarize_reservation(item) for item in active_reservations],
             max_items,
@@ -4344,13 +4369,14 @@ def build_autopilot_plan(
                 severity="high",
                 confidence="high",
                 preconditions=[
-                    "Agent Mail read/reservation status is degraded or unavailable.",
+                    "Agent Mail message read/write and reservation status is degraded or unavailable.",
                     "Announce/reserve through Agent Mail only after health recovers.",
                 ],
                 evidence_paths=[
                     "normalized_inputs.agent_mail.status",
                     "normalized_inputs.agent_mail.read_status",
                     "normalized_inputs.agent_mail.reservation_status",
+                    "normalized_inputs.agent_mail.unavailable_operations",
                     "normalized_inputs.beads.active_count",
                 ],
                 commands=[
@@ -4359,10 +4385,16 @@ def build_autopilot_plan(
                     plan_command("Claim through Beads", "br update <issue-id> --status in_progress --assignee \"${AGENT_NAME:-agent}\""),
                 ],
                 omitted_commands=[
+                    omitted_command("Agent Mail messages", "message read/write paths are unavailable; use Beads status/comments until health is green"),
                     omitted_command("Agent Mail reservation", "coordination transport is degraded; retry after health is green"),
                 ],
                 forbidden_actions=["automatic file reservation"],
-                rationale=f"Agent Mail status={agent_mail.get('status')}; fallback={agent_mail.get('fallback_action')}",
+                rationale=(
+                    f"Agent Mail status={agent_mail.get('status')}; "
+                    f"fallback={agent_mail.get('fallback_action')}; "
+                    "unavailable_operations="
+                    f"{','.join(agent_mail.get('unavailable_operations') or [])}"
+                ),
             )
         )
 
@@ -4432,7 +4464,8 @@ def build_autopilot_plan(
 
     beads_ready = normalized_section(input_pack, "beads_ready")
     ready_candidate = first_candidate(beads_ready.get("candidates"))
-    if ready_candidate is not None and not blockers:
+    agent_mail_ready = agent_mail.get("status") == "ok"
+    if ready_candidate is not None and not blockers and agent_mail_ready:
         issue_id = str(ready_candidate.get("id") or "<issue-id>")
         actions.append(
             autopilot_plan_action(
@@ -5880,6 +5913,8 @@ def autopilot_e2e_agent_mail_status(
     status: str = "ok",
     health_level: str = "green",
     issue: str | None = None,
+    semantic_readiness_detail: str | None = None,
+    recovery_mode: str | None = None,
 ) -> dict[str, Any]:
     payload = {
         "schema": "pi.agent_mail.robot_status.v1",
@@ -5890,6 +5925,16 @@ def autopilot_e2e_agent_mail_status(
     }
     if issue is not None:
         payload["issue"] = issue
+    if semantic_readiness_detail is not None:
+        payload["semantic_readiness"] = {
+            "status": "fail",
+            "detail": semantic_readiness_detail,
+        }
+    if recovery_mode is not None:
+        payload["recovery"] = {
+            "mode": recovery_mode,
+            "next_action": "am doctor repair --yes or restore archive backup",
+        }
     return payload
 
 
@@ -6184,6 +6229,17 @@ def autopilot_e2e_result_from_plan(
     action_names = [str(action.get("action")) for action in plan.get("actions", [])]
     for action in expected_actions:
         assert action in action_names, f"{scenario_id} missing action {action}: {action_names}"
+    if "use_beads_soft_lock" in expected_actions:
+        agent_mail = normalized_section(input_pack, "agent_mail")
+        unavailable_operations = agent_mail.get("unavailable_operations")
+        assert isinstance(unavailable_operations, list)
+        for operation in ("fetch_inbox", "send_message", "file_reservation_paths"):
+            assert operation in unavailable_operations, (
+                f"{scenario_id} should report {operation} unavailable: {agent_mail}"
+            )
+        assert "claim_ready_bead" not in action_names, (
+            f"{scenario_id} must not emit Agent Mail-ready claim action: {action_names}"
+        )
     selected_action = action_names[0] if action_names else None
     first_action = plan["actions"][0]
     budget_state = plan.get("budget_drift") if isinstance(plan.get("budget_drift"), dict) else {}
@@ -6373,7 +6429,9 @@ def build_autopilot_e2e_summary(
             generated_at,
             status="error",
             health_level="red",
-            issue="database schema missing required tables",
+            issue="sqlite schema missing required health_check tables: projects, agents, messages, message_recipients",
+            semantic_readiness_detail="sqlite schema missing required health_check tables: projects, agents, messages, message_recipients",
+            recovery_mode="corrupt",
         ),
     )
 
@@ -8658,6 +8716,7 @@ def run_self_test() -> int:
         assert input_pack["status"] == "degraded"
         assert input_pack["normalized_inputs"]["agent_mail"]["status"] == "degraded"
         assert input_pack["normalized_inputs"]["agent_mail"]["fallback_action"] == "use_beads_soft_lock"
+        assert input_pack["normalized_inputs"]["agent_mail"]["soft_lock"] == "beads"
         assert input_pack["normalized_inputs"]["budget_drift"]["status"] == "deny_new_work"
         assert input_pack["normalized_inputs"]["budget_drift"]["schema"] == BUDGET_DRIFT_SCHEMA
         assert input_pack["normalized_inputs"]["operator_runpack"]["status"] == "ok"

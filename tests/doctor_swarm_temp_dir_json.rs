@@ -332,15 +332,16 @@ if [ "$1" = "robot" ] && [ "$2" = "health" ]; then
   "_actions": [
     "Run `am doctor check` and reconstruct from the Git archive before trusting mailbox reads"
   ],
-  "overall": "unhealthy",
+  "status": "error",
   "health_level": "red",
-  "probes": [
-    {
-      "name": "db_schema",
-      "status": "fail",
-      "detail": "Core SQLite schema tables missing: projects, agents, messages, message_recipients"
-    }
-  ]
+  "semantic_readiness": {
+    "status": "fail",
+    "detail": "sqlite schema missing required health_check tables: projects, agents, messages, message_recipients"
+  },
+  "recovery": {
+    "mode": "corrupt",
+    "next_action": "am doctor repair --yes or restore archive backup"
+  }
 }
 JSON
   exit 0
@@ -662,6 +663,76 @@ fn doctor_swarm_validation_broker_json_reports_stale_slot_posture() -> TestResul
 }
 
 #[cfg(unix)]
+fn require_agent_mail_degraded_health_payload(data: &Value) -> TestResult {
+    require_eq(field_str(data, "mode")?, "beads_soft_lock_fallback", "mode")?;
+    let mail_health = field(data, "mail_health")?;
+    require_eq(field_str(mail_health, "status")?, "error", "mail status")?;
+    require_eq(
+        field_str(field(mail_health, "semantic_readiness")?, "status")?,
+        "fail",
+        "semantic readiness status",
+    )?;
+    require_eq(
+        field_str(field(mail_health, "recovery")?, "mode")?,
+        "corrupt",
+        "recovery mode",
+    )?;
+    require_eq(
+        field_str(field(data, "fallback")?, "soft_lock")?,
+        "beads",
+        "soft_lock",
+    )?;
+    require_eq(
+        &field_bool(field(data, "fallback")?, "non_blocking")?,
+        &true,
+        "fallback non_blocking",
+    )?;
+    let missing_tables = field(mail_health, "missing_schema_tables")?
+        .as_array()
+        .ok_or_else(|| TestError(format!("missing_schema_tables is not an array: {data}")))?;
+    let has_all_missing_tables = ["projects", "agents", "messages", "message_recipients"]
+        .into_iter()
+        .all(|table| {
+            missing_tables
+                .iter()
+                .any(|value| value.as_str() == Some(table))
+        });
+    require(
+        has_all_missing_tables,
+        format!("missing_schema_tables should include core tables: {data}"),
+    )
+}
+
+#[cfg(unix)]
+fn require_agent_mail_write_paths_blocked(data: &Value) -> TestResult {
+    let write_paths = field(data, "write_paths")?;
+    require_eq(
+        &field_bool(write_paths, "expected_failed")?,
+        &true,
+        "write paths expected_failed",
+    )?;
+    let blocked = field(write_paths, "blocked_operations")?
+        .as_array()
+        .ok_or_else(|| TestError(format!("blocked_operations is not an array: {data}")))?;
+    let has_blocked_writes = [
+        "fetch_inbox",
+        "send_message",
+        "acknowledge_message",
+        "file_reservation_paths",
+    ]
+    .into_iter()
+    .all(|operation| {
+        blocked
+            .iter()
+            .any(|value| value.as_str() == Some(operation))
+    });
+    require(
+        has_blocked_writes,
+        format!("blocked_operations should include message/reservation paths: {data}"),
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn doctor_swarm_agent_mail_degraded_mode_json_reports_beads_fallback() -> TestResult {
     let fake_bin = create_fake_agent_mail_cli("fake-agent-mail")?;
@@ -686,31 +757,7 @@ fn doctor_swarm_agent_mail_degraded_mode_json_reports_beads_fallback() -> TestRe
     )?;
 
     let data = field(finding, "data")?;
-    require_eq(field_str(data, "mode")?, "beads_soft_lock_fallback", "mode")?;
-    require_eq(
-        field_str(field(data, "fallback")?, "soft_lock")?,
-        "beads",
-        "soft_lock",
-    )?;
-    require_eq(
-        &field_bool(field(data, "fallback")?, "non_blocking")?,
-        &true,
-        "fallback non_blocking",
-    )?;
-    let missing_tables = field(field(data, "mail_health")?, "missing_schema_tables")?
-        .as_array()
-        .ok_or_else(|| TestError(format!("missing_schema_tables is not an array: {data}")))?;
-    let has_all_missing_tables = ["projects", "agents", "messages", "message_recipients"]
-        .into_iter()
-        .all(|table| {
-            missing_tables
-                .iter()
-                .any(|value| value.as_str() == Some(table))
-        });
-    require(
-        has_all_missing_tables,
-        format!("missing_schema_tables should include core tables: {data}"),
-    )?;
+    require_agent_mail_degraded_health_payload(data)?;
 
     let active_agents = field(data, "active_agents")?;
     require_eq(
@@ -732,26 +779,7 @@ fn doctor_swarm_agent_mail_degraded_mode_json_reports_beads_fallback() -> TestRe
         format!("active agent rows should include GoldenGlacier activity: {data}"),
     )?;
 
-    let write_paths = field(data, "write_paths")?;
-    require_eq(
-        &field_bool(write_paths, "expected_failed")?,
-        &true,
-        "write paths expected_failed",
-    )?;
-    let blocked = field(write_paths, "blocked_operations")?
-        .as_array()
-        .ok_or_else(|| TestError(format!("blocked_operations is not an array: {data}")))?;
-    let has_blocked_writes = ["send_message", "acknowledge_message"]
-        .into_iter()
-        .all(|operation| {
-            blocked
-                .iter()
-                .any(|value| value.as_str() == Some(operation))
-        });
-    require(
-        has_blocked_writes,
-        format!("blocked_operations should include send and ack writes: {data}"),
-    )?;
+    require_agent_mail_write_paths_blocked(data)?;
     Ok(())
 }
 
