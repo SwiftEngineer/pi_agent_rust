@@ -1686,6 +1686,9 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     let model_registry = ModelRegistry::load(&auth, Some(models_path));
 
     let mut session = Session::new(&cli, &config).await?;
+    if options.session_path.is_none() {
+        session.header.cwd = cwd.display().to_string();
+    }
     let scoped_patterns = if let Some(models_arg) = &cli.models {
         app::parse_models_arg(models_arg)
     } else {
@@ -1832,7 +1835,8 @@ mod tests {
     use asupersync::runtime::RuntimeBuilder;
     use asupersync::runtime::reactor::create_reactor;
     use asupersync::sync::Mutex as AsyncMutex;
-    use std::sync::{Arc, Mutex};
+    use std::env;
+    use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
 
     fn run_async<F>(future: F) -> F::Output
@@ -1845,6 +1849,31 @@ mod tests {
             .build()
             .expect("build runtime");
         runtime.block_on(future)
+    }
+
+    fn current_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new(path: &Path) -> Self {
+            let previous = env::current_dir().expect("current dir");
+            env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.previous);
+        }
     }
 
     fn hermetic_session_options(working_directory: &Path) -> SessionOptions {
@@ -1913,6 +1942,52 @@ mod tests {
             guard.path.is_none()
         });
         assert!(path_is_none);
+    }
+
+    #[test]
+    fn create_agent_session_uses_working_directory_for_new_session_header_and_path() {
+        let _lock = current_dir_lock();
+        let process_cwd = tempdir().expect("process cwd");
+        let sdk_cwd = tempdir().expect("sdk cwd");
+        let session_root = tempdir().expect("session root");
+        let _guard = CurrentDirGuard::new(process_cwd.path());
+
+        let handle = run_async(create_agent_session(SessionOptions {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4o".to_string()),
+            api_key: Some("dummy-key".to_string()),
+            working_directory: Some(sdk_cwd.path().to_path_buf()),
+            no_session: false,
+            session_dir: Some(session_root.path().to_path_buf()),
+            ..SessionOptions::default()
+        }))
+        .expect("create session");
+
+        let (header_cwd, path) = run_async(async {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut guard = handle
+                .session()
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("lock session");
+            guard.save().await.expect("save sdk session");
+            (
+                guard.header.cwd.clone(),
+                guard.path.clone().expect("saved session path"),
+            )
+        });
+
+        let expected_dir = session_root
+            .path()
+            .join(crate::session::encode_cwd(sdk_cwd.path()));
+        let process_dir = session_root
+            .path()
+            .join(crate::session::encode_cwd(process_cwd.path()));
+
+        assert_eq!(header_cwd, sdk_cwd.path().display().to_string());
+        assert_eq!(path.parent(), Some(expected_dir.as_path()));
+        assert_ne!(path.parent(), Some(process_dir.as_path()));
     }
 
     #[test]
