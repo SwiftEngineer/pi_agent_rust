@@ -417,6 +417,201 @@ fn snapshot_registrations(manager: &ExtensionManager) -> Value {
     })
 }
 
+const PROVIDER_MIRROR_OWNER_MODULE: &str = "@mariozechner/pi-ai";
+const PROVIDER_MIRROR_FIX_SURFACE: &str = "shim_code";
+const PROVIDER_MIRROR_PROBE_ID: &str = "mirror-helper-probe";
+const PROVIDER_MIRROR_REQUIRED_HELPERS: &[&str] = &[
+    "getModels",
+    "getApiProvider",
+    "streamSimpleOpenAIResponses",
+    "loginOpenAICodex",
+    "refreshOpenAICodexToken",
+];
+
+const PROVIDER_MIRROR_PROBE_SOURCE: &str = r#"
+import {
+  getApiProvider,
+  getModels,
+  loginOpenAICodex,
+  refreshOpenAICodexToken,
+  streamSimpleOpenAIResponses,
+} from "@mariozechner/pi-ai";
+
+const OWNER_MODULE = "@mariozechner/pi-ai";
+const FIX_SURFACE = "shim_code";
+const requiredHelpers = [
+  ["getModels", getModels],
+  ["getApiProvider", getApiProvider],
+  ["streamSimpleOpenAIResponses", streamSimpleOpenAIResponses],
+  ["loginOpenAICodex", loginOpenAICodex],
+  ["refreshOpenAICodexToken", refreshOpenAICodexToken],
+];
+
+function drift(name, detail) {
+  throw new Error(`${OWNER_MODULE} mirror helper drift: ${name}: ${detail}; owning shim module=${OWNER_MODULE}; fix_surface=${FIX_SURFACE}`);
+}
+
+function assertCallable(name, value) {
+  if (typeof value !== "function") {
+    drift(name, `expected function, got ${typeof value}`);
+  }
+}
+
+function assertMirror(condition, name, detail) {
+  if (!condition) {
+    drift(name, detail);
+  }
+}
+
+export default function(pi) {
+  for (const [name, value] of requiredHelpers) {
+    assertCallable(name, value);
+  }
+
+  const codexModels = getModels("openai-codex");
+  assertMirror(Array.isArray(codexModels), "getModels", "openai-codex mirror returned a non-array");
+  assertMirror(codexModels.length > 0, "getModels", "openai-codex mirror returned no models");
+  const firstModel = codexModels[0];
+  assertMirror(firstModel && firstModel.api === "openai-codex-responses", "getModels", "openai-codex mirror model does not target openai-codex-responses");
+  assertMirror(Array.isArray(firstModel.input) && firstModel.input.includes("text"), "getModels", "openai-codex mirror model is missing text input support");
+
+  const baseProvider = getApiProvider("openai-codex-responses");
+  assertMirror(baseProvider && typeof baseProvider.streamSimple === "function", "getApiProvider", "openai-codex-responses mirror provider is missing streamSimple");
+
+  pi.registerProvider("mirror-helper-probe", {
+    api: "openai-codex-responses",
+    baseUrl: firstModel.baseUrl,
+    models: [firstModel],
+    streamSimple: baseProvider.streamSimple,
+  });
+}
+"#;
+
+fn provider_mirror_probe_evidence(status: &str, error: Option<&str>) -> Value {
+    serde_json::json!({
+        "schema": "pi.ext.provider_mirror_helper_probe.v1",
+        "status": status,
+        "owner_module": PROVIDER_MIRROR_OWNER_MODULE,
+        "fix_surface": PROVIDER_MIRROR_FIX_SURFACE,
+        "fixture": {
+            "source": "runtime-generated",
+            "provider_bearing": true,
+            "provider_id": PROVIDER_MIRROR_PROBE_ID,
+        },
+        "helpers": PROVIDER_MIRROR_REQUIRED_HELPERS,
+        "error": error,
+    })
+}
+
+fn write_provider_mirror_probe_fixture(cwd: &Path) -> PathBuf {
+    let entry_dir = cwd.join("extension");
+    std::fs::create_dir_all(&entry_dir).expect("create mirror helper probe dir");
+    let entry_file = entry_dir.join("index.ts");
+    std::fs::write(&entry_file, PROVIDER_MIRROR_PROBE_SOURCE)
+        .expect("write mirror helper probe extension");
+    entry_file
+}
+
+fn load_provider_mirror_probe(entry_file: &Path, cwd: &Path) -> Result<ExtensionManager, String> {
+    let spec = JsExtensionLoadSpec::from_entry_path(entry_file).map_err(|e| {
+        format!(
+            "Failed to create mirror helper probe spec for {}: {e}",
+            entry_file.display()
+        )
+    })?;
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(js_config, tools, manager)
+                .await
+                .expect("start JS runtime")
+        }
+    });
+    manager.set_js_runtime(runtime);
+
+    let load_result = common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(vec![spec]).await }
+    });
+    load_result.map(|_| manager).map_err(|err| err.to_string())
+}
+
+fn assert_provider_mirror_probe_registration(manager: &ExtensionManager) -> Result<(), String> {
+    let providers = manager.extension_providers();
+    let Some(provider) = providers.iter().find(|provider| {
+        provider.get("id").and_then(Value::as_str) == Some(PROVIDER_MIRROR_PROBE_ID)
+    }) else {
+        return Err(format!(
+            "expected provider registration {PROVIDER_MIRROR_PROBE_ID}"
+        ));
+    };
+
+    if provider.get("api").and_then(Value::as_str) != Some("openai-codex-responses") {
+        return Err(format!(
+            "provider mirror probe registered unexpected provider: {provider:?}"
+        ));
+    }
+
+    if provider.get("hasStreamSimple").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "provider mirror probe did not expose streamSimple: {provider:?}"
+        ));
+    }
+
+    let Some(models) = provider.get("models").and_then(Value::as_array) else {
+        return Err(format!(
+            "provider mirror probe models missing from {provider:?}"
+        ));
+    };
+
+    if !models
+        .iter()
+        .any(|model| model.get("id").and_then(Value::as_str) == Some("gpt-5.5"))
+    {
+        return Err(format!(
+            "provider mirror probe should mirror Codex models: {models:?}"
+        ));
+    }
+
+    let evidence = provider_mirror_probe_evidence("covered", None);
+    if evidence.get("owner_module").and_then(Value::as_str) != Some(PROVIDER_MIRROR_OWNER_MODULE) {
+        return Err(format!(
+            "mirror probe evidence lost owner module: {evidence:?}"
+        ));
+    }
+    if evidence.get("fix_surface").and_then(Value::as_str) != Some(PROVIDER_MIRROR_FIX_SURFACE) {
+        return Err(format!(
+            "mirror probe evidence lost fix surface: {evidence:?}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn pi_ai_provider_mirror_helpers_are_callable_for_provider_extensions() -> Result<(), String> {
+    let cwd = conformance_work_dir("pi-provider-mirror-helper-probe");
+    let entry_file = write_provider_mirror_probe_fixture(&cwd);
+    let manager = load_provider_mirror_probe(&entry_file, &cwd).map_err(|message| {
+        let evidence = provider_mirror_probe_evidence("load_failed", Some(&message));
+        let evidence_json = serde_json::to_string_pretty(&evidence)
+            .unwrap_or_else(|err| format!("failed to serialize mirror probe evidence: {err}"));
+        format!("provider mirror helper regression failed: {message}\n{evidence_json}")
+    })?;
+
+    assert_provider_mirror_probe_registration(&manager)
+}
+
 fn load_extension_runtime_for_journey(
     ext_id: &str,
 ) -> (ManifestEntry, ExtensionManager, JsExtensionRuntimeHandle) {
