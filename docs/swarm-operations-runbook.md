@@ -45,7 +45,10 @@ Green startup means:
 - `git status --short --branch` has no uncommitted work from this agent.
 - `br ready --json` has a real open issue, not a tombstone or deleted item.
 - `pi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
-- `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns `admit` or `allow`.
+- `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns
+  `decision=allow` with `admission_action=allow`. `admission_action=defer`
+  means the gate must wait, and `admission_action=fallback` means the command
+  would run locally only because fallback was explicitly allowed.
 - `rch queue` does not show saturated or stale heavy builds that would make more cargo work irresponsible.
 
 If any check is degraded, keep the raw command output and choose the response from the recovery table below. Do not convert degraded coordination or RCH state into a vague "tests failed" note.
@@ -298,6 +301,7 @@ Back off new claims when any of these are true:
 | Signal | Command | Action |
 |--------|---------|--------|
 | RCH admission denies or backs off | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` | Stop starting heavy cargo jobs. Continue docs, source inspection, or small non-cargo fixes. |
+| Local cargo/rustc process pressure is high | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` | Wait for local process pressure to fall, or use `--force-admit` only for an explicitly approved override. |
 | Queue pressure is high | `rch queue` | Wait for active jobs to finish before launching more cargo. |
 | Agent Mail reservations conflict | `pi doctor --only swarm --format json` or Agent Mail reservation response | Narrow the file set, choose a different bead, or coordinate with the holder. |
 | Beads has stale in-progress work | `br list --status=in_progress --json` | Comment on the stale issue, verify no recent owner activity, then reopen only if it is clearly abandoned. |

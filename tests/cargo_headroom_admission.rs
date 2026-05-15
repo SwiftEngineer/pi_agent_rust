@@ -14,7 +14,12 @@ fn case_dir(case_name: &str) -> PathBuf {
         .join(format!("{}-{}", case_name, std::process::id()))
 }
 
-fn run_admission(case_name: &str, path: &str, args: &[&str]) -> Output {
+fn run_admission_with_env(
+    case_name: &str,
+    path: &str,
+    args: &[&str],
+    envs: &[(&str, String)],
+) -> Output {
     let root = repo_root();
     let dir = case_dir(case_name);
     let target_dir = dir.join("target");
@@ -33,11 +38,19 @@ fn run_admission(case_name: &str, path: &str, args: &[&str]) -> Output {
     ];
     command_args.extend_from_slice(args);
 
-    Command::new(root.join("scripts/cargo_headroom.sh"))
-        .env("PATH", path)
+    let mut command = Command::new(root.join("scripts/cargo_headroom.sh"));
+    command.env("PATH", path).env("PI_CARGO_PROCESS_COUNT", "0");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
         .args(command_args)
         .output()
         .expect("cargo_headroom.sh should execute")
+}
+
+fn run_admission(case_name: &str, path: &str, args: &[&str]) -> Output {
+    run_admission_with_env(case_name, path, args, &[])
 }
 
 fn decision_from_stdout(output: &Output) -> Value {
@@ -118,10 +131,22 @@ struct AdmissionFixture {
     expected_command_class: String,
     expected_resolved_runner: String,
     expected_rch_detail: String,
+    #[serde(default)]
+    expected_rch_detail_contains: Option<String>,
     expected_allow_local_fallback: bool,
     expected_forecast_status: String,
     expected_forecast_recommended_action: String,
     expected_forecast_slot_pressure: String,
+    #[serde(default)]
+    process_count_override: Option<u64>,
+    #[serde(default)]
+    max_local_cargo_processes: Option<u64>,
+    #[serde(default)]
+    expected_local_process_status: Option<String>,
+    #[serde(default)]
+    expected_local_process_recommended_action: Option<String>,
+    #[serde(default)]
+    expected_force_override: bool,
 }
 
 fn admission_fixtures() -> Vec<AdmissionFixture> {
@@ -157,97 +182,205 @@ fn assert_forecast_matches_fixture(decision: &Value, fixture: &AdmissionFixture)
     );
 }
 
+fn expected_admission_action(decision: &str) -> &'static str {
+    match decision {
+        "allow" => "allow",
+        "degraded" => "fallback",
+        _ => "defer",
+    }
+}
+
+fn assert_local_process_matches_fixture(decision: &Value, fixture: &AdmissionFixture) {
+    let pressure = &decision["local_process_pressure"];
+    assert_eq!(
+        pressure["schema"].as_str(),
+        Some("pi.cargo_headroom.local_process_pressure.v1")
+    );
+    assert_eq!(
+        pressure["status"].as_str(),
+        Some(
+            fixture
+                .expected_local_process_status
+                .as_deref()
+                .unwrap_or("ok"),
+        ),
+        "{} local process status mismatch: {pressure}",
+        fixture.name
+    );
+    assert_eq!(
+        pressure["recommended_action"].as_str(),
+        Some(
+            fixture
+                .expected_local_process_recommended_action
+                .as_deref()
+                .unwrap_or("run"),
+        ),
+        "{} local process action mismatch: {pressure}",
+        fixture.name
+    );
+    assert_eq!(
+        pressure["force_override"].as_bool(),
+        Some(fixture.expected_force_override),
+        "{} local process force override mismatch: {pressure}",
+        fixture.name
+    );
+    let expected_count = fixture.process_count_override.unwrap_or(0);
+    assert_eq!(
+        pressure["process_count"].as_u64(),
+        Some(expected_count),
+        "{} local process count mismatch: {pressure}",
+        fixture.name
+    );
+}
+
+fn fixture_path(fixture: &AdmissionFixture, mock_dir: &Path) -> String {
+    match fixture.path_mode {
+        PathMode::WithoutRch => "/usr/bin:/bin".to_string(),
+        PathMode::MockRch => {
+            write_mock_rch(
+                mock_dir,
+                fixture.mock_rch_check_status,
+                fixture.mock_rch_stderr.as_deref().unwrap_or(""),
+                fixture.mock_rch_queue_status,
+                fixture.mock_rch_queue_stdout.as_deref().unwrap_or(""),
+            );
+            format!("{}:/usr/bin:/bin", mock_dir.display())
+        }
+    }
+}
+
+fn fixture_envs(fixture: &AdmissionFixture) -> Vec<(&'static str, String)> {
+    let mut envs = Vec::new();
+    if let Some(count) = fixture.process_count_override {
+        envs.push(("PI_CARGO_PROCESS_COUNT", count.to_string()));
+    }
+    if let Some(max_processes) = fixture.max_local_cargo_processes {
+        envs.push(("PI_CARGO_MAX_LOCAL_PROCESSES", max_processes.to_string()));
+    }
+    envs
+}
+
+fn assert_status_matches_fixture(output: &Output, fixture: &AdmissionFixture) {
+    assert_eq!(
+        output.status.code(),
+        Some(fixture.expected_status),
+        "{} status mismatch\nstdout:\n{}\nstderr:\n{}",
+        fixture.name,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_rch_detail_matches_fixture(decision: &Value, fixture: &AdmissionFixture) {
+    if let Some(needle) = fixture.expected_rch_detail_contains.as_deref() {
+        let detail = decision["rch_detail"]
+            .as_str()
+            .expect("rch_detail must be a string");
+        assert!(
+            detail.contains(needle),
+            "{} rch_detail should contain {needle:?}: {detail}",
+            fixture.name
+        );
+    } else {
+        assert_eq!(decision["rch_detail"], fixture.expected_rch_detail);
+    }
+}
+
+fn assert_paths_match_fixture(decision: &Value, fixture: &AdmissionFixture) {
+    let cargo_target_dir = decision["cargo_target_dir"]
+        .as_str()
+        .expect("cargo_target_dir must be a string");
+    let tmpdir = decision["tmpdir"]
+        .as_str()
+        .expect("tmpdir must be a string");
+    assert!(
+        cargo_target_dir.contains(&fixture.name),
+        "{} cargo_target_dir should identify fixture run: {cargo_target_dir}",
+        fixture.name
+    );
+    assert!(
+        tmpdir.contains(&fixture.name),
+        "{} tmpdir should identify fixture run: {tmpdir}",
+        fixture.name
+    );
+
+    let recommended_target = decision["recommended_cargo_target_dir"]
+        .as_str()
+        .expect("recommended_cargo_target_dir must be a string");
+    let recommended_tmp = decision["recommended_tmpdir"]
+        .as_str()
+        .expect("recommended_tmpdir must be a string");
+    assert!(
+        recommended_target.ends_with("/target"),
+        "{} recommended target must be concrete: {recommended_target}",
+        fixture.name
+    );
+    assert!(
+        recommended_tmp.ends_with("/tmp"),
+        "{} recommended tmpdir must be concrete: {recommended_tmp}",
+        fixture.name
+    );
+
+    let target_remediation = decision["storage_remediation"]["cargo_target_dir"]
+        .as_str()
+        .expect("cargo target remediation must be a string");
+    let tmpdir_remediation = decision["storage_remediation"]["tmpdir"]
+        .as_str()
+        .expect("tmpdir remediation must be a string");
+    assert!(target_remediation.contains("CARGO_TARGET_DIR"));
+    assert!(target_remediation.contains("--target-dir"));
+    assert!(target_remediation.contains(cargo_target_dir));
+    assert!(tmpdir_remediation.contains("TMPDIR"));
+    assert!(tmpdir_remediation.contains("--tmpdir"));
+    assert!(tmpdir_remediation.contains(tmpdir));
+}
+
+fn assert_decision_matches_fixture(decision: &Value, fixture: &AdmissionFixture) {
+    assert_eq!(decision["schema"], "pi.cargo_headroom.admission.v1");
+    assert_eq!(decision["decision"], fixture.expected_decision);
+    assert_eq!(
+        decision["admission_action"],
+        expected_admission_action(&fixture.expected_decision)
+    );
+    assert_eq!(decision["reason"], fixture.expected_reason);
+    assert_eq!(decision["command_class"], fixture.expected_command_class);
+    assert_eq!(
+        decision["resolved_runner"],
+        fixture.expected_resolved_runner
+    );
+    assert_rch_detail_matches_fixture(decision, fixture);
+    assert_eq!(
+        decision["allow_local_fallback"],
+        fixture.expected_allow_local_fallback
+    );
+    assert_eq!(decision["force_override"], fixture.expected_force_override);
+    assert_forecast_matches_fixture(decision, fixture);
+    assert_local_process_matches_fixture(decision, fixture);
+
+    let planned_command = decision["planned_command"]
+        .as_str()
+        .expect("planned_command must be a string");
+    assert!(
+        planned_command.contains("cargo"),
+        "{} planned command should expose the cargo invocation: {planned_command}",
+        fixture.name
+    );
+    assert_paths_match_fixture(decision, fixture);
+}
+
 #[test]
 fn fixture_matrix_keeps_rch_admission_decisions_stable() {
     for fixture in admission_fixtures() {
         let mock_dir = case_dir(&format!("fixture-{}", fixture.name)).join("bin");
-        let path = match fixture.path_mode {
-            PathMode::WithoutRch => "/usr/bin:/bin".to_string(),
-            PathMode::MockRch => {
-                write_mock_rch(
-                    &mock_dir,
-                    fixture.mock_rch_check_status,
-                    fixture.mock_rch_stderr.as_deref().unwrap_or(""),
-                    fixture.mock_rch_queue_status,
-                    fixture.mock_rch_queue_stdout.as_deref().unwrap_or(""),
-                );
-                format!("{}:/usr/bin:/bin", mock_dir.display())
-            }
-        };
+        let path = fixture_path(&fixture, &mock_dir);
         let args: Vec<&str> = fixture.args.iter().map(String::as_str).collect();
-        let output = run_admission(&format!("fixture-{}", fixture.name), &path, &args);
+        let envs = fixture_envs(&fixture);
+        let output =
+            run_admission_with_env(&format!("fixture-{}", fixture.name), &path, &args, &envs);
 
-        assert_eq!(
-            output.status.code(),
-            Some(fixture.expected_status),
-            "{} status mismatch\nstdout:\n{}\nstderr:\n{}",
-            fixture.name,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
+        assert_status_matches_fixture(&output, &fixture);
         let decision = decision_from_stdout(&output);
-        assert_eq!(decision["schema"], "pi.cargo_headroom.admission.v1");
-        assert_eq!(decision["decision"], fixture.expected_decision);
-        assert_eq!(decision["reason"], fixture.expected_reason);
-        assert_eq!(decision["command_class"], fixture.expected_command_class);
-        assert_eq!(
-            decision["resolved_runner"],
-            fixture.expected_resolved_runner
-        );
-        assert_eq!(decision["rch_detail"], fixture.expected_rch_detail);
-        assert_eq!(
-            decision["allow_local_fallback"],
-            fixture.expected_allow_local_fallback
-        );
-        assert_forecast_matches_fixture(&decision, &fixture);
-
-        let cargo_target_dir = decision["cargo_target_dir"]
-            .as_str()
-            .expect("cargo_target_dir must be a string");
-        let tmpdir = decision["tmpdir"]
-            .as_str()
-            .expect("tmpdir must be a string");
-        assert!(
-            cargo_target_dir.contains(&fixture.name),
-            "{} cargo_target_dir should identify fixture run: {cargo_target_dir}",
-            fixture.name
-        );
-        assert!(
-            tmpdir.contains(&fixture.name),
-            "{} tmpdir should identify fixture run: {tmpdir}",
-            fixture.name
-        );
-
-        let recommended_target = decision["recommended_cargo_target_dir"]
-            .as_str()
-            .expect("recommended_cargo_target_dir must be a string");
-        let recommended_tmp = decision["recommended_tmpdir"]
-            .as_str()
-            .expect("recommended_tmpdir must be a string");
-        assert!(
-            recommended_target.ends_with("/target"),
-            "{} recommended target must be concrete: {recommended_target}",
-            fixture.name
-        );
-        assert!(
-            recommended_tmp.ends_with("/tmp"),
-            "{} recommended tmpdir must be concrete: {recommended_tmp}",
-            fixture.name
-        );
-
-        let target_remediation = decision["storage_remediation"]["cargo_target_dir"]
-            .as_str()
-            .expect("cargo target remediation must be a string");
-        let tmpdir_remediation = decision["storage_remediation"]["tmpdir"]
-            .as_str()
-            .expect("tmpdir remediation must be a string");
-        assert!(target_remediation.contains("CARGO_TARGET_DIR"));
-        assert!(target_remediation.contains("--target-dir"));
-        assert!(target_remediation.contains(cargo_target_dir));
-        assert!(tmpdir_remediation.contains("TMPDIR"));
-        assert!(tmpdir_remediation.contains("--tmpdir"));
-        assert!(tmpdir_remediation.contains(tmpdir));
+        assert_decision_matches_fixture(&decision, &fixture);
     }
 }
 

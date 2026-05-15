@@ -20,9 +20,13 @@ Options:
   --tmpdir <path>             Override TMPDIR for this invocation
   --min-free-mb <mb>          Required free MB on target/tmp mounts (default: 24576)
   --min-inode-free-pct <pct>  Required free inode percent (default: 5)
+  --max-local-cargo-processes <count>
+                              Maximum local cargo/rustc processes before heavy
+                              validation defers (default: 2)
   --admit-only                Emit the admission decision without running cargo
   --decision-json <path>      Also write the machine-readable decision to <path>
   --allow-local-fallback      Permit auto-mode local fallback for heavy commands
+  --force-admit               Override local process pressure for this run
   -h, --help                  Show this help
 
 Environment:
@@ -34,6 +38,10 @@ Environment:
   PI_CARGO_ALLOW_REPO_TARGET  Set to 1 to allow target dirs under the repo root
   PI_CARGO_ALLOW_LOCAL_FALLBACK
                               Set to 1 to permit heavy local fallback in auto mode
+  PI_CARGO_MAX_LOCAL_PROCESSES
+                              Local cargo/rustc process cap for heavy gates
+  PI_CARGO_PROCESS_COUNT      Test/operator override for observed process count
+  PI_CARGO_FORCE_ADMIT        Set to 1 to override local process pressure
 EOF
 }
 
@@ -45,6 +53,7 @@ die() {
 RUNNER="${PI_CARGO_RUNNER:-rch}"
 MIN_FREE_MB="${PI_CARGO_HEADROOM_MIN_FREE_MB:-24576}"
 MIN_INODE_FREE_PCT="${PI_CARGO_HEADROOM_MIN_FREE_INODE_PCT:-5}"
+MAX_LOCAL_CARGO_PROCESSES="${PI_CARGO_MAX_LOCAL_PROCESSES:-2}"
 RCH_QUEUE_FORECAST_MAX_AGE_SECS="${PI_RCH_QUEUE_FORECAST_MAX_AGE_SECS:-120}"
 DEFAULT_BUILD_ROOT="/data/tmp/pi_agent_rust"
 if [[ -e "$DEFAULT_BUILD_ROOT" ]]; then
@@ -62,6 +71,7 @@ TMPDIR_OVERRIDE=""
 ADMIT_ONLY=0
 DECISION_JSON_PATH=""
 ALLOW_LOCAL_FALLBACK="${PI_CARGO_ALLOW_LOCAL_FALLBACK:-0}"
+FORCE_ADMIT="${PI_CARGO_FORCE_ADMIT:-0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -90,6 +100,11 @@ while [[ $# -gt 0 ]]; do
             MIN_INODE_FREE_PCT="$2"
             shift 2
             ;;
+        --max-local-cargo-processes)
+            [[ $# -ge 2 ]] || die "--max-local-cargo-processes requires a value"
+            MAX_LOCAL_CARGO_PROCESSES="$2"
+            shift 2
+            ;;
         --admit-only)
             ADMIT_ONLY=1
             shift
@@ -101,6 +116,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --allow-local-fallback)
             ALLOW_LOCAL_FALLBACK=1
+            shift
+            ;;
+        --force-admit)
+            FORCE_ADMIT=1
             shift
             ;;
         -h|--help)
@@ -134,6 +153,8 @@ esac
     || die "invalid --min-free-mb '$MIN_FREE_MB'"
 [[ "$MIN_INODE_FREE_PCT" =~ ^[0-9]+$ && "$MIN_INODE_FREE_PCT" -gt 0 && "$MIN_INODE_FREE_PCT" -lt 100 ]] \
     || die "invalid --min-inode-free-pct '$MIN_INODE_FREE_PCT'"
+[[ "$MAX_LOCAL_CARGO_PROCESSES" =~ ^[0-9]+$ ]] \
+    || die "invalid --max-local-cargo-processes '$MAX_LOCAL_CARGO_PROCESSES'"
 
 safe_agent_suffix() {
     printf '%s' "${PI_CARGO_AGENT_SUFFIX:-${USER:-agent}}" | tr -c 'A-Za-z0-9._-' '_'
@@ -195,6 +216,7 @@ forecast_not_checked() {
 }
 
 RCH_QUEUE_FORECAST_JSON="$(forecast_not_checked)"
+LOCAL_PROCESS_PRESSURE_JSON='{"schema":"pi.cargo_headroom.local_process_pressure.v1","status":"not_checked","recommended_action":"run","process_count":null,"max_processes":null,"force_override":false,"process_pattern":"cargo,rustc,cargo-clippy,clippy-driver","detail":"not_checked"}'
 
 cargo_command_string() {
     local out="" arg
@@ -205,6 +227,44 @@ cargo_command_string() {
         out+="$arg"
     done
     printf '%s' "$out"
+}
+
+shell_join() {
+    local out="" arg quoted
+    for arg in "$@"; do
+        if [[ -n "$out" ]]; then
+            out+=" "
+        fi
+        printf -v quoted '%q' "$arg"
+        out+="$quoted"
+    done
+    printf '%s' "$out"
+}
+
+planned_command_string() {
+    local resolved_runner="$1"
+    shift
+    local cargo_text quoted_force quoted_target quoted_tmp rch_force
+
+    cargo_text="$(shell_join cargo "$@")"
+    case "$resolved_runner" in
+        rch)
+            rch_force="${RCH_FORCE_REMOTE:-true}"
+            printf -v quoted_force '%q' "$rch_force"
+            printf -v quoted_target '%q' "$CARGO_TARGET_DIR"
+            printf -v quoted_tmp '%q' "$TMPDIR"
+            printf 'env RCH_FORCE_REMOTE=%s CARGO_TARGET_DIR=%s TMPDIR=%s rch exec -- %s' \
+                "$quoted_force" "$quoted_target" "$quoted_tmp" "$cargo_text"
+            ;;
+        local)
+            printf -v quoted_target '%q' "$CARGO_TARGET_DIR"
+            printf -v quoted_tmp '%q' "$TMPDIR"
+            printf 'env CARGO_TARGET_DIR=%s TMPDIR=%s %s' "$quoted_target" "$quoted_tmp" "$cargo_text"
+            ;;
+        *)
+            printf 'not_run: %s' "$cargo_text"
+            ;;
+    esac
 }
 
 json_field() {
@@ -222,6 +282,68 @@ else:
     value = payload.get(os.environ["RCH_FIELD"])
     print("" if value is None else value)
 PY
+}
+
+local_process_pressure_json() {
+    local count detail status recommended_action
+
+    if [[ -n "${PI_CARGO_PROCESS_COUNT:-}" ]]; then
+        [[ "$PI_CARGO_PROCESS_COUNT" =~ ^[0-9]+$ ]] \
+            || die "invalid PI_CARGO_PROCESS_COUNT '$PI_CARGO_PROCESS_COUNT'"
+        count="$PI_CARGO_PROCESS_COUNT"
+        detail="env_override"
+    elif command -v pgrep >/dev/null 2>&1; then
+        local raw
+        if raw="$(pgrep -ax '(cargo|rustc|cargo-clippy|clippy-driver)' 2>/dev/null)"; then
+            count="$(printf '%s\n' "$raw" | awk 'NF {n += 1} END {print n + 0}')"
+            detail="$(printf '%s' "$raw" | head -n 8 | tr '\n' ';' | cut -c 1-240)"
+        else
+            count=0
+            detail="no_matching_processes"
+        fi
+    else
+        count=0
+        status="unavailable"
+        recommended_action="defer"
+        detail="pgrep_not_found"
+    fi
+
+    if [[ -z "${status:-}" ]]; then
+        if (( count > MAX_LOCAL_CARGO_PROCESSES )); then
+            if [[ "$FORCE_ADMIT" == "1" ]]; then
+                status="override"
+                recommended_action="run"
+            else
+                status="high"
+                recommended_action="defer"
+            fi
+        else
+            status="ok"
+            recommended_action="run"
+        fi
+    fi
+
+    printf '{"schema":"pi.cargo_headroom.local_process_pressure.v1","status":"%s","recommended_action":"%s","process_count":%s,"max_processes":%s,"force_override":%s,"process_pattern":"cargo,rustc,cargo-clippy,clippy-driver","detail":"%s"}' \
+        "$(json_escape "$status")" \
+        "$(json_escape "$recommended_action")" \
+        "$count" \
+        "$MAX_LOCAL_CARGO_PROCESSES" \
+        "$(if [[ "$FORCE_ADMIT" == "1" ]]; then echo true; else echo false; fi)" \
+        "$(json_escape "$detail")"
+}
+
+admission_action_for_decision() {
+    case "$1" in
+        allow)
+            printf 'allow'
+            ;;
+        degraded)
+            printf 'fallback'
+            ;;
+        *)
+            printf 'defer'
+            ;;
+    esac
 }
 
 is_safe_local_command() {
@@ -417,14 +539,16 @@ emit_admission_decision() {
     local command_class="$4"
     local rch_detail="$5"
     shift 5
-    local command_text json recommended_target_dir recommended_tmpdir target_remediation tmpdir_remediation
+    local admission_action command_text json planned_command recommended_target_dir recommended_tmpdir target_remediation tmpdir_remediation
 
+    admission_action="$(admission_action_for_decision "$decision")"
     command_text="$(cargo_command_string "$@")"
+    planned_command="$(planned_command_string "$resolved_runner" "$@")"
     recommended_target_dir="$BUILD_ROOT/$(safe_agent_suffix)/target"
     recommended_tmpdir="$BUILD_ROOT/$(safe_agent_suffix)/tmp"
     target_remediation="Set CARGO_TARGET_DIR or pass --target-dir to an off-repo scratch path such as $recommended_target_dir; current CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
     tmpdir_remediation="Set TMPDIR or pass --tmpdir to an off-repo scratch path such as $recommended_tmpdir; current TMPDIR=$TMPDIR"
-    json="{\"schema\":\"pi.cargo_headroom.admission.v1\",\"decision\":\"$(json_escape "$decision")\",\"requested_runner\":\"$(json_escape "$RUNNER")\",\"resolved_runner\":\"$(json_escape "$resolved_runner")\",\"reason\":\"$(json_escape "$reason")\",\"command_class\":\"$(json_escape "$command_class")\",\"allow_local_fallback\":$(if [[ "$ALLOW_LOCAL_FALLBACK" == "1" ]]; then echo true; else echo false; fi),\"cargo_target_dir\":\"$(json_escape "$CARGO_TARGET_DIR")\",\"tmpdir\":\"$(json_escape "$TMPDIR")\",\"recommended_cargo_target_dir\":\"$(json_escape "$recommended_target_dir")\",\"recommended_tmpdir\":\"$(json_escape "$recommended_tmpdir")\",\"storage_remediation\":{\"cargo_target_dir\":\"$(json_escape "$target_remediation")\",\"tmpdir\":\"$(json_escape "$tmpdir_remediation")\"},\"cargo_command\":\"$(json_escape "$command_text")\",\"rch_detail\":\"$(json_escape "$rch_detail")\",\"rch_queue_forecast\":$RCH_QUEUE_FORECAST_JSON}"
+    json="{\"schema\":\"pi.cargo_headroom.admission.v1\",\"decision\":\"$(json_escape "$decision")\",\"admission_action\":\"$(json_escape "$admission_action")\",\"requested_runner\":\"$(json_escape "$RUNNER")\",\"resolved_runner\":\"$(json_escape "$resolved_runner")\",\"reason\":\"$(json_escape "$reason")\",\"command_class\":\"$(json_escape "$command_class")\",\"allow_local_fallback\":$(if [[ "$ALLOW_LOCAL_FALLBACK" == "1" ]]; then echo true; else echo false; fi),\"force_override\":$(if [[ "$FORCE_ADMIT" == "1" ]]; then echo true; else echo false; fi),\"cargo_target_dir\":\"$(json_escape "$CARGO_TARGET_DIR")\",\"tmpdir\":\"$(json_escape "$TMPDIR")\",\"recommended_cargo_target_dir\":\"$(json_escape "$recommended_target_dir")\",\"recommended_tmpdir\":\"$(json_escape "$recommended_tmpdir")\",\"storage_remediation\":{\"cargo_target_dir\":\"$(json_escape "$target_remediation")\",\"tmpdir\":\"$(json_escape "$tmpdir_remediation")\"},\"cargo_command\":\"$(json_escape "$command_text")\",\"planned_command\":\"$(json_escape "$planned_command")\",\"local_process_pressure\":$LOCAL_PROCESS_PRESSURE_JSON,\"rch_detail\":\"$(json_escape "$rch_detail")\",\"rch_queue_forecast\":$RCH_QUEUE_FORECAST_JSON}"
 
     echo "$json"
     if [[ -n "$DECISION_JSON_PATH" ]]; then
@@ -443,6 +567,17 @@ check_rch_health() {
     fi
     if [[ -z "$RCH_DETAIL" ]]; then
         RCH_DETAIL="rch_check_failed"
+    fi
+    local forecast_status workers_healthy slots_available degraded_detail
+    forecast_status="$(json_field "$RCH_QUEUE_FORECAST_JSON" status)"
+    workers_healthy="$(json_field "$RCH_QUEUE_FORECAST_JSON" workers_healthy)"
+    slots_available="$(json_field "$RCH_QUEUE_FORECAST_JSON" slots_available)"
+    if [[ "$forecast_status" == "ok" \
+        && "$workers_healthy" =~ ^[0-9]+$ && "$workers_healthy" -gt 0 \
+        && "$slots_available" =~ ^[0-9]+$ && "$slots_available" -gt 0 ]]; then
+        degraded_detail="$(printf '%s' "$RCH_DETAIL" | tr '\n' ' ' | cut -c 1-200)"
+        RCH_DETAIL="rch_check_degraded_capacity_available: $degraded_detail"
+        return 0
     fi
     return 1
 }
@@ -502,6 +637,14 @@ case "$CARGO_TARGET_DIR" in
 esac
 
 write_cache_tag "$CARGO_TARGET_DIR"
+
+COMMAND_CLASS="heavy"
+if is_safe_local_command "$@"; then
+    COMMAND_CLASS="safe_local"
+fi
+LOCAL_PROCESS_PRESSURE_JSON="$(local_process_pressure_json)"
+LOCAL_PROCESS_RECOMMENDED_ACTION="$(json_field "$LOCAL_PROCESS_PRESSURE_JSON" recommended_action)"
+LOCAL_PROCESS_STATUS="$(json_field "$LOCAL_PROCESS_PRESSURE_JSON" status)"
 
 HEADROOM_OK=1
 HEADROOM_FAILURES=()
@@ -563,10 +706,6 @@ run_local_cargo() {
     exec env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" TMPDIR="$TMPDIR" cargo "$@"
 }
 
-COMMAND_CLASS="heavy"
-if is_safe_local_command "$@"; then
-    COMMAND_CLASS="safe_local"
-fi
 RCH_QUEUE_FORECAST_JSON="$(build_rch_queue_forecast)"
 RCH_QUEUE_FORECAST_ACTION="$(json_field "$RCH_QUEUE_FORECAST_JSON" recommended_action)"
 RCH_QUEUE_FORECAST_REASON="$(json_field "$RCH_QUEUE_FORECAST_JSON" reason)"
@@ -575,6 +714,10 @@ case "$RUNNER" in
     rch)
         if ! check_rch_health; then
             emit_admission_decision "backoff" "none" "rch_unavailable" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
+            exit 2
+        fi
+        if [[ "$COMMAND_CLASS" == "heavy" && "$LOCAL_PROCESS_RECOMMENDED_ACTION" == "defer" ]]; then
+            emit_admission_decision "backoff" "none" "local_process_pressure" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
             exit 2
         fi
         if [[ "$COMMAND_CLASS" == "heavy" && "$RCH_QUEUE_FORECAST_ACTION" == "backoff" ]]; then
@@ -589,6 +732,10 @@ case "$RUNNER" in
         ;;
     auto)
         if check_rch_health; then
+            if [[ "$COMMAND_CLASS" == "heavy" && "$LOCAL_PROCESS_RECOMMENDED_ACTION" == "defer" ]]; then
+                emit_admission_decision "backoff" "none" "local_process_pressure" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
+                exit 2
+            fi
             if [[ "$COMMAND_CLASS" == "heavy" && "$RCH_QUEUE_FORECAST_ACTION" == "backoff" ]]; then
                 emit_admission_decision "backoff" "none" "rch_${RCH_QUEUE_FORECAST_REASON}" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
                 exit 2
@@ -606,6 +753,10 @@ case "$RUNNER" in
             fi
             run_local_cargo "$@"
         fi
+        if [[ "$COMMAND_CLASS" == "heavy" && "$LOCAL_PROCESS_RECOMMENDED_ACTION" == "defer" ]]; then
+            emit_admission_decision "backoff" "none" "local_process_pressure" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
+            exit 2
+        fi
         if [[ "$ALLOW_LOCAL_FALLBACK" == "1" ]]; then
             emit_admission_decision "degraded" "local" "explicit_local_fallback" "$COMMAND_CLASS" "$RCH_DETAIL" "$@"
             if (( ADMIT_ONLY == 1 )); then
@@ -617,6 +768,10 @@ case "$RUNNER" in
         exit 2
         ;;
     local)
+        if [[ "$COMMAND_CLASS" == "heavy" && "$LOCAL_PROCESS_RECOMMENDED_ACTION" == "defer" ]]; then
+            emit_admission_decision "backoff" "none" "local_process_pressure" "$COMMAND_CLASS" "not_checked" "$@"
+            exit 2
+        fi
         emit_admission_decision "allow" "local" "explicit_local_runner" "$COMMAND_CLASS" "not_checked" "$@"
         if (( ADMIT_ONLY == 1 )); then
             exit 0
