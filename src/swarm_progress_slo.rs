@@ -14,6 +14,13 @@ pub const SWARM_PROGRESS_SLO_SCHEMA: &str = "pi.swarm.progress_slo.v1";
 /// Contract version implemented by this evaluator.
 pub const SWARM_PROGRESS_SLO_CONTRACT_VERSION: &str = "1.0.0";
 
+/// Schema emitted by synthetic stress-budget verdicts for the progress SLO evaluator.
+pub const SWARM_PROGRESS_SLO_STRESS_BUDGET_SCHEMA: &str = "pi.swarm.progress_slo.stress_budget.v1";
+
+/// Required caveat for synthetic stress-budget evidence.
+pub const SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT: &str =
+    "engineering_signal_only_not_benchmark_release_or_dropin_claim_support";
+
 const REASON_BEAD_CLOSEOUT: &str = "PROGRESS-SLO-BEAD-CLOSEOUT";
 const REASON_GIT_COMMIT_DELTA: &str = "PROGRESS-SLO-GIT-COMMIT-DELTA";
 const REASON_NO_READY_WORK: &str = "PROGRESS-SLO-NO-READY-WORK";
@@ -24,6 +31,24 @@ const REASON_VALIDATION_BROKER_SATURATED: &str = "PROGRESS-SLO-VALIDATION-BROKER
 const REASON_MALFORMED_SOURCE: &str = "PROGRESS-SLO-MALFORMED-SOURCE";
 const REASON_MISSING_AUTHORITY: &str = "PROGRESS-SLO-MISSING-AUTHORITY";
 const REASON_CONVERGED_NO_OPEN_WORK: &str = "PROGRESS-SLO-CONVERGED-NO-OPEN-WORK";
+const REASON_STRESS_BUDGET_EXCEEDED: &str = "PROGRESS-SLO-STRESS-BUDGET-EXCEEDED";
+const REASON_STRESS_CACHE_MISSING_OR_MISMATCHED: &str =
+    "PROGRESS-SLO-STRESS-CACHE-MISSING-OR-MISMATCHED";
+const REASON_STRESS_HOST_BELOW_FLOOR: &str = "PROGRESS-SLO-STRESS-HOST-BELOW-FLOOR";
+const REASON_STRESS_MISSING_CAVEAT: &str = "PROGRESS-SLO-STRESS-MISSING-CAVEAT";
+const REASON_STRESS_MISSING_MEASUREMENT: &str = "PROGRESS-SLO-STRESS-MISSING-MEASUREMENT";
+const REASON_STRESS_MISSING_PROVENANCE: &str = "PROGRESS-SLO-STRESS-MISSING-PROVENANCE";
+const REASON_STRESS_SOURCE_DEGRADED: &str = "PROGRESS-SLO-STRESS-SOURCE-DEGRADED";
+
+const LARGE_HOST_STRESS_MIN_CPU_CORES: u16 = 64;
+const LARGE_HOST_STRESS_MIN_MEMORY_GIB: u16 = 256;
+const LARGE_HOST_STRESS_MAX_SOURCE_RECORDS: u64 = 100_000;
+const LARGE_HOST_STRESS_MAX_OPEN_BEADS: u64 = 25_000;
+const LARGE_HOST_STRESS_MAX_IN_PROGRESS_BEADS: u64 = 5_000;
+const LARGE_HOST_STRESS_MAX_READY_BEADS: u64 = 10_000;
+const LARGE_HOST_STRESS_MAX_RCH_QUEUE_DEPTH: u64 = 512;
+const LARGE_HOST_STRESS_MAX_VALIDATION_SLOTS: u64 = 1_024;
+const LARGE_HOST_STRESS_MAX_EVALUATION_BUDGET_UNITS: u64 = 1_000_000;
 
 const REQUIRED_SOURCE_IDS: &[&str] = &[
     "beads_active_delta",
@@ -431,6 +456,116 @@ pub struct ProgressSloReport {
     pub next_actions: Vec<String>,
 }
 
+/// Deterministic synthetic profile class used for large-host stress budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressSloStressScenario {
+    Nominal,
+    Saturated,
+    HugeHistory,
+    MissingData,
+}
+
+impl ProgressSloStressScenario {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Saturated => "saturated",
+            Self::HugeHistory => "huge_history",
+            Self::MissingData => "missing_data",
+        }
+    }
+
+    const fn profile_id(self) -> &'static str {
+        match self {
+            Self::Nominal => "large_host_nominal",
+            Self::Saturated => "large_host_saturated",
+            Self::HugeHistory => "large_host_huge_history",
+            Self::MissingData => "large_host_missing_data",
+        }
+    }
+}
+
+/// Synthetic progress-SLO stress profile for large swarm hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSloStressProfile {
+    pub profile_id: String,
+    pub scenario: ProgressSloStressScenario,
+    pub host_cpu_cores: u16,
+    pub host_memory_gib: u16,
+    pub source_record_count: u64,
+    pub validation_slot_count: u64,
+    pub expected_status: ProgressSloStatus,
+    pub progress_input: ProgressSloEvaluationInput,
+}
+
+/// Budget envelope for evaluating progress-SLO stress profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSloStressBudget {
+    pub min_host_cpu_cores: u16,
+    pub min_host_memory_gib: u16,
+    pub max_source_records: u64,
+    pub max_open_beads: u64,
+    pub max_in_progress_beads: u64,
+    pub max_ready_beads: u64,
+    pub max_rch_queue_depth: u64,
+    pub max_validation_slots: u64,
+    pub max_evaluation_budget_units: u64,
+    pub required_caveat: String,
+}
+
+/// Provenance attached to a synthetic stress-budget measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSloStressProvenance {
+    pub profile_id: String,
+    pub scenario: ProgressSloStressScenario,
+    pub generated_at: String,
+    pub generated_by: String,
+    pub source_profile_fingerprint: String,
+    pub synthetic: bool,
+    pub host_cpu_cores: u16,
+    pub host_memory_gib: u16,
+    pub caveats: Vec<String>,
+}
+
+/// Deterministic measurement proxy for a progress-SLO stress profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSloStressMeasurement {
+    pub evaluated_source_records: Option<u64>,
+    pub evaluated_budget_units: Option<u64>,
+    pub cache_key: Option<String>,
+    pub cache_hit: Option<bool>,
+    pub provenance: Option<ProgressSloStressProvenance>,
+}
+
+/// Fail-closed verdict for one synthetic stress-budget profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSloStressBudgetVerdict {
+    pub schema: String,
+    pub profile_id: String,
+    pub scenario: ProgressSloStressScenario,
+    pub passed: bool,
+    pub reason_ids: Vec<String>,
+    pub caveats: Vec<String>,
+    pub report_status: ProgressSloStatus,
+    pub report_reason_ids: Vec<String>,
+    pub expected_report_status: ProgressSloStatus,
+    pub cache_key: Option<String>,
+    pub cache_hit: Option<bool>,
+    pub provenance: Option<ProgressSloStressProvenance>,
+    pub observed_source_records: Option<u64>,
+    pub max_source_records: u64,
+    pub observed_evaluation_budget_units: Option<u64>,
+    pub max_evaluation_budget_units: u64,
+}
+
+struct SyntheticStressShape {
+    source_record_count: u64,
+    validation_slot_count: u64,
+    expected_status: ProgressSloStatus,
+    progress_metrics: ProgressSloMetrics,
+}
+
 struct ProgressSloClassification {
     status: ProgressSloStatus,
     reason_ids: BTreeSet<&'static str>,
@@ -484,6 +619,417 @@ pub fn evaluate_progress_slo(input: ProgressSloEvaluationInput) -> ProgressSloRe
         suppressed_claims,
         next_actions,
     }
+}
+
+/// Default synthetic stress budget for 64+ core / 256 GiB swarm hosts.
+#[must_use]
+pub fn default_large_host_progress_slo_stress_budget() -> ProgressSloStressBudget {
+    ProgressSloStressBudget {
+        min_host_cpu_cores: LARGE_HOST_STRESS_MIN_CPU_CORES,
+        min_host_memory_gib: LARGE_HOST_STRESS_MIN_MEMORY_GIB,
+        max_source_records: LARGE_HOST_STRESS_MAX_SOURCE_RECORDS,
+        max_open_beads: LARGE_HOST_STRESS_MAX_OPEN_BEADS,
+        max_in_progress_beads: LARGE_HOST_STRESS_MAX_IN_PROGRESS_BEADS,
+        max_ready_beads: LARGE_HOST_STRESS_MAX_READY_BEADS,
+        max_rch_queue_depth: LARGE_HOST_STRESS_MAX_RCH_QUEUE_DEPTH,
+        max_validation_slots: LARGE_HOST_STRESS_MAX_VALIDATION_SLOTS,
+        max_evaluation_budget_units: LARGE_HOST_STRESS_MAX_EVALUATION_BUDGET_UNITS,
+        required_caveat: SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT.to_string(),
+    }
+}
+
+/// Deterministic synthetic profiles used to keep the evaluator cheap on large hosts.
+#[must_use]
+pub fn large_host_progress_slo_stress_profiles() -> Vec<ProgressSloStressProfile> {
+    [
+        ProgressSloStressScenario::Nominal,
+        ProgressSloStressScenario::Saturated,
+        ProgressSloStressScenario::HugeHistory,
+        ProgressSloStressScenario::MissingData,
+    ]
+    .into_iter()
+    .map(synthetic_stress_profile)
+    .collect()
+}
+
+/// Build a deterministic synthetic measurement for one stress profile.
+#[must_use]
+pub fn measure_progress_slo_stress_profile(
+    profile: &ProgressSloStressProfile,
+) -> ProgressSloStressMeasurement {
+    let fingerprint = stress_profile_fingerprint(profile);
+    ProgressSloStressMeasurement {
+        evaluated_source_records: Some(profile.source_record_count),
+        evaluated_budget_units: Some(stress_evaluation_budget_units(profile)),
+        cache_key: Some(stress_cache_key(profile)),
+        cache_hit: Some(false),
+        provenance: Some(ProgressSloStressProvenance {
+            profile_id: profile.profile_id.clone(),
+            scenario: profile.scenario,
+            generated_at: profile.progress_input.generated_at.clone(),
+            generated_by: "pi.swarm.progress_slo.synthetic_stress_budget".to_string(),
+            source_profile_fingerprint: fingerprint,
+            synthetic: true,
+            host_cpu_cores: profile.host_cpu_cores,
+            host_memory_gib: profile.host_memory_gib,
+            caveats: vec![SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT.to_string()],
+        }),
+    }
+}
+
+/// Evaluate one stress profile against a deterministic budget.
+#[must_use]
+pub fn evaluate_progress_slo_stress_budget(
+    profile: &ProgressSloStressProfile,
+    budget: &ProgressSloStressBudget,
+    measurement: &ProgressSloStressMeasurement,
+) -> ProgressSloStressBudgetVerdict {
+    let report = evaluate_progress_slo(profile.progress_input.clone());
+    let mut reason_ids = BTreeSet::new();
+    let expected_cache_key = stress_cache_key(profile);
+
+    if profile.host_cpu_cores < budget.min_host_cpu_cores
+        || profile.host_memory_gib < budget.min_host_memory_gib
+    {
+        reason_ids.insert(REASON_STRESS_HOST_BELOW_FLOOR);
+    }
+
+    if matches!(
+        report.status,
+        ProgressSloStatus::MalformedSourceDegraded
+            | ProgressSloStatus::InsufficientEvidenceDegraded
+    ) {
+        reason_ids.insert(REASON_STRESS_SOURCE_DEGRADED);
+    }
+
+    match (
+        measurement.evaluated_source_records,
+        measurement.evaluated_budget_units,
+    ) {
+        (Some(source_records), Some(budget_units)) => {
+            if source_records > budget.max_source_records
+                || budget_units > budget.max_evaluation_budget_units
+                || profile.progress_input.progress_metrics.open_beads > budget.max_open_beads
+                || profile.progress_input.progress_metrics.in_progress_beads
+                    > budget.max_in_progress_beads
+                || profile.progress_input.progress_metrics.ready_beads > budget.max_ready_beads
+                || profile.progress_input.progress_metrics.rch_queue_depth
+                    > budget.max_rch_queue_depth
+                || profile.validation_slot_count > budget.max_validation_slots
+            {
+                reason_ids.insert(REASON_STRESS_BUDGET_EXCEEDED);
+            }
+        }
+        _ => {
+            reason_ids.insert(REASON_STRESS_MISSING_MEASUREMENT);
+        }
+    }
+
+    if measurement.cache_key.as_deref() != Some(expected_cache_key.as_str())
+        || measurement.cache_hit.is_none()
+    {
+        reason_ids.insert(REASON_STRESS_CACHE_MISSING_OR_MISMATCHED);
+    }
+
+    if !has_valid_stress_provenance(profile, measurement, &budget.required_caveat) {
+        reason_ids.insert(REASON_STRESS_MISSING_PROVENANCE);
+    }
+
+    if !measurement.provenance.as_ref().is_some_and(|provenance| {
+        provenance
+            .caveats
+            .iter()
+            .any(|caveat| caveat == &budget.required_caveat)
+    }) {
+        reason_ids.insert(REASON_STRESS_MISSING_CAVEAT);
+    }
+
+    let reason_ids: Vec<String> = reason_ids.into_iter().map(str::to_string).collect();
+
+    ProgressSloStressBudgetVerdict {
+        schema: SWARM_PROGRESS_SLO_STRESS_BUDGET_SCHEMA.to_string(),
+        profile_id: profile.profile_id.clone(),
+        scenario: profile.scenario,
+        passed: reason_ids.is_empty(),
+        reason_ids,
+        caveats: vec![SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT.to_string()],
+        report_status: report.status,
+        report_reason_ids: report.reason_ids,
+        expected_report_status: profile.expected_status,
+        cache_key: measurement.cache_key.clone(),
+        cache_hit: measurement.cache_hit,
+        provenance: measurement.provenance.clone(),
+        observed_source_records: measurement.evaluated_source_records,
+        max_source_records: budget.max_source_records,
+        observed_evaluation_budget_units: measurement.evaluated_budget_units,
+        max_evaluation_budget_units: budget.max_evaluation_budget_units,
+    }
+}
+
+fn synthetic_stress_profile(scenario: ProgressSloStressScenario) -> ProgressSloStressProfile {
+    let shape = synthetic_stress_shape(scenario);
+
+    ProgressSloStressProfile {
+        profile_id: scenario.profile_id().to_string(),
+        scenario,
+        host_cpu_cores: LARGE_HOST_STRESS_MIN_CPU_CORES,
+        host_memory_gib: LARGE_HOST_STRESS_MIN_MEMORY_GIB,
+        source_record_count: shape.source_record_count,
+        validation_slot_count: shape.validation_slot_count,
+        expected_status: shape.expected_status,
+        progress_input: synthetic_progress_slo_input(scenario, shape.progress_metrics),
+    }
+}
+
+const fn synthetic_stress_shape(scenario: ProgressSloStressScenario) -> SyntheticStressShape {
+    match scenario {
+        ProgressSloStressScenario::Nominal => SyntheticStressShape {
+            source_record_count: 4_096,
+            validation_slot_count: 64,
+            expected_status: ProgressSloStatus::Progressing,
+            progress_metrics: nominal_stress_metrics(),
+        },
+        ProgressSloStressScenario::Saturated => SyntheticStressShape {
+            source_record_count: 12_000,
+            validation_slot_count: 256,
+            expected_status: ProgressSloStatus::BuildSaturated,
+            progress_metrics: saturated_stress_metrics(),
+        },
+        ProgressSloStressScenario::HugeHistory => SyntheticStressShape {
+            source_record_count: 80_000,
+            validation_slot_count: 512,
+            expected_status: ProgressSloStatus::Progressing,
+            progress_metrics: huge_history_stress_metrics(),
+        },
+        ProgressSloStressScenario::MissingData => SyntheticStressShape {
+            source_record_count: 0,
+            validation_slot_count: 64,
+            expected_status: ProgressSloStatus::InsufficientEvidenceDegraded,
+            progress_metrics: missing_data_stress_metrics(),
+        },
+    }
+}
+
+const fn nominal_stress_metrics() -> ProgressSloMetrics {
+    ProgressSloMetrics {
+        closed_beads: 32,
+        open_beads: 512,
+        in_progress_beads: 64,
+        ready_beads: 128,
+        dependency_blocked_beads: 320,
+        commits: 32,
+        pushed_commits: 32,
+        closed_with_commit_reference_count: 32,
+        validation_passes: 96,
+        validation_failures: 1,
+        agent_mail_health: AgentMailHealth::Green,
+        rch_posture: RchPosture::Green,
+        rch_queue_depth: 8,
+        rch_queue_saturation_threshold: LARGE_HOST_STRESS_MAX_RCH_QUEUE_DEPTH,
+        validation_broker_posture: ValidationBrokerPosture::Green,
+        stale_in_progress_candidates: 0,
+        malformed_source_records: 0,
+        contradictory_source_records: 0,
+    }
+}
+
+const fn saturated_stress_metrics() -> ProgressSloMetrics {
+    ProgressSloMetrics {
+        closed_beads: 8,
+        open_beads: 2_048,
+        in_progress_beads: 384,
+        ready_beads: 640,
+        dependency_blocked_beads: 1_024,
+        commits: 8,
+        pushed_commits: 8,
+        closed_with_commit_reference_count: 8,
+        validation_passes: 128,
+        validation_failures: 12,
+        agent_mail_health: AgentMailHealth::Green,
+        rch_posture: RchPosture::Queueing,
+        rch_queue_depth: 512,
+        rch_queue_saturation_threshold: 512,
+        validation_broker_posture: ValidationBrokerPosture::Saturated,
+        stale_in_progress_candidates: 0,
+        malformed_source_records: 0,
+        contradictory_source_records: 0,
+    }
+}
+
+const fn huge_history_stress_metrics() -> ProgressSloMetrics {
+    ProgressSloMetrics {
+        closed_beads: 1_024,
+        open_beads: 16_384,
+        in_progress_beads: 512,
+        ready_beads: 2_048,
+        dependency_blocked_beads: 4_096,
+        commits: 512,
+        pushed_commits: 512,
+        closed_with_commit_reference_count: 1_024,
+        validation_passes: 2_048,
+        validation_failures: 32,
+        agent_mail_health: AgentMailHealth::Green,
+        rch_posture: RchPosture::Queueing,
+        rch_queue_depth: 384,
+        rch_queue_saturation_threshold: LARGE_HOST_STRESS_MAX_RCH_QUEUE_DEPTH,
+        validation_broker_posture: ValidationBrokerPosture::Queueing,
+        stale_in_progress_candidates: 0,
+        malformed_source_records: 0,
+        contradictory_source_records: 0,
+    }
+}
+
+const fn missing_data_stress_metrics() -> ProgressSloMetrics {
+    ProgressSloMetrics {
+        closed_beads: 0,
+        open_beads: 512,
+        in_progress_beads: 64,
+        ready_beads: 128,
+        dependency_blocked_beads: 320,
+        commits: 0,
+        pushed_commits: 0,
+        closed_with_commit_reference_count: 0,
+        validation_passes: 0,
+        validation_failures: 0,
+        agent_mail_health: AgentMailHealth::Green,
+        rch_posture: RchPosture::Green,
+        rch_queue_depth: 0,
+        rch_queue_saturation_threshold: LARGE_HOST_STRESS_MAX_RCH_QUEUE_DEPTH,
+        validation_broker_posture: ValidationBrokerPosture::Green,
+        stale_in_progress_candidates: 0,
+        malformed_source_records: 0,
+        contradictory_source_records: 0,
+    }
+}
+
+fn synthetic_progress_slo_input(
+    scenario: ProgressSloStressScenario,
+    progress_metrics: ProgressSloMetrics,
+) -> ProgressSloEvaluationInput {
+    let missing_source_id = match scenario {
+        ProgressSloStressScenario::MissingData => Some("git_commit_delta"),
+        ProgressSloStressScenario::Nominal
+        | ProgressSloStressScenario::Saturated
+        | ProgressSloStressScenario::HugeHistory => None,
+    };
+
+    ProgressSloEvaluationInput::new(
+        "2026-05-15T03:00:00Z",
+        ProgressSloTimeWindow::new(
+            "2026-05-15T02:00:00Z",
+            "2026-05-15T03:00:00Z",
+            3600,
+            "synthetic_large_host_progress_slo_stress_budget",
+        ),
+        synthetic_progress_sources(missing_source_id),
+        progress_metrics,
+    )
+}
+
+fn synthetic_progress_sources(missing_source_id: Option<&str>) -> Vec<ProgressSloSourceStatus> {
+    REQUIRED_SOURCE_IDS
+        .iter()
+        .filter(|source_id| missing_source_id != Some(*source_id))
+        .map(|source_id| {
+            ProgressSloSourceStatus::new(
+                *source_id,
+                synthetic_source_class_for(source_id),
+                synthetic_source_kind_for(source_id),
+                SourceAvailability::Available,
+                FreshnessState::Current,
+                RedactionState::None,
+                vec![format!("{source_id}_authority")],
+            )
+            .with_path(format!("synthetic/progress_slo/{source_id}.json"))
+            .with_observed_at("2026-05-15T03:00:00Z")
+            .with_source_hash(format!("synthetic-sha256-{source_id}"))
+        })
+        .collect()
+}
+
+fn synthetic_source_class_for(source_id: &str) -> &'static str {
+    match source_id {
+        "beads_active_delta" | "beads_closed_delta" => "beads_active_closed_delta",
+        "git_commit_delta" => "git_commit_delta",
+        "rch_posture" | "validation_broker_posture" => "rch_and_validation_broker_posture",
+        "agent_mail_health" => "agent_mail_health",
+        "operator_runpack_summary" | "swarm_autopilot_summary" | "context_intelligence_summary" => {
+            "runpack_autopilot_context_summaries"
+        }
+        "operator_time_window" => "operator_provided_time_window",
+        _ => "unknown",
+    }
+}
+
+fn synthetic_source_kind_for(source_id: &str) -> &'static str {
+    match source_id {
+        "beads_active_delta" | "beads_closed_delta" => "beads",
+        "git_commit_delta" => "git",
+        "rch_posture" => "rch",
+        "validation_broker_posture" => "validation_broker",
+        "agent_mail_health" => "agent_mail",
+        "operator_runpack_summary" => "runpack",
+        "swarm_autopilot_summary" => "autopilot",
+        "context_intelligence_summary" => "context_intelligence",
+        "operator_time_window" => "operator",
+        _ => "unknown",
+    }
+}
+
+fn stress_evaluation_budget_units(profile: &ProgressSloStressProfile) -> u64 {
+    let metrics = &profile.progress_input.progress_metrics;
+    128_u64
+        .saturating_add(profile.source_record_count.saturating_mul(8))
+        .saturating_add(metrics.open_beads.saturating_mul(2))
+        .saturating_add(metrics.in_progress_beads.saturating_mul(4))
+        .saturating_add(metrics.ready_beads.saturating_mul(3))
+        .saturating_add(metrics.rch_queue_depth.saturating_mul(4))
+        .saturating_add(profile.validation_slot_count.saturating_mul(4))
+        .saturating_add(u64_from_usize_saturating(
+            profile.progress_input.source_statuses.len(),
+        ))
+}
+
+fn stress_profile_fingerprint(profile: &ProgressSloStressProfile) -> String {
+    let metrics = &profile.progress_input.progress_metrics;
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        SWARM_PROGRESS_SLO_STRESS_BUDGET_SCHEMA,
+        profile.profile_id,
+        profile.scenario.as_str(),
+        profile.host_cpu_cores,
+        profile.host_memory_gib,
+        profile.source_record_count,
+        profile.validation_slot_count,
+        metrics.open_beads,
+        metrics.in_progress_beads,
+        metrics.ready_beads
+    )
+}
+
+fn stress_cache_key(profile: &ProgressSloStressProfile) -> String {
+    format!("cache:{}", stress_profile_fingerprint(profile))
+}
+
+fn has_valid_stress_provenance(
+    profile: &ProgressSloStressProfile,
+    measurement: &ProgressSloStressMeasurement,
+    required_caveat: &str,
+) -> bool {
+    measurement.provenance.as_ref().is_some_and(|provenance| {
+        provenance.profile_id == profile.profile_id
+            && provenance.scenario == profile.scenario
+            && !provenance.generated_at.trim().is_empty()
+            && !provenance.generated_by.trim().is_empty()
+            && provenance.source_profile_fingerprint == stress_profile_fingerprint(profile)
+            && provenance.synthetic
+            && provenance.host_cpu_cores == profile.host_cpu_cores
+            && provenance.host_memory_gib == profile.host_memory_gib
+            && provenance
+                .caveats
+                .iter()
+                .any(|caveat| caveat == required_caveat)
+    })
 }
 
 fn classify_progress_slo(
@@ -826,12 +1372,20 @@ fn next_actions_for(
 mod tests {
     use super::{
         AgentMailHealth, DimensionStatus, FreshnessState, ProgressSloEvaluationInput,
-        ProgressSloMetrics, ProgressSloSourceStatus, ProgressSloStatus, ProgressSloTimeWindow,
-        REASON_AGENT_MAIL_DEGRADED, REASON_BEAD_CLOSEOUT, REASON_CONVERGED_NO_OPEN_WORK,
-        REASON_MALFORMED_SOURCE, REASON_MISSING_AUTHORITY, REASON_NO_READY_WORK,
-        REASON_RCH_SATURATED, REASON_STALE_IN_PROGRESS, REASON_VALIDATION_BROKER_SATURATED,
-        RchPosture, RecommendedOperatorPosture, RedactionState, SWARM_PROGRESS_SLO_SCHEMA,
-        SourceAvailability, ValidationBrokerPosture, evaluate_progress_slo,
+        ProgressSloMetrics, ProgressSloSourceStatus, ProgressSloStatus, ProgressSloStressProfile,
+        ProgressSloStressScenario, ProgressSloTimeWindow, REASON_AGENT_MAIL_DEGRADED,
+        REASON_BEAD_CLOSEOUT, REASON_CONVERGED_NO_OPEN_WORK, REASON_MALFORMED_SOURCE,
+        REASON_MISSING_AUTHORITY, REASON_NO_READY_WORK, REASON_RCH_SATURATED,
+        REASON_STALE_IN_PROGRESS, REASON_STRESS_BUDGET_EXCEEDED,
+        REASON_STRESS_CACHE_MISSING_OR_MISMATCHED, REASON_STRESS_MISSING_CAVEAT,
+        REASON_STRESS_MISSING_MEASUREMENT, REASON_STRESS_MISSING_PROVENANCE,
+        REASON_STRESS_SOURCE_DEGRADED, REASON_VALIDATION_BROKER_SATURATED, RchPosture,
+        RecommendedOperatorPosture, RedactionState, SWARM_PROGRESS_SLO_SCHEMA,
+        SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT, SWARM_PROGRESS_SLO_STRESS_BUDGET_SCHEMA,
+        SourceAvailability, ValidationBrokerPosture, default_large_host_progress_slo_stress_budget,
+        evaluate_progress_slo, evaluate_progress_slo_stress_budget,
+        large_host_progress_slo_stress_profiles, measure_progress_slo_stress_profile,
+        synthetic_stress_profile,
     };
 
     fn window() -> ProgressSloTimeWindow {
@@ -935,6 +1489,13 @@ mod tests {
             all_sources(),
             metrics,
         ))
+    }
+
+    fn stress_profile(scenario: ProgressSloStressScenario) -> ProgressSloStressProfile {
+        large_host_progress_slo_stress_profiles()
+            .into_iter()
+            .find(|profile| profile.scenario == scenario)
+            .unwrap_or_else(|| synthetic_stress_profile(scenario))
     }
 
     #[test]
@@ -1242,5 +1803,148 @@ mod tests {
         );
         assert_eq!(unsafe_report.redaction_summary.unsafe_to_emit_count, 1);
         assert!(unsafe_report.confidence < missing_report.confidence);
+    }
+
+    #[test]
+    fn large_host_nominal_and_huge_history_profiles_pass_stress_budget() {
+        let budget = default_large_host_progress_slo_stress_budget();
+
+        for scenario in [
+            ProgressSloStressScenario::Nominal,
+            ProgressSloStressScenario::HugeHistory,
+        ] {
+            let profile = stress_profile(scenario);
+            let measurement = measure_progress_slo_stress_profile(&profile);
+            let verdict = evaluate_progress_slo_stress_budget(&profile, &budget, &measurement);
+
+            assert_eq!(verdict.schema, SWARM_PROGRESS_SLO_STRESS_BUDGET_SCHEMA);
+            assert!(verdict.passed, "{:?}", verdict.reason_ids);
+            assert_eq!(verdict.report_status, ProgressSloStatus::Progressing);
+            assert_eq!(verdict.report_status, verdict.expected_report_status);
+            assert!(profile.host_cpu_cores >= 64);
+            assert!(profile.host_memory_gib >= 256);
+            assert!(
+                verdict
+                    .caveats
+                    .iter()
+                    .any(|caveat| caveat == SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT)
+            );
+            assert!(
+                verdict
+                    .provenance
+                    .as_ref()
+                    .is_some_and(|provenance| provenance.synthetic)
+            );
+        }
+    }
+
+    #[test]
+    fn saturated_profile_can_pass_cost_budget_while_reporting_build_saturation() {
+        let budget = default_large_host_progress_slo_stress_budget();
+        let profile = stress_profile(ProgressSloStressScenario::Saturated);
+        let measurement = measure_progress_slo_stress_profile(&profile);
+        let verdict = evaluate_progress_slo_stress_budget(&profile, &budget, &measurement);
+
+        assert!(verdict.passed, "{:?}", verdict.reason_ids);
+        assert_eq!(verdict.report_status, ProgressSloStatus::BuildSaturated);
+        assert_eq!(verdict.report_status, verdict.expected_report_status);
+        assert!(
+            verdict
+                .report_reason_ids
+                .iter()
+                .any(|reason| reason == REASON_RCH_SATURATED)
+        );
+        assert!(
+            verdict
+                .observed_source_records
+                .is_some_and(|records| records > 0)
+        );
+    }
+
+    #[test]
+    fn missing_data_profile_fails_stress_budget_closed() {
+        let budget = default_large_host_progress_slo_stress_budget();
+        let profile = stress_profile(ProgressSloStressScenario::MissingData);
+        let measurement = measure_progress_slo_stress_profile(&profile);
+        let verdict = evaluate_progress_slo_stress_budget(&profile, &budget, &measurement);
+
+        assert!(!verdict.passed);
+        assert_eq!(
+            verdict.report_status,
+            ProgressSloStatus::InsufficientEvidenceDegraded
+        );
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_SOURCE_DEGRADED)
+        );
+        assert!(
+            verdict
+                .caveats
+                .iter()
+                .any(|caveat| caveat == SWARM_PROGRESS_SLO_STRESS_BUDGET_CAVEAT)
+        );
+    }
+
+    #[test]
+    fn missing_measurement_cache_and_provenance_fail_closed() {
+        let budget = default_large_host_progress_slo_stress_budget();
+        let profile = stress_profile(ProgressSloStressScenario::Nominal);
+        let mut measurement = measure_progress_slo_stress_profile(&profile);
+        measurement.evaluated_budget_units = None;
+        measurement.cache_key = None;
+        measurement.cache_hit = None;
+        measurement.provenance = None;
+
+        let verdict = evaluate_progress_slo_stress_budget(&profile, &budget, &measurement);
+
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_MISSING_MEASUREMENT)
+        );
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_CACHE_MISSING_OR_MISMATCHED)
+        );
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_MISSING_PROVENANCE)
+        );
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_MISSING_CAVEAT)
+        );
+    }
+
+    #[test]
+    fn exceeded_stress_budget_fails_closed() {
+        let mut budget = default_large_host_progress_slo_stress_budget();
+        budget.max_source_records = 1;
+        budget.max_evaluation_budget_units = 1;
+        let profile = stress_profile(ProgressSloStressScenario::HugeHistory);
+        let measurement = measure_progress_slo_stress_profile(&profile);
+        let verdict = evaluate_progress_slo_stress_budget(&profile, &budget, &measurement);
+
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .reason_ids
+                .iter()
+                .any(|reason| reason == REASON_STRESS_BUDGET_EXCEEDED)
+        );
+        assert!(verdict.observed_source_records > Some(verdict.max_source_records));
+        assert!(
+            verdict.observed_evaluation_budget_units > Some(verdict.max_evaluation_budget_units)
+        );
     }
 }

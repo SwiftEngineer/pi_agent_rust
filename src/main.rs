@@ -1742,6 +1742,7 @@ async fn run(
     result
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
     let manager = PackageManager::new(cwd.to_path_buf());
     match command {
@@ -2739,9 +2740,10 @@ fn push_swarm_progress_list(output: &mut String, label: &str, values: &[String])
 }
 
 fn swarm_progress_json_key(value: &impl Serialize) -> String {
-    serde_json::to_string(value)
-        .map(|raw| raw.trim_matches('"').to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+    serde_json::to_string(value).map_or_else(
+        |_| "unknown".to_string(),
+        |raw| raw.trim_matches('"').to_string(),
+    )
 }
 
 const SWARM_REPLAY_PREVIEW_SCHEMA: &str = "pi.swarm.replay_preview.v1";

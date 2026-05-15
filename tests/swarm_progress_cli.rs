@@ -129,7 +129,7 @@ fn all_sources() -> Vec<ProgressSloSourceStatus> {
     .collect()
 }
 
-fn healthy_metrics() -> ProgressSloMetrics {
+const fn healthy_metrics() -> ProgressSloMetrics {
     ProgressSloMetrics {
         closed_beads: 2,
         open_beads: 8,
