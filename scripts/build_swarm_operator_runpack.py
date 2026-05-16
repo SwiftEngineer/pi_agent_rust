@@ -71,6 +71,10 @@ CONTEXT_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA = "pi.context_intelligence.closeout_ga
 CONTEXT_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
     "pi.context_intelligence.closeout_gate_contract.v1"
 )
+RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA = "pi.runtime_intelligence.closeout_gate.v1"
+RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
+    "pi.runtime_intelligence.closeout_gate_contract.v1"
+)
 SWARM_REPLAY_PREVIEW_SCHEMA = "pi.swarm.replay_preview.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 AUTOPILOT_INPUT_PACK_CONTRACT_PATH = Path(
@@ -82,6 +86,9 @@ AUTOPILOT_DECISION_GATE_CONTRACT_PATH = Path(
 )
 CONTEXT_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH = Path(
     "docs/contracts/context-intelligence-closeout-gate-contract.json"
+)
+RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH = Path(
+    "docs/contracts/runtime-intelligence-closeout-gate-contract.json"
 )
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
@@ -317,6 +324,51 @@ CONTEXT_INTELLIGENCE_CLOSEOUT_REQUIRED_QUALITY_GATES = (
     "context_perf_budgets_rch",
     "context_intelligence_closeout_gate_contract_rch",
     "cargo_fmt",
+    "cargo_check_all_targets_rch",
+    "cargo_clippy_all_targets_rch",
+    "staged_ubs",
+    "beads_ledger_reconcile",
+)
+RUNTIME_INTELLIGENCE_CLOSEOUT_CHILD_BEADS = (
+    "bd-h66tp.1",
+    "bd-h66tp.2",
+    "bd-h66tp.3",
+    "bd-h66tp.4",
+    "bd-h66tp.5",
+    "bd-h66tp.6",
+    "bd-h66tp.7",
+)
+RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_CHECKS = (
+    "child_beads_closed",
+    "compaction_admission",
+    "tool_output_artifacts",
+    "provider_routing",
+    "scheduler_fairness",
+    "frame_budget",
+    "cancellation_cleanup",
+    "extension_safety_provenance",
+    "docs_and_evidence",
+    "source_boundaries",
+    "pushed_commits",
+    "quality_gates",
+)
+RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES = (
+    "beads_are_source_of_truth",
+    "agent_mail_is_coordination_only",
+    "read_only_gate",
+    "rch_required_for_heavy_cargo",
+    "staged_ubs_required",
+    "beads_ledger_required",
+    "no_release_or_dropin_claims",
+    "closeout_does_not_replace_child_artifacts",
+)
+RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_QUALITY_GATES = (
+    "py_compile",
+    "runpack_self_test",
+    "json_contracts",
+    "runtime_intelligence_closeout_gate_contract_rch",
+    "cargo_fmt",
+    "git_diff_check",
     "cargo_check_all_targets_rch",
     "cargo_clippy_all_targets_rch",
     "staged_ubs",
@@ -9628,6 +9680,664 @@ def write_context_intelligence_closeout_gate_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def runtime_intelligence_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-h66tp.1",
+            "commit": "d9cfaa66073e0b1d27ccfe2235f0916007c61f7f",
+            "code_paths": ["src/agent.rs", "src/compaction_worker.rs"],
+            "test_paths": ["src/compaction_worker.rs"],
+            "docs_or_evidence_paths": ["docs/evidence/compaction-admission-proof.json"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib compaction_admission -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.2",
+            "commit": "547302f93977849b0f02b19e1f70a9127a154922",
+            "code_paths": ["src/agent.rs", "src/session.rs", "src/tools.rs"],
+            "test_paths": ["src/session.rs", "src/tools.rs"],
+            "docs_or_evidence_paths": [".beads/issues.jsonl"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib artifact -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.3",
+            "commit": "aa5f8bc5183e862dd7d63c2b4524f367776909de",
+            "code_paths": [
+                "src/interactive/model_selector_ui.rs",
+                "src/model_routing.rs",
+                "src/model_selector.rs",
+            ],
+            "test_paths": ["src/model_routing.rs", "src/model_selector.rs"],
+            "docs_or_evidence_paths": [".beads/issues.jsonl"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib model_routing -- --nocapture",
+                "rch exec -- cargo test --test tui_state routing -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.4",
+            "commit": "97cda5eb6eb0446c6e4c7fb8020d891135ae1a6c",
+            "code_paths": ["src/scheduler.rs"],
+            "test_paths": ["src/scheduler.rs"],
+            "docs_or_evidence_paths": [".beads/issues.jsonl"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib scheduler_fairness_replay -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.5",
+            "commit": "c34a29b3823280198afce8dc850a77f4773b28aa",
+            "code_paths": ["src/interactive.rs", "src/interactive/perf.rs"],
+            "test_paths": ["tests/tui_state.rs"],
+            "docs_or_evidence_paths": [
+                "docs/evidence/large-session-tui-frame-budget.json",
+                "docs/tui.md",
+            ],
+            "validation_commands": [
+                "rch exec -- cargo test -p pi_agent_rust --test tui_state frame_budget -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.6",
+            "commit": "09c4d9e02c80ea352f783f69d4e2a774bf21e4bf",
+            "code_paths": [
+                "src/agent.rs",
+                "src/extensions_js.rs",
+                "src/interactive/commands.rs",
+                "src/tools.rs",
+            ],
+            "test_paths": ["src/agent.rs", "src/tools.rs"],
+            "docs_or_evidence_paths": ["docs/evidence/cancellation-cleanup-proof.json"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib abort_during_tool_execution_records_aborted_tool_result -- --nocapture",
+                "rch exec -- cargo test --lib test_bash_timeout_includes_cancellation_details -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+        {
+            "bead_id": "bd-h66tp.7",
+            "commit": "a82551dccb31a478a398665b7843d0afd118d13e",
+            "code_paths": ["src/extension_index.rs", "src/main.rs"],
+            "test_paths": ["src/extension_index.rs"],
+            "docs_or_evidence_paths": [".beads/issues.jsonl"],
+            "validation_commands": [
+                "rch exec -- cargo test --lib extension_safety_provenance -- --nocapture",
+                "rch exec -- cargo check --all-targets",
+                "rch exec -- cargo clippy --all-targets -- -D warnings",
+            ],
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def runtime_intelligence_source_boundary_checks() -> list[dict[str, Any]]:
+    boundaries = [
+        (
+            "beads_are_source_of_truth",
+            "Beads record child status, close reasons, and final-gate ownership.",
+            [{"path": ".beads/issues.jsonl"}],
+        ),
+        (
+            "agent_mail_is_coordination_only",
+            "Agent Mail reservations and messages are coordination signals, not implementation proof.",
+            [{"source": "Agent Mail", "role": "coordination"}],
+        ),
+        (
+            "read_only_gate",
+            "The closeout gate inspects already-captured artifacts and does not mutate runtime sources.",
+            [{"path": "scripts/build_swarm_operator_runpack.py"}],
+        ),
+        (
+            "rch_required_for_heavy_cargo",
+            "Heavy Cargo gates must prove RCH execution.",
+            [{"required_command_fragment": "rch exec --"}],
+        ),
+        (
+            "staged_ubs_required",
+            "The staged UBS gate remains mandatory before the closeout commit.",
+            [{"command": "ubs --staged --only=rust ."}],
+        ),
+        (
+            "beads_ledger_required",
+            "Beads ledger reconciliation remains mandatory before the closeout commit.",
+            [{"command": "./scripts/reconcile_beads_ledger.sh"}],
+        ),
+        (
+            "no_release_or_dropin_claims",
+            "Runtime-intelligence closeout is advisory prompt-to-artifact evidence only.",
+            [{"claim_authorized": False}],
+        ),
+        (
+            "closeout_does_not_replace_child_artifacts",
+            "Passing closeout does not replace child tests, evidence, Beads, git, RCH, UBS, or CI.",
+            [{"closeout_replaces_source_artifacts": False}],
+        ),
+    ]
+    return [
+        {
+            "id": boundary_id,
+            "status": "pass",
+            "requirement": requirement,
+            "evidence": evidence,
+        }
+        for boundary_id, requirement, evidence in boundaries
+    ]
+
+
+def build_runtime_intelligence_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    script_path = root / "scripts/build_swarm_operator_runpack.py"
+    readme_path = root / "README.md"
+    closeout_contract_path = root / RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = runtime_intelligence_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in RUNTIME_INTELLIGENCE_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in RUNTIME_INTELLIGENCE_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All third-wave runtime-intelligence child Beads are closed and mapped to concrete artifacts.",
+            not missing_children and artifact_paths_exist and commits_present,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                    "artifact_path_count": len(artifact_paths),
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits": commits,
+                    "commits_present": commits_present,
+                    "commit_check_source": (
+                        "self_test_fixture_override"
+                        if commit_check_override is not None
+                        else "git_cat_file"
+                    ),
+                }
+            ],
+            issue=(
+                f"children not closed: {', '.join(missing_children)}"
+                if missing_children
+                else "one or more mapped artifact paths or commits are missing"
+                if not artifact_paths_exist or not commits_present
+                else None
+            ),
+        )
+    )
+
+    compaction_path = root / "src/compaction_worker.rs"
+    tool_path = root / "src/tools.rs"
+    session_path = root / "src/session.rs"
+    routing_path = root / "src/model_routing.rs"
+    selector_path = root / "src/model_selector.rs"
+    selector_ui_path = root / "src/interactive/model_selector_ui.rs"
+    scheduler_path = root / "src/scheduler.rs"
+    frame_perf_path = root / "src/interactive/perf.rs"
+    tui_state_path = root / "tests/tui_state.rs"
+    agent_path = root / "src/agent.rs"
+    extension_index_path = root / "src/extension_index.rs"
+    main_path = root / "src/main.rs"
+    compaction_evidence_path = root / "docs/evidence/compaction-admission-proof.json"
+    cancellation_evidence_path = root / "docs/evidence/cancellation-cleanup-proof.json"
+    frame_evidence_path = root / "docs/evidence/large-session-tui-frame-budget.json"
+
+    checklist.append(
+        gate_check(
+            "compaction_admission",
+            "Memory-aware compaction admission is deterministic, reason-coded, and backed by proof evidence.",
+            all(
+                (
+                    file_contains(compaction_path, "compaction_admission_decision"),
+                    file_contains(compaction_path, "CompactionAdmissionReason"),
+                    file_contains(compaction_path, "memory_pressure"),
+                    file_contains(compaction_evidence_path, "pi.compaction.admission.v1"),
+                )
+            ),
+            [
+                {"path": "src/compaction_worker.rs"},
+                {"path": "docs/evidence/compaction-admission-proof.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "tool_output_artifacts",
+            "Huge built-in tool outputs spill into bounded session artifacts instead of unbounded provider-visible payloads.",
+            all(
+                (
+                    file_contains(tool_path, "Full tool output artifact"),
+                    file_contains(tool_path, "pi.tool_output_artifact.v1"),
+                    file_contains(session_path, "tool_result_artifact_metadata_round_trip"),
+                    file_contains(agent_path, "artifact"),
+                )
+            ),
+            [
+                {"path": "src/tools.rs"},
+                {"path": "src/session.rs"},
+                {"path": "src/agent.rs"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "provider_routing",
+            "Provider/model routing evidence exposes latency, errors, staleness, cost hints, and user override posture without secrets.",
+            all(
+                (
+                    file_contains(routing_path, "pi.provider_routing.evidence.v1"),
+                    file_contains(routing_path, "ModelRoutingEvidence"),
+                    file_contains(routing_path, "cost_hint_high"),
+                    file_contains(selector_path, "routing_evidence_for"),
+                    file_contains(selector_ui_path, "routing"),
+                )
+            ),
+            [
+                {"path": "src/model_routing.rs"},
+                {"path": "src/model_selector.rs"},
+                {"path": "src/interactive/model_selector_ui.rs"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "scheduler_fairness",
+            "Extension scheduler replay proves hostcall, timer, stream, and event storms remain ordered and non-starving.",
+            all(
+                (
+                    file_contains(scheduler_path, "scheduler_fairness_replay_under_hostcall_timer_and_event_storms"),
+                    file_contains(scheduler_path, "pi.scheduler.fairness_replay.v1"),
+                    file_contains(scheduler_path, "max_class_gap_ticks"),
+                )
+            ),
+            [{"path": "src/scheduler.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "frame_budget",
+            "Large-session TUI frame-budget telemetry is redaction-safe and covers conversation, tool preview, model, branch, and tree surfaces.",
+            all(
+                (
+                    file_contains(frame_perf_path, "pi.tui.frame_budget.v1"),
+                    file_contains(frame_perf_path, "snapshot_json"),
+                    file_contains(tui_state_path, "tui_frame_budget_snapshot_covers_large_session_surfaces"),
+                    file_contains(frame_evidence_path, "large_session_tui_frame_budget.proof.v1"),
+                )
+            ),
+            [
+                {"path": "src/interactive/perf.rs"},
+                {"path": "tests/tui_state.rs"},
+                {"path": "docs/evidence/large-session-tui-frame-budget.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "cancellation_cleanup",
+            "Long-running tool and extension cancellation leaves structured evidence and avoids late-success records.",
+            all(
+                (
+                    file_contains(tool_path, "pi.tool.bash.cancellation.v1"),
+                    file_contains(agent_path, "pi.tool.cancellation.v1"),
+                    file_contains(cancellation_evidence_path, "pi.cancellation.cleanup.proof.v1"),
+                    file_contains(cancellation_evidence_path, "tool_result_recorded_no_success"),
+                )
+            ),
+            [
+                {"path": "src/tools.rs"},
+                {"path": "src/agent.rs"},
+                {"path": "docs/evidence/cancellation-cleanup-proof.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "extension_safety_provenance",
+            "Offline extension search/info/install surfaces expose source, license, category, capability, risk, and freshness provenance.",
+            all(
+                (
+                    file_contains(extension_index_path, "ExtensionSafetyProvenance"),
+                    file_contains(extension_index_path, "source_confidence"),
+                    file_contains(extension_index_path, "risk_profile"),
+                    file_contains(main_path, "extension_safety_lines"),
+                    file_contains(main_path, "print_extension_info"),
+                )
+            ),
+            [
+                {"path": "src/extension_index.rs"},
+                {"path": "src/main.rs"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "docs_and_evidence",
+            "Runtime-intelligence operator evidence is linked without promoting advisory evidence into release or drop-in claims.",
+            all(
+                (
+                    file_contains(readme_path, "docs/evidence/runtime-intelligence-closeout-gate.json"),
+                    file_contains(readme_path, str(RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH)),
+                    file_contains(closeout_contract_path, RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA),
+                    file_contains(script_path, "--run-runtime-intelligence-final-gate"),
+                )
+            ),
+            [
+                {"path": "README.md"},
+                {"path": str(RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH)},
+                {"path": "docs/evidence/runtime-intelligence-closeout-gate.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+
+    source_boundaries = runtime_intelligence_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = set(RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, UBS, ledger, CI, child evidence, and claim-integrity authorities.",
+            not missing_boundaries,
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All implementation child commits are already pushed to origin/main and legacy origin/master before final closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    cargo_check_command = str(
+        quality_by_id.get("cargo_check_all_targets_rch", {}).get("command") or ""
+    )
+    cargo_clippy_command = str(
+        quality_by_id.get("cargo_clippy_all_targets_rch", {}).get("command") or ""
+    )
+    runtime_contract_command = str(
+        quality_by_id.get("runtime_intelligence_closeout_gate_contract_rch", {}).get("command")
+        or ""
+    )
+    rch_proven = (
+        "rch exec --" in cargo_check_command
+        and "cargo check --all-targets" in cargo_check_command
+        and "rch exec --" in cargo_clippy_command
+        and "cargo clippy --all-targets -- -D warnings" in cargo_clippy_command
+        and "rch exec --" in runtime_contract_command
+    )
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed, with every Cargo/Rust validation gate run through RCH.",
+            not missing_quality and rch_proven,
+            [
+                {
+                    "required_quality_gates": list(
+                        RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_QUALITY_GATES
+                    ),
+                    "provided_quality_gates": quality_gate_results,
+                    "heavy_cargo_uses_rch": rch_proven,
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else "one or more Cargo/Rust gates did not prove rch exec usage"
+                if not rch_proven
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [
+        item["id"]
+        for item in checklist
+        if item.get("status") != "pass"
+    ]
+    final_gate_issue = issues.get("bd-h66tp.8") or {}
+    parent_issue = issues.get("bd-h66tp") or {}
+    status = "pass" if not missing_checks else "fail"
+    summary = {
+        "schema": RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_runtime_intelligence_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-h66tp",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-h66tp.8",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "required_checks": list(RUNTIME_INTELLIGENCE_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": [],
+        "known_limitations": [
+            "Agent Mail is coordination evidence only; reservations/messages do not replace Beads, source review, or validation gates.",
+            "Runtime-intelligence closeout is not release performance evidence, capacity evidence, benchmark evidence, or strict drop-in certification evidence.",
+            "A passing closeout gate is not permission to skip source-specific tests, RCH, cargo fmt, cargo check, cargo clippy, staged UBS, Beads ledger reconciliation, CI, or push verification.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "runtime_intelligence_is_release_performance_evidence": False,
+            "closeout_replaces_source_artifacts": False,
+            "allowed_claim": "advisory prompt-to-artifact runtime-intelligence closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks),
+        "follow_up_beads": [
+            {
+                "title": f"[RUNTIME-INTELLIGENCE-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    assert_runtime_intelligence_closeout_gate_contract(summary)
+    return summary
+
+
+def assert_runtime_intelligence_closeout_gate_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing runtime intelligence closeout gate contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"runtime intelligence closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level runtime closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"runtime intelligence closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"runtime intelligence closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    assert not missing_boundaries, (
+        f"runtime intelligence closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert provided.issuperset(required_quality)
+        assert payload.get("heavy_cargo_uses_rch") is True
+        assert summary.get("epic_can_close_after_this_commit") is True
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        assert claim_boundaries.get("strict_dropin_or_release_claim_authorized") is False
+        assert claim_boundaries.get("runtime_intelligence_is_release_performance_evidence") is False
+        assert claim_boundaries.get("closeout_replaces_source_artifacts") is False
+
+
+def write_runtime_intelligence_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_runtime_intelligence_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite runtime intelligence final gate: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def run_self_test() -> int:
     workspace = Path(tempfile.mkdtemp(prefix="pi_swarm_runpack_"))
     generated_at = "2026-05-09T09:00:00+00:00"
@@ -12323,6 +13033,119 @@ def run_self_test() -> int:
         assert context_final_gate["follow_up_required"] is False
         assert not context_final_gate["follow_up_beads"]
         assert context_final_gate["child_artifact_map"]
+        runtime_gate_issues = [
+            {
+                "id": "bd-h66tp",
+                "title": "Swarm-scale runtime intelligence third-wave roadmap",
+                "status": "deferred",
+            },
+            {
+                "id": "bd-h66tp.8",
+                "title": "Add third-wave runtime intelligence closeout gate",
+                "status": "in_progress",
+                "assignee": "AmberOsprey",
+            },
+        ]
+        runtime_gate_issues.extend(
+            {
+                "id": issue_id,
+                "status": "closed",
+                "close_reason": f"{issue_id} self-test evidence closed",
+            }
+            for issue_id in RUNTIME_INTELLIGENCE_CLOSEOUT_CHILD_BEADS
+        )
+        runtime_gate_issues_path = workspace / "runtime-final-gate-issues.jsonl"
+        runtime_gate_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in runtime_gate_issues) + "\n",
+            encoding="utf-8",
+        )
+        runtime_final_gate_quality = [
+            {
+                "id": "py_compile",
+                "status": "pass",
+                "command": "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+            },
+            {
+                "id": "runpack_self_test",
+                "status": "pass",
+                "command": "python3 scripts/build_swarm_operator_runpack.py --self-test",
+            },
+            {
+                "id": "json_contracts",
+                "status": "pass",
+                "command": (
+                    "python3 -m json.tool "
+                    "docs/contracts/runtime-intelligence-closeout-gate-contract.json"
+                ),
+            },
+            {
+                "id": "runtime_intelligence_closeout_gate_contract_rch",
+                "status": "pass",
+                "command": (
+                    "rch exec -- cargo test --test "
+                    "runtime_intelligence_closeout_gate_contract -- --nocapture"
+                ),
+            },
+            {
+                "id": "cargo_fmt",
+                "status": "pass",
+                "command": "cargo fmt --check",
+            },
+            {
+                "id": "git_diff_check",
+                "status": "pass",
+                "command": "git diff --check",
+            },
+            {
+                "id": "cargo_check_all_targets_rch",
+                "status": "pass",
+                "command": (
+                    "CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/"
+                    "amberosprey_bd_h66tp_8/target "
+                    "TMPDIR=/data/tmp/pi_agent_rust_cargo/"
+                    "amberosprey_bd_h66tp_8/tmp "
+                    "rch exec -- cargo check --all-targets"
+                ),
+            },
+            {
+                "id": "cargo_clippy_all_targets_rch",
+                "status": "pass",
+                "command": (
+                    "CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/"
+                    "amberosprey_bd_h66tp_8/target "
+                    "TMPDIR=/data/tmp/pi_agent_rust_cargo/"
+                    "amberosprey_bd_h66tp_8/tmp "
+                    "rch exec -- cargo clippy --all-targets -- -D warnings"
+                ),
+            },
+            {
+                "id": "staged_ubs",
+                "status": "pass",
+                "command": "timeout 60s ubs --staged --only=rust .",
+            },
+            {
+                "id": "beads_ledger_reconcile",
+                "status": "pass",
+                "command": "./scripts/reconcile_beads_ledger.sh",
+            },
+        ]
+        runtime_final_gate = build_runtime_intelligence_closeout_gate_summary(
+            generated_at=generated_at,
+            quality_gate_results=runtime_final_gate_quality,
+            issue_export_path=runtime_gate_issues_path,
+            git_refs={
+                "head": "runtimefinalgatefixture",
+                "origin_main": "runtimefinalgatefixture",
+                "origin_master": "runtimefinalgatefixture",
+            },
+            commit_check_override=True,
+        )
+        assert runtime_final_gate["schema"] == RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_SCHEMA
+        assert runtime_final_gate["status"] == "pass"
+        assert runtime_final_gate["decision"] == "close_final_gate_and_parent_epic"
+        assert runtime_final_gate["follow_up_required"] is False
+        assert not runtime_final_gate["follow_up_beads"]
+        assert runtime_final_gate["child_artifact_map"]
         no_tail_args = argparse.Namespace(**{**vars(args), "tail_latency_json": None})
         no_tail_runpack = build_runpack(no_tail_args)
         assert "tail_latency" not in no_tail_runpack
@@ -12656,6 +13479,21 @@ def parse_args() -> argparse.Namespace:
         help="print the final context intelligence closeout gate JSON",
     )
     parser.add_argument(
+        "--run-runtime-intelligence-final-gate",
+        action="store_true",
+        help="build the final prompt-to-artifact runtime intelligence closeout gate",
+    )
+    parser.add_argument(
+        "--out-runtime-intelligence-final-gate-json",
+        type=Path,
+        help="write pi.runtime_intelligence.closeout_gate.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-runtime-intelligence-final-gate",
+        action="store_true",
+        help="print the final runtime intelligence closeout gate JSON",
+    )
+    parser.add_argument(
         "--quality-gate-result",
         dest="quality_gate_results",
         action="append",
@@ -12701,7 +13539,16 @@ def main() -> int:
         args.out_context_intelligence_final_gate_json
         or args.print_context_intelligence_final_gate
     )
-    if args.run_autopilot_final_gate and args.run_context_intelligence_final_gate:
+    runtime_final_gate_options_used = (
+        args.out_runtime_intelligence_final_gate_json
+        or args.print_runtime_intelligence_final_gate
+    )
+    final_gate_modes = [
+        args.run_autopilot_final_gate,
+        args.run_context_intelligence_final_gate,
+        args.run_runtime_intelligence_final_gate,
+    ]
+    if sum(1 for used in final_gate_modes if used) > 1:
         print("ERROR: run only one final-gate mode at a time", file=sys.stderr)
         return 2
     if autopilot_final_gate_options_used and not args.run_autopilot_final_gate:
@@ -12716,12 +13563,32 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if runtime_final_gate_options_used and not args.run_runtime_intelligence_final_gate:
+        print(
+            "ERROR: runtime-intelligence final-gate options require --run-runtime-intelligence-final-gate",
+            file=sys.stderr,
+        )
+        return 2
     if args.quality_gate_results and not (
-        args.run_autopilot_final_gate or args.run_context_intelligence_final_gate
+        args.run_autopilot_final_gate
+        or args.run_context_intelligence_final_gate
+        or args.run_runtime_intelligence_final_gate
     ):
         print("ERROR: --quality-gate-result requires a final-gate run mode", file=sys.stderr)
         return 2
     try:
+        if args.run_runtime_intelligence_final_gate:
+            summary = build_runtime_intelligence_closeout_gate_summary(
+                generated_at=args.generated_at or utc_now_iso(),
+                quality_gate_results=parse_quality_gate_results(args.quality_gate_results),
+            )
+            write_runtime_intelligence_closeout_gate_output(args, summary)
+            if (
+                args.print_runtime_intelligence_final_gate
+                or args.out_runtime_intelligence_final_gate_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
         if args.run_context_intelligence_final_gate:
             summary = build_context_intelligence_closeout_gate_summary(
                 generated_at=args.generated_at or utc_now_iso(),
@@ -12795,9 +13662,11 @@ def main() -> int:
         and not args.out_autopilot_input_pack_json
         and not args.out_autopilot_plan_json
         and not args.out_context_intelligence_final_gate_json
+        and not args.out_runtime_intelligence_final_gate_json
         and not args.print_autopilot_input_pack
         and not args.print_autopilot_plan
         and not args.print_context_intelligence_final_gate
+        and not args.print_runtime_intelligence_final_gate
     ):
         print(json_dumps(runpack, pretty=True))
     return 0
