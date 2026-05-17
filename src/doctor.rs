@@ -61,6 +61,10 @@ const SWARM_DOCTOR_RESERVATION_RECOMMENDATIONS_SCHEMA: &str =
     "pi.doctor.swarm_reservation_recommendations.v1";
 const SWARM_CARGO_SCRATCH_ROOT: &str = "/data/tmp/pi_agent_rust_cargo";
 const SWARM_RCH_AFFINITY_JOBS_ENV: &str = "PI_DOCTOR_RCH_AFFINITY_JOBS_JSON";
+const SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_ENV: &str = "PI_DOCTOR_RCH_QUEUE_JSON";
+const SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_PATH_ENV: &str = "PI_DOCTOR_RCH_QUEUE_JSON_PATH";
+const SWARM_RESOURCE_PREFLIGHT_LOCAL_BUILD_PROCESS_COUNT_ENV: &str =
+    "PI_DOCTOR_LOCAL_BUILD_PROCESS_COUNT";
 const SWARM_VALIDATION_BROKER_STORE_ENV: &str = "PI_VALIDATION_BROKER_STORE";
 const SWARM_PROGRESS_SLO_JSON_ENV: &str = "PI_SWARM_PROGRESS_SLO_JSON";
 const SWARM_BUILD_SLOT_SOON_EXPIRING_MINUTES: i64 = 30;
@@ -1703,6 +1707,8 @@ struct SwarmResourcePreflightSnapshot {
     numa: NumaTopologySnapshot,
     memory: MemoryLimitSnapshot,
     effective_cpu_cores: u64,
+    local_build_pressure: LocalBuildPressureSnapshot,
+    rch_queue_posture: RchQueuePostureSnapshot,
     headroom_paths: Vec<SwarmHeadroomPath>,
     recommended_budgets: Option<SwarmResourceBudgetRecommendation>,
     plan_error: Option<String>,
@@ -1759,6 +1765,37 @@ struct SwarmHeadroomPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalBuildPressureSnapshot {
+    source: String,
+    active_processes: Option<u64>,
+    process_budget: u64,
+    status: String,
+    patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RchQueuePostureSnapshot {
+    source: String,
+    status: String,
+    recommended_action: String,
+    reason: Option<String>,
+    queue_depth: Option<u64>,
+    active_builds: Option<u64>,
+    queued_builds: Option<u64>,
+    slots_available: Option<u64>,
+    slots_total: Option<u64>,
+    workers_healthy: Option<u64>,
+    workers_total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwarmBudgetExplanation {
+    budget: String,
+    value: String,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SwarmResourceBudgetRecommendation {
     agent_concurrency: u64,
     tool_concurrency: u64,
@@ -1766,8 +1803,12 @@ struct SwarmResourceBudgetRecommendation {
     rch_verification_fanout: u64,
     max_queue_depth: usize,
     max_rss_bytes: u64,
+    local_build_process_budget: u64,
+    rch_queue_depth_budget: usize,
+    numa_node_count: usize,
     memory_pressure_threshold_ratio_label: String,
     plan_confidence: String,
+    explanations: Vec<SwarmBudgetExplanation>,
 }
 
 fn build_swarm_resource_preflight_snapshot(
@@ -1798,13 +1839,23 @@ fn build_swarm_resource_preflight_snapshot(
 
     let effective_cpu_cores =
         effective_swarm_cpu_cores(logical_cpu_cores, cpu_quota.quota_cores, cpuset.cpu_count);
+    let local_build_pressure = collect_local_build_pressure(effective_cpu_cores);
+    let rch_queue_posture = read_rch_queue_posture(&mut source_errors);
     let headroom_paths = ["CARGO_TARGET_DIR", "TMPDIR"]
         .into_iter()
         .map(collect_swarm_headroom_path)
         .collect::<Vec<_>>();
     let (recommended_budgets, plan_error) =
         match build_swarm_resource_preflight_plan(sample, effective_cpu_cores, &memory) {
-            Ok(plan) => (Some(resource_budget_recommendation(&plan)), None),
+            Ok(plan) => (
+                Some(resource_budget_recommendation(
+                    &plan,
+                    &numa,
+                    &local_build_pressure,
+                    &rch_queue_posture,
+                )),
+                None,
+            ),
             Err(err) => (None, Some(err.to_string())),
         };
 
@@ -1815,6 +1866,8 @@ fn build_swarm_resource_preflight_snapshot(
         numa,
         memory,
         effective_cpu_cores,
+        local_build_pressure,
+        rch_queue_posture,
         headroom_paths,
         recommended_budgets,
         plan_error,
@@ -1870,6 +1923,19 @@ fn swarm_resource_preflight_critical_failures(
     if snapshot.effective_cpu_cores == 0 {
         failures.push("effective_cpu_cores:unavailable".to_string());
     }
+    if matches!(
+        snapshot.rch_queue_posture.recommended_action.as_str(),
+        "backoff"
+    ) {
+        failures.push(format!(
+            "rch_queue:{}",
+            snapshot
+                .rch_queue_posture
+                .reason
+                .as_deref()
+                .unwrap_or("backoff")
+        ));
+    }
     failures
 }
 
@@ -1909,6 +1975,8 @@ fn swarm_resource_preflight_data(
             "effective_limit_bytes": snapshot.memory.effective_limit_bytes,
             "unlimited": snapshot.memory.unlimited,
         },
+        "local_build_pressure": local_build_pressure_json(&snapshot.local_build_pressure),
+        "rch_queue_posture": rch_queue_posture_json(&snapshot.rch_queue_posture),
         "tmpfs_headroom": {
             "expected_root": SWARM_CARGO_SCRATCH_ROOT,
             "warn_available_kb": SWARM_DISK_WARN_AVAILABLE_KB,
@@ -1918,6 +1986,32 @@ fn swarm_resource_preflight_data(
         "plan_error": snapshot.plan_error,
         "critical_failures": critical_failures,
         "source_errors": snapshot.source_errors,
+    })
+}
+
+fn local_build_pressure_json(pressure: &LocalBuildPressureSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "source": pressure.source,
+        "active_processes": pressure.active_processes,
+        "process_budget": pressure.process_budget,
+        "status": pressure.status,
+        "patterns": pressure.patterns,
+    })
+}
+
+fn rch_queue_posture_json(posture: &RchQueuePostureSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "source": posture.source,
+        "status": posture.status,
+        "recommended_action": posture.recommended_action,
+        "reason": posture.reason,
+        "queue_depth": posture.queue_depth,
+        "active_builds": posture.active_builds,
+        "queued_builds": posture.queued_builds,
+        "slots_available": posture.slots_available,
+        "slots_total": posture.slots_total,
+        "workers_healthy": posture.workers_healthy,
+        "workers_total": posture.workers_total,
     })
 }
 
@@ -1943,8 +2037,20 @@ fn resource_budget_recommendation_json(
         "rch_verification_fanout": recommendation.rch_verification_fanout,
         "max_queue_depth": recommendation.max_queue_depth,
         "max_rss_bytes": recommendation.max_rss_bytes,
+        "local_build_process_budget": recommendation.local_build_process_budget,
+        "rch_queue_depth_budget": recommendation.rch_queue_depth_budget,
+        "numa_node_count": recommendation.numa_node_count,
         "memory_pressure_threshold_ratio": recommendation.memory_pressure_threshold_ratio_label,
         "plan_confidence": recommendation.plan_confidence,
+        "explanations": recommendation.explanations.iter().map(budget_explanation_json).collect::<Vec<_>>(),
+    })
+}
+
+fn budget_explanation_json(explanation: &SwarmBudgetExplanation) -> serde_json::Value {
+    serde_json::json!({
+        "budget": explanation.budget,
+        "value": explanation.value,
+        "rationale": explanation.rationale,
     })
 }
 
@@ -1982,13 +2088,15 @@ fn format_swarm_resource_preflight_detail(
         .filter(|path| path.ready)
         .count();
     let mut detail = format!(
-        "cpu logical={}, effective={}, quota_cores={}, cpuset_cpus={}, numa_nodes={}, memory_effective={}, headroom_ready={}/{}, recommended={budget}",
+        "cpu logical={}, effective={}, quota_cores={}, cpuset_cpus={}, numa_nodes={}, memory_effective={}, local_build_pressure={}, rch_queue_action={}, headroom_ready={}/{}, recommended={budget}",
         snapshot.logical_cpu_cores,
         snapshot.effective_cpu_cores,
         quota,
         cpuset,
         snapshot.numa.nodes.len(),
         memory,
+        snapshot.local_build_pressure.status,
+        snapshot.rch_queue_posture.recommended_action,
         headroom_ready,
         snapshot.headroom_paths.len(),
     );
@@ -2202,6 +2310,201 @@ fn collect_swarm_headroom_path(env_name: &str) -> SwarmHeadroomPath {
     }
 }
 
+fn collect_local_build_pressure(effective_cpu_cores: u64) -> LocalBuildPressureSnapshot {
+    let process_budget = local_build_process_budget(effective_cpu_cores);
+    let patterns = local_build_process_patterns();
+    let (source, active_processes) =
+        env_u64(SWARM_RESOURCE_PREFLIGHT_LOCAL_BUILD_PROCESS_COUNT_ENV).map_or_else(
+            || ("/proc".to_string(), count_local_build_processes()),
+            |count| {
+                (
+                    format!("env:{SWARM_RESOURCE_PREFLIGHT_LOCAL_BUILD_PROCESS_COUNT_ENV}"),
+                    Some(count),
+                )
+            },
+        );
+    let status = local_build_pressure_status(active_processes, process_budget);
+    LocalBuildPressureSnapshot {
+        source,
+        active_processes,
+        process_budget,
+        status,
+        patterns,
+    }
+}
+
+fn local_build_process_budget(effective_cpu_cores: u64) -> u64 {
+    effective_cpu_cores.saturating_div(2).max(1)
+}
+
+fn local_build_pressure_status(active_processes: Option<u64>, process_budget: u64) -> String {
+    let Some(active_processes) = active_processes else {
+        return "unknown".to_string();
+    };
+    if active_processes == 0 {
+        "clear".to_string()
+    } else if active_processes >= process_budget.max(1) {
+        "saturated".to_string()
+    } else {
+        "pressure".to_string()
+    }
+}
+
+fn local_build_process_patterns() -> Vec<String> {
+    ["cargo", "rustc", "cargo-clippy", "clippy-driver"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn count_local_build_processes() -> Option<u64> {
+    let patterns = local_build_process_patterns();
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut count = 0_u64;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let cmdline_path = entry.path().join("cmdline");
+        let Ok(raw) = std::fs::read(&cmdline_path) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw).replace('\0', " ");
+        let lower = cmdline.to_ascii_lowercase();
+        if patterns.iter().any(|pattern| lower.contains(pattern)) {
+            count = count.saturating_add(1);
+        }
+    }
+    Some(count)
+}
+
+fn read_rch_queue_posture(source_errors: &mut Vec<String>) -> RchQueuePostureSnapshot {
+    if let Ok(raw) = std::env::var(SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_ENV) {
+        return parse_rch_queue_posture_json(
+            &raw,
+            format!("env:{SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_ENV}"),
+            source_errors,
+        );
+    }
+
+    if let Some(path) = std::env::var_os(SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_PATH_ENV) {
+        let path = PathBuf::from(path);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                return parse_rch_queue_posture_json(
+                    &raw,
+                    format!(
+                        "env:{SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_PATH_ENV}:{}",
+                        path.display()
+                    ),
+                    source_errors,
+                );
+            }
+            Err(err) => source_errors.push(format!(
+                "{SWARM_RESOURCE_PREFLIGHT_RCH_QUEUE_JSON_PATH_ENV} failed to read {}: {err}",
+                path.display()
+            )),
+        }
+    }
+
+    RchQueuePostureSnapshot {
+        source: "not_provided".to_string(),
+        status: "not_checked".to_string(),
+        recommended_action: "proceed".to_string(),
+        reason: Some("queue_posture_not_provided".to_string()),
+        queue_depth: None,
+        active_builds: None,
+        queued_builds: None,
+        slots_available: None,
+        slots_total: None,
+        workers_healthy: None,
+        workers_total: None,
+    }
+}
+
+fn parse_rch_queue_posture_json(
+    raw: &str,
+    source: String,
+    source_errors: &mut Vec<String>,
+) -> RchQueuePostureSnapshot {
+    let value = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value,
+        Err(err) => {
+            source_errors.push(format!("invalid RCH queue JSON from {source}: {err}"));
+            return RchQueuePostureSnapshot {
+                source,
+                status: "malformed".to_string(),
+                recommended_action: "backoff".to_string(),
+                reason: Some("queue_json_malformed".to_string()),
+                queue_depth: None,
+                active_builds: None,
+                queued_builds: None,
+                slots_available: None,
+                slots_total: None,
+                workers_healthy: None,
+                workers_total: None,
+            };
+        }
+    };
+    rch_queue_posture_from_value(&value, source)
+}
+
+fn rch_queue_posture_from_value(
+    value: &serde_json::Value,
+    source: String,
+) -> RchQueuePostureSnapshot {
+    let queue_depth = json_number_by_key(value, "queue_depth")
+        .or_else(|| json_array_len_by_key(value, "queued_builds").map(usize_to_u64));
+    let active_builds = json_number_by_key(value, "active_builds")
+        .or_else(|| json_array_len_by_key(value, "active_builds").map(usize_to_u64));
+    let queued_builds = json_number_by_key(value, "queued_builds")
+        .or_else(|| json_array_len_by_key(value, "queued_builds").map(usize_to_u64));
+    let slots_available = json_number_by_key(value, "slots_available");
+    let slots_total = json_number_by_key(value, "slots_total");
+    let workers_healthy = json_number_by_key(value, "workers_healthy");
+    let workers_total = json_number_by_key(value, "workers_total");
+    let status = json_string_field(value, "status").unwrap_or_else(|| {
+        if matches!(slots_available, Some(0)) {
+            "saturated".to_string()
+        } else if active_builds.unwrap_or(0) > 0 || queue_depth.unwrap_or(0) > 0 {
+            "pressure".to_string()
+        } else {
+            "ok".to_string()
+        }
+    });
+    let slot_pressure = json_string_field(value, "slot_pressure");
+    let recommended_action = json_string_field(value, "recommended_action").unwrap_or_else(|| {
+        if matches!(status.as_str(), "saturated")
+            || matches!(slot_pressure.as_deref(), Some("saturated"))
+            || matches!(slots_available, Some(0))
+        {
+            "backoff".to_string()
+        } else if active_builds.unwrap_or(0) > 0 || queue_depth.unwrap_or(0) > 0 {
+            "split".to_string()
+        } else {
+            "proceed".to_string()
+        }
+    });
+    let reason = json_string_field(value, "reason").or(slot_pressure);
+    RchQueuePostureSnapshot {
+        source,
+        status,
+        recommended_action,
+        reason,
+        queue_depth,
+        active_builds,
+        queued_builds,
+        slots_available,
+        slots_total,
+        workers_healthy,
+        workers_total,
+    }
+}
+
 fn build_swarm_resource_preflight_plan(
     sample: &HostResourceSample,
     effective_cpu_cores: u64,
@@ -2227,19 +2530,164 @@ fn swarm_preflight_queue_depth_budget(effective_cpu_cores: u64) -> usize {
     u64_to_usize_saturating(effective_cpu_cores.saturating_mul(64)).clamp(128_usize, 4096_usize)
 }
 
-fn resource_budget_recommendation(plan: &SwarmCapacityPlan) -> SwarmResourceBudgetRecommendation {
-    SwarmResourceBudgetRecommendation {
+fn resource_budget_recommendation(
+    plan: &SwarmCapacityPlan,
+    numa: &NumaTopologySnapshot,
+    local_build_pressure: &LocalBuildPressureSnapshot,
+    rch_queue_posture: &RchQueuePostureSnapshot,
+) -> SwarmResourceBudgetRecommendation {
+    let mut recommendation = SwarmResourceBudgetRecommendation {
         agent_concurrency: plan.recommended_agent_concurrency,
         tool_concurrency: plan.recommended_tool_concurrency,
         extension_hostcall_lanes: plan.recommended_extension_hostcall_lanes,
         rch_verification_fanout: plan.recommended_rch_verification_fanout,
         max_queue_depth: plan.resource_budgets.max_queue_depth,
         max_rss_bytes: plan.resource_budgets.max_rss_bytes,
+        local_build_process_budget: local_build_pressure.process_budget,
+        rch_queue_depth_budget: plan.resource_budgets.max_queue_depth,
+        numa_node_count: numa.nodes.len(),
         memory_pressure_threshold_ratio_label: format_ratio_label(
             plan.memory_pressure_threshold_ratio,
         ),
         plan_confidence: format!("{:?}", plan.confidence).to_ascii_lowercase(),
+        explanations: base_budget_explanations(plan, numa, local_build_pressure),
+    };
+    apply_local_build_pressure(&mut recommendation, local_build_pressure);
+    apply_rch_queue_posture(&mut recommendation, rch_queue_posture);
+    recommendation
+}
+
+fn base_budget_explanations(
+    plan: &SwarmCapacityPlan,
+    numa: &NumaTopologySnapshot,
+    local_build_pressure: &LocalBuildPressureSnapshot,
+) -> Vec<SwarmBudgetExplanation> {
+    vec![
+        budget_explanation(
+            "agent_concurrency",
+            &plan.recommended_agent_concurrency,
+            "bounded by effective cgroup/cpuset CPU cores and memory-derived per-agent RSS headroom",
+        ),
+        budget_explanation(
+            "tool_concurrency",
+            &plan.recommended_tool_concurrency,
+            "derived from agent concurrency and queue-depth headroom so tool hostcalls cannot exhaust the scheduler queue",
+        ),
+        budget_explanation(
+            "extension_hostcall_lanes",
+            &plan.recommended_extension_hostcall_lanes,
+            "capped by effective CPU cores and tool concurrency for conservative extension dispatch",
+        ),
+        budget_explanation(
+            "rch_verification_fanout",
+            &plan.recommended_rch_verification_fanout,
+            "sized from effective CPU cores and later reduced by replayed RCH queue posture",
+        ),
+        budget_explanation(
+            "local_build_process_budget",
+            &local_build_pressure.process_budget,
+            "maximum local cargo/rustc/clippy process pressure before fanout is reduced",
+        ),
+        SwarmBudgetExplanation {
+            budget: "numa_node_count".to_string(),
+            value: numa.nodes.len().to_string(),
+            rationale: if numa.nodes.len() > 1 {
+                "multi-socket hosts should spread agents and RCH validation work across NUMA nodes"
+                    .to_string()
+            } else {
+                "single-node or unknown NUMA topology keeps conservative shared-lane budgets"
+                    .to_string()
+            },
+        },
+    ]
+}
+
+fn budget_explanation<T: ToString + ?Sized>(
+    budget: &str,
+    value: &T,
+    rationale: &str,
+) -> SwarmBudgetExplanation {
+    SwarmBudgetExplanation {
+        budget: budget.to_string(),
+        value: value.to_string(),
+        rationale: rationale.to_string(),
     }
+}
+
+fn apply_local_build_pressure(
+    recommendation: &mut SwarmResourceBudgetRecommendation,
+    pressure: &LocalBuildPressureSnapshot,
+) {
+    let Some(active_processes) = pressure.active_processes else {
+        recommendation.explanations.push(budget_explanation(
+            "local_build_pressure",
+            "unknown",
+            "local cargo/rustc process pressure could not be sampled; keep the base conservative budgets",
+        ));
+        return;
+    };
+    if active_processes == 0 {
+        recommendation.explanations.push(budget_explanation(
+            "local_build_pressure",
+            &active_processes,
+            "no local cargo/rustc/clippy pressure was observed",
+        ));
+        return;
+    }
+
+    let divisor = if matches!(pressure.status.as_str(), "saturated") {
+        4
+    } else {
+        2
+    };
+    recommendation.agent_concurrency =
+        divide_budget_floor_one(recommendation.agent_concurrency, divisor);
+    recommendation.tool_concurrency =
+        divide_budget_floor_one(recommendation.tool_concurrency, divisor);
+    recommendation.extension_hostcall_lanes =
+        divide_budget_floor_one(recommendation.extension_hostcall_lanes, divisor);
+    recommendation.explanations.push(budget_explanation(
+        "local_build_pressure",
+        &active_processes,
+        "observed local cargo/rustc/clippy pressure reduced agent, tool, and extension-hostcall budgets",
+    ));
+}
+
+fn apply_rch_queue_posture(
+    recommendation: &mut SwarmResourceBudgetRecommendation,
+    posture: &RchQueuePostureSnapshot,
+) {
+    let queue_depth_over_budget = posture
+        .queue_depth
+        .is_some_and(|depth| depth > usize_to_u64(recommendation.rch_queue_depth_budget));
+    if matches!(posture.recommended_action.as_str(), "backoff") || queue_depth_over_budget {
+        recommendation.rch_verification_fanout = 0;
+        recommendation.explanations.push(budget_explanation(
+            "rch_verification_fanout",
+            &0,
+            "RCH queue posture requires backoff or exceeds the queue-depth budget",
+        ));
+    } else if matches!(posture.recommended_action.as_str(), "split")
+        || matches!(posture.status.as_str(), "pressure")
+    {
+        recommendation.rch_verification_fanout =
+            divide_budget_floor_one(recommendation.rch_verification_fanout, 2);
+        recommendation.explanations.push(budget_explanation(
+            "rch_verification_fanout",
+            &recommendation.rch_verification_fanout,
+            "RCH queue pressure recommends split validation instead of broad fanout",
+        ));
+    } else {
+        recommendation.explanations.push(budget_explanation(
+            "rch_verification_fanout",
+            &recommendation.rch_verification_fanout,
+            "RCH queue posture allows the base verification fanout",
+        ));
+    }
+}
+
+fn divide_budget_floor_one(value: u64, divisor: u64) -> u64 {
+    value.checked_div(divisor.max(1)).unwrap_or(1).max(1)
 }
 
 fn read_first_existing_trimmed(
@@ -12466,6 +12914,32 @@ fn doctor_swarm_context_intelligence_json_reports_posture() {
         );
     }
 
+    fn clear_local_build_pressure_fixture() -> LocalBuildPressureSnapshot {
+        LocalBuildPressureSnapshot {
+            source: "fixture".to_string(),
+            active_processes: Some(0),
+            process_budget: 2,
+            status: "clear".to_string(),
+            patterns: local_build_process_patterns(),
+        }
+    }
+
+    fn clear_rch_queue_posture_fixture() -> RchQueuePostureSnapshot {
+        RchQueuePostureSnapshot {
+            source: "fixture".to_string(),
+            status: "ok".to_string(),
+            recommended_action: "proceed".to_string(),
+            reason: Some("fixture_clear".to_string()),
+            queue_depth: Some(0),
+            active_builds: Some(0),
+            queued_builds: Some(0),
+            slots_available: Some(8),
+            slots_total: Some(8),
+            workers_healthy: Some(8),
+            workers_total: Some(8),
+        }
+    }
+
     #[test]
     fn swarm_resource_preflight_fails_closed_without_headroom() {
         let snapshot = SwarmResourcePreflightSnapshot {
@@ -12495,6 +12969,8 @@ fn doctor_swarm_context_intelligence_json_reports_posture() {
                 source: Some("/sys/fs/cgroup/memory.max".to_string()),
             },
             effective_cpu_cores: 4,
+            local_build_pressure: clear_local_build_pressure_fixture(),
+            rch_queue_posture: clear_rch_queue_posture_fixture(),
             headroom_paths: vec![SwarmHeadroomPath {
                 env_name: "CARGO_TARGET_DIR".to_string(),
                 path: None,
@@ -12511,8 +12987,16 @@ fn doctor_swarm_context_intelligence_json_reports_posture() {
                 rch_verification_fanout: 1,
                 max_queue_depth: 128,
                 max_rss_bytes: 512 * MIB_BYTES,
+                local_build_process_budget: 2,
+                rch_queue_depth_budget: 128,
+                numa_node_count: 2,
                 memory_pressure_threshold_ratio_label: "0.70".to_string(),
                 plan_confidence: "low".to_string(),
+                explanations: vec![budget_explanation(
+                    "agent_concurrency",
+                    &2,
+                    "fixture budget explanation",
+                )],
             }),
             plan_error: None,
             source_errors: Vec::new(),
@@ -12533,6 +13017,19 @@ fn doctor_swarm_context_intelligence_json_reports_posture() {
             data["recommended_budgets"]["agent_concurrency"],
             serde_json::json!(2)
         );
+        assert_eq!(
+            data["local_build_pressure"]["process_budget"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            data["rch_queue_posture"]["recommended_action"],
+            serde_json::json!("proceed")
+        );
+        assert!(
+            data["recommended_budgets"]["explanations"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
     }
 
     #[test]
@@ -12540,6 +13037,178 @@ fn doctor_swarm_context_intelligence_json_reports_posture() {
         assert_eq!(effective_swarm_cpu_cores(16, Some(3.8), Some(8)), 3);
         assert_eq!(effective_swarm_cpu_cores(16, Some(0.5), Some(8)), 1);
         assert_eq!(effective_swarm_cpu_cores(16, None, Some(4)), 4);
+    }
+
+    #[test]
+    fn swarm_resource_preflight_budget_model_covers_large_host_fixture() {
+        let sample = HostResourceSample {
+            load_avg_1m: Some(2.0),
+            rss_bytes: Some(512 * MIB_BYTES),
+            process_count: Some(24),
+            fd_count: Some(128),
+        };
+        let plan = build_swarm_doctor_capacity_plan_with_inventory(
+            &sample,
+            SwarmHostInventory::new(64, 64, 256 * 1024),
+            1024,
+        )
+        .expect("capacity plan");
+        let numa = NumaTopologySnapshot {
+            source: Some("fixture".to_string()),
+            raw_online: Some("0-3".to_string()),
+            nodes: vec![0, 1, 2, 3],
+        };
+        let local_pressure = LocalBuildPressureSnapshot {
+            source: "fixture".to_string(),
+            active_processes: Some(0),
+            process_budget: 32,
+            status: "clear".to_string(),
+            patterns: local_build_process_patterns(),
+        };
+        let rch_posture = rch_queue_posture_from_value(
+            &serde_json::json!({
+                "status": "ok",
+                "recommended_action": "proceed",
+                "queue_depth": 0,
+                "active_builds": 0,
+                "queued_builds": 0,
+                "slots_available": 78,
+                "slots_total": 78,
+                "workers_healthy": 8,
+                "workers_total": 8
+            }),
+            "fixture".to_string(),
+        );
+
+        let recommendation =
+            resource_budget_recommendation(&plan, &numa, &local_pressure, &rch_posture);
+
+        assert_eq!(recommendation.numa_node_count, 4);
+        assert_eq!(recommendation.local_build_process_budget, 32);
+        assert!(recommendation.agent_concurrency >= 16);
+        assert!(recommendation.tool_concurrency >= recommendation.agent_concurrency);
+        assert!(recommendation.extension_hostcall_lanes > 1);
+        assert!(recommendation.rch_verification_fanout > 1);
+        assert!(
+            recommendation
+                .explanations
+                .iter()
+                .any(|entry| entry.budget == "numa_node_count" && entry.rationale.contains("NUMA"))
+        );
+    }
+
+    #[test]
+    fn swarm_resource_preflight_budget_model_degrades_constrained_container() {
+        let sample = HostResourceSample {
+            load_avg_1m: Some(1.0),
+            rss_bytes: Some(384 * MIB_BYTES),
+            process_count: Some(12),
+            fd_count: Some(64),
+        };
+        let plan = build_swarm_doctor_capacity_plan_with_inventory(
+            &sample,
+            SwarmHostInventory::new(2, 2, 2 * 1024),
+            128,
+        )
+        .expect("capacity plan");
+        let numa = NumaTopologySnapshot {
+            source: Some("fixture".to_string()),
+            raw_online: Some("0".to_string()),
+            nodes: vec![0],
+        };
+        let local_pressure = LocalBuildPressureSnapshot {
+            source: "fixture".to_string(),
+            active_processes: Some(2),
+            process_budget: 1,
+            status: "saturated".to_string(),
+            patterns: local_build_process_patterns(),
+        };
+        let rch_posture = RchQueuePostureSnapshot {
+            source: "fixture".to_string(),
+            status: "ok".to_string(),
+            recommended_action: "proceed".to_string(),
+            reason: Some("fixture_clear".to_string()),
+            queue_depth: Some(0),
+            active_builds: Some(0),
+            queued_builds: Some(0),
+            slots_available: Some(2),
+            slots_total: Some(8),
+            workers_healthy: Some(8),
+            workers_total: Some(8),
+        };
+
+        let recommendation =
+            resource_budget_recommendation(&plan, &numa, &local_pressure, &rch_posture);
+
+        assert_eq!(recommendation.numa_node_count, 1);
+        assert_eq!(recommendation.local_build_process_budget, 1);
+        assert_eq!(recommendation.agent_concurrency, 1);
+        assert_eq!(recommendation.extension_hostcall_lanes, 1);
+        assert!(recommendation.max_rss_bytes <= 2 * 1024 * MIB_BYTES);
+        assert!(
+            recommendation
+                .explanations
+                .iter()
+                .any(|entry| entry.budget == "local_build_pressure"
+                    && entry.rationale.contains("reduced"))
+        );
+    }
+
+    #[test]
+    fn swarm_resource_preflight_budget_model_blocks_rch_fanout_under_queue_pressure() {
+        let sample = HostResourceSample {
+            load_avg_1m: Some(2.0),
+            rss_bytes: Some(512 * MIB_BYTES),
+            process_count: Some(24),
+            fd_count: Some(128),
+        };
+        let plan = build_swarm_doctor_capacity_plan_with_inventory(
+            &sample,
+            SwarmHostInventory::new(64, 64, 256 * 1024),
+            256,
+        )
+        .expect("capacity plan");
+        let numa = NumaTopologySnapshot {
+            source: Some("fixture".to_string()),
+            raw_online: Some("0-3".to_string()),
+            nodes: vec![0, 1, 2, 3],
+        };
+        let local_pressure = LocalBuildPressureSnapshot {
+            source: "fixture".to_string(),
+            active_processes: Some(0),
+            process_budget: 32,
+            status: "clear".to_string(),
+            patterns: local_build_process_patterns(),
+        };
+        let rch_posture = rch_queue_posture_from_value(
+            &serde_json::json!({
+                "status": "ok",
+                "slot_pressure": "saturated",
+                "recommended_action": "backoff",
+                "reason": "queue_saturated",
+                "queue_depth": 512,
+                "active_builds": 78,
+                "queued_builds": 32,
+                "slots_available": 0,
+                "slots_total": 78,
+                "workers_healthy": 8,
+                "workers_total": 8
+            }),
+            "fixture".to_string(),
+        );
+
+        let recommendation =
+            resource_budget_recommendation(&plan, &numa, &local_pressure, &rch_posture);
+
+        assert_eq!(rch_posture.recommended_action, "backoff");
+        assert_eq!(recommendation.rch_verification_fanout, 0);
+        assert!(
+            recommendation
+                .explanations
+                .iter()
+                .any(|entry| entry.budget == "rch_verification_fanout"
+                    && entry.rationale.contains("backoff"))
+        );
     }
 
     #[test]

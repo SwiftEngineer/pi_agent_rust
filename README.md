@@ -2419,7 +2419,11 @@ Before launching swarms or heavyweight all-target gates, run
 `CARGO_TARGET_DIR` or `TMPDIR` cannot prove enough scratch headroom, and its
 `recommended_budgets` object gives conservative agent, tool, extension hostcall,
 RCH fanout, queue-depth, and RSS budgets derived from the effective cgroup CPU,
-cpuset, NUMA, and memory limits.
+cpuset, NUMA, and memory limits. The same object includes budget explanations,
+local cargo/rustc pressure, and replayable RCH queue posture. For deterministic
+replays, provide `PI_DOCTOR_LOCAL_BUILD_PROCESS_COUNT`,
+`PI_DOCTOR_RCH_QUEUE_JSON`, or `PI_DOCTOR_RCH_QUEUE_JSON_PATH`; these inputs are
+advisory budget controls, not release-facing performance claims.
 
 When `PI_VALIDATION_BROKER_STORE` points at a validation-broker slot JSONL
 store, Doctor also emits `pi.doctor.validation_broker_posture.v1` with advisory
