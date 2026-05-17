@@ -456,6 +456,16 @@
     }
   },
   "max_age_days": 14,
+  "operator_explanations": {
+    "items": [],
+    "policy": "degraded_or_stale_evidence_is_never_green",
+    "schema": "pi.swarm.operator_explanations.v1",
+    "status": "ready",
+    "summary": {
+      "category_counts": {},
+      "explanation_count": 0
+    }
+  },
   "overall_ready": true,
   "overall_status": "ready",
   "schema": "pi.swarm.claim_readiness_report.v1",

@@ -29,6 +29,7 @@ from typing import Any
 REPORT_SCHEMA = "pi.swarm.claim_readiness_report.v1"
 STALE_CLAIM_REPORT_SCHEMA = "pi.swarm.stale_claim_report.v1"
 HOSTCALL_QUEUE_REPORT_SCHEMA = "pi.swarm.hostcall_queue_readiness.v1"
+OPERATOR_EXPLANATIONS_SCHEMA = "pi.swarm.operator_explanations.v1"
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_claim_readiness")
 COMPLETE_REPORT_GOLDEN = "complete_report_projection.json"
 UPDATE_GOLDEN_ENV = "UPDATE_SWARM_CLAIM_READINESS_GOLDEN"
@@ -1551,6 +1552,166 @@ def remediation_for(kind: str) -> str:
     }.get(kind, "Review the artifact before using it for release claims.")
 
 
+def blocker_category(kind: str, detail: str) -> str:
+    lowered = f"{kind} {detail}".lower()
+    if "rch" in lowered or "remote compilation" in lowered or "workspace shadow" in lowered:
+        return "rch_failure"
+    if kind in {"missing", "readme_snapshot_missing"}:
+        return "missing_artifact"
+    if kind == "stale":
+        return "stale_evidence"
+    if kind == "no_data":
+        return "no_data_evidence"
+    if kind == "provenance_mismatch":
+        return "provenance_mismatch"
+    if kind in {"invalid_json", "schema_mismatch"}:
+        return "invalid_evidence_contract"
+    if kind == "status_not_ready":
+        return "release_gate_not_ready"
+    if kind == "missing_timestamp":
+        return "missing_evidence_timestamp"
+    if kind == "readme_snapshot_mismatch":
+        return "claim_snapshot_mismatch"
+    return "validation_blocker"
+
+
+def blocker_explanation(category: str) -> str:
+    return {
+        "stale_evidence": (
+            "The report found release-facing evidence whose generated timestamp is beyond "
+            "the freshness window, so current claims cannot rely on it."
+        ),
+        "missing_artifact": (
+            "A required release-facing artifact or README evidence section is absent at "
+            "the exact path the claim expects."
+        ),
+        "rch_failure": (
+            "A validation command or evidence row points at an RCH or remote-workspace "
+            "failure, so the proof is not authoritative for the current worktree."
+        ),
+        "dirty_worktree_conflict": (
+            "Dirty files touch an active bead surface; this is fresh work evidence and a "
+            "conflict risk for other agents."
+        ),
+        "agent_mail_semantic_corruption": (
+            "Coordination evidence is missing or degraded. Treat Agent Mail corruption as "
+            "unknown owner state, not proof that the assignee is gone."
+        ),
+        "no_data_evidence": (
+            "The evidence artifact exists but reports zero, skipped, or missing measurement "
+            "data, so it cannot support a green claim."
+        ),
+        "provenance_mismatch": (
+            "Evidence for one claim surface comes from multiple unrelated runs, which makes "
+            "the combined claim non-replayable."
+        ),
+        "invalid_evidence_contract": (
+            "The evidence artifact does not match the expected machine contract and must not "
+            "be used as proof."
+        ),
+        "release_gate_not_ready": (
+            "A release-facing gate explicitly reports a non-passing verdict."
+        ),
+        "missing_evidence_timestamp": (
+            "The evidence lacks generated_at provenance, so freshness cannot be verified."
+        ),
+        "claim_snapshot_mismatch": (
+            "README claim text no longer matches the checked-in evidence snapshot."
+        ),
+        "validation_blocker": (
+            "A release-facing validation blocker requires operator action before the claim "
+            "can be treated as green."
+        ),
+    }[category]
+
+
+def explanation_item(
+    *,
+    source: str,
+    category: str,
+    affected: str,
+    detail: str,
+    next_safe_action: str,
+) -> dict[str, Any]:
+    return {
+        "id": f"{category}:{source}:{affected}",
+        "category": category,
+        "source": source,
+        "affected": affected,
+        "detail": detail,
+        "explanation": blocker_explanation(category),
+        "next_safe_action": next_safe_action,
+        "claim_integrity": "not_green_until_resolved",
+    }
+
+
+def build_operator_explanations(
+    *,
+    blocking_issues: list[dict[str, Any]],
+    stale_claims: dict[str, Any],
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for issue in blocking_issues:
+        kind = str(issue.get("kind") or "validation_blocker")
+        detail = str(issue.get("detail") or "")
+        category = blocker_category(kind, detail)
+        affected = str(issue.get("path") or "unknown")
+        if issue.get("line") is not None:
+            affected = f"{affected}:{issue['line']}"
+        items.append(explanation_item(
+            source=f"blocking_issue:{kind}",
+            category=category,
+            affected=affected,
+            detail=detail,
+            next_safe_action=str(issue.get("remediation") or remediation_for(kind)),
+        ))
+
+    for item in stale_claims.get("items", []):
+        bead_id = str(item.get("bead_id") or "unknown")
+        classification = str(item.get("classification") or "")
+        if classification == "active_dirty_worktree":
+            detail = "; ".join(str(path) for path in item.get("dirty_worktree_paths", []))
+            items.append(explanation_item(
+                source=f"stale_claim:{classification}",
+                category="dirty_worktree_conflict",
+                affected=f"bead:{bead_id}",
+                detail=detail or "dirty worktree touches the active bead surface",
+                next_safe_action=str(item.get("recommended_operator_action") or ""),
+            ))
+        elif classification in {"ambiguous_missing_coordination", "missing_evidence"}:
+            items.append(explanation_item(
+                source=f"stale_claim:{classification}",
+                category="agent_mail_semantic_corruption",
+                affected=f"bead:{bead_id}",
+                detail="; ".join(str(reason) for reason in item.get("reasons", [])),
+                next_safe_action=str(item.get("recommended_operator_action") or ""),
+            ))
+        elif str(item.get("operator_bucket") or "") == "stale_candidate":
+            items.append(explanation_item(
+                source=f"stale_claim:{classification}",
+                category="validation_blocker",
+                affected=f"bead:{bead_id}",
+                detail="; ".join(str(reason) for reason in item.get("reasons", [])),
+                next_safe_action=str(item.get("recommended_operator_action") or ""),
+            ))
+
+    category_counts: dict[str, int] = {}
+    for item in items:
+        category = item["category"]
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    return {
+        "schema": OPERATOR_EXPLANATIONS_SCHEMA,
+        "status": "needs_action" if items else "ready",
+        "policy": "degraded_or_stale_evidence_is_never_green",
+        "summary": {
+            "explanation_count": len(items),
+            "category_counts": category_counts,
+        },
+        "items": items,
+    }
+
+
 def readme_timestamp_text(payload: dict[str, Any], paths: tuple[str, ...] = DEFAULT_TIMESTAMP_PATHS) -> str | None:
     for path in paths:
         raw = get_path(payload, path)
@@ -1910,6 +2071,10 @@ def build_report(
         if issue.blocking
     ]
     blocking_issues.extend(check_readme_release_snapshot(repo_root))
+    operator_explanations = build_operator_explanations(
+        blocking_issues=blocking_issues,
+        stale_claims=stale_claims,
+    )
 
     blocking_count = len(blocking_issues)
     overall_status = "blocked" if blocking_issues else "ready"
@@ -1927,6 +2092,7 @@ def build_report(
         "artifacts": [check.to_json() for check in checks],
         "stale_claims": stale_claims,
         "hostcall_queue_telemetry": hostcall_queue_telemetry,
+        "operator_explanations": operator_explanations,
         "blocking_issues": blocking_issues,
     }
 
@@ -2013,6 +2179,17 @@ def print_text_report(report: dict[str, Any]) -> None:
         if source["missing_required_fields"]:
             print(f"    missing: {', '.join(source['missing_required_fields'])}")
         print(f"    action: {source['recommended_operator_action']}")
+    operator_explanations = report["operator_explanations"]
+    print("")
+    print("operator explanations:")
+    print(
+        f"  {operator_explanations['status']}: "
+        f"{operator_explanations['summary']['explanation_count']} explanations"
+    )
+    for item in operator_explanations["items"]:
+        print(f"  {item['category']}: {item['affected']}")
+        print(f"    explanation: {item['explanation']}")
+        print(f"    next: {item['next_safe_action']}")
     if report["blocking_issues"]:
         print("")
         print("release-facing claim blockers:")
@@ -2240,6 +2417,13 @@ def hostcall_source(report: dict[str, Any], source_id: str) -> dict[str, Any]:
     raise AssertionError(f"missing hostcall queue source for {source_id}")
 
 
+def operator_categories(report: dict[str, Any]) -> set[str]:
+    return {
+        item["category"]
+        for item in report["operator_explanations"]["items"]
+    }
+
+
 def assert_condition(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -2278,6 +2462,7 @@ def canonical_report_projection(report: dict[str, Any]) -> dict[str, Any]:
         ],
         "stale_claims": report["stale_claims"],
         "hostcall_queue_telemetry": report["hostcall_queue_telemetry"],
+        "operator_explanations": report["operator_explanations"],
     }
 
 
@@ -2383,6 +2568,10 @@ def run_self_test() -> int:
         report = build_report(repo_root, now=now)
         kinds = {issue["kind"] for issue in report["blocking_issues"]}
         assert_condition("stale" in kinds, "stale artifact should block gate mode")
+        assert_condition(
+            "stale_evidence" in operator_categories(report),
+            "stale artifact blockers should have operator explanations",
+        )
 
         repo_root = fixture_root()
         make_complete_fixture(repo_root, now, skip_ids={"activity_ledger_digest"})
@@ -2391,6 +2580,10 @@ def run_self_test() -> int:
         assert_condition(
             "tests/full_suite_gate/swarm_activity_digest.json" in paths,
             "missing artifact should be reported with exact path",
+        )
+        assert_condition(
+            "missing_artifact" in operator_categories(report),
+            "missing artifact blockers should have operator explanations",
         )
 
         repo_root = fixture_root()
@@ -2624,6 +2817,10 @@ def run_self_test() -> int:
             stale_item["operator_bucket"] == "ambiguous",
             "missing Agent Mail/activity evidence should be degraded, not abandonment proof",
         )
+        assert_condition(
+            "agent_mail_semantic_corruption" in operator_categories(report),
+            "ambiguous missing coordination evidence should explain Agent Mail degradation",
+        )
         unassigned_item = stale_claim_item(report, "bd-unassigned")
         assert_condition(
             unassigned_item["classification"] == "stale_candidate_unassigned",
@@ -2675,6 +2872,10 @@ def run_self_test() -> int:
             dirty_item["dirty_worktree_paths"] == ["src/agent.rs"],
             "dirty-surface evidence should only include matched paths",
         )
+        assert_condition(
+            "dirty_worktree_conflict" in operator_categories(report),
+            "dirty worktree conflicts should have operator explanations",
+        )
 
         repo_root = fixture_root()
         make_complete_fixture(repo_root, now)
@@ -2707,6 +2908,26 @@ def run_self_test() -> int:
         assert_condition(
             commit_item["classification"] == "active_recent_commit",
             "recent commits mentioning a bead should keep old work fresh",
+        )
+
+        rch_explanations = build_operator_explanations(
+            blocking_issues=[
+                {
+                    "path": "validation/rch",
+                    "kind": "status_not_ready",
+                    "detail": "RCH worker workspace shadow prevented authoritative cargo proof",
+                    "remediation": "Fix the RCH workspace mapping and rerun the validation command.",
+                }
+            ],
+            stale_claims={"items": []},
+        )
+        assert_condition(
+            rch_explanations["summary"]["category_counts"].get("rch_failure") == 1,
+            "RCH workspace-shadow blockers should be classified separately",
+        )
+        assert_condition(
+            rch_explanations["items"][0]["claim_integrity"] == "not_green_until_resolved",
+            "RCH blocker explanations must preserve fail-closed claim integrity",
         )
 
         repo_root = fixture_root()
