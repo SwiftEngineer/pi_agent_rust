@@ -3146,6 +3146,25 @@ def run_self_test() -> int:
         make_complete_fixture(repo_root, now)
         readme_path = repo_root / "README.md"
         readme_path.write_text(
+            readme_path.read_text(encoding="utf-8").replace("`CERTIFIED`", "`NOT_CERTIFIED`", 1),
+            encoding="utf-8",
+        )
+        report = build_report(repo_root, now=now)
+        readme_blockers = [
+            issue
+            for issue in report["blocking_issues"]
+            if issue["kind"] == "readme_snapshot_mismatch"
+            and "latest_dropin_verdict" in issue["detail"]
+        ]
+        assert_condition(
+            readme_blockers,
+            "stale README drop-in verdict should block claim readiness",
+        )
+
+        repo_root = fixture_root()
+        make_complete_fixture(repo_root, now)
+        readme_path = repo_root / "README.md"
+        readme_path.write_text(
             readme_path.read_text(encoding="utf-8").replace(
                 "tests/ext_conformance/reports/journeys/journey_report.json",
                 "tests/ext_conformance/reports/journeys/missing_journey_report.json",

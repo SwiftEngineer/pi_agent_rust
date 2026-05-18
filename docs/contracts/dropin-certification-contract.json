@@ -380,17 +380,9 @@
     }
   },
   "immediate_status_snapshot": {
-    "overall_verdict_now": "NOT_CERTIFIED",
-    "reason": "Multiple hard gates depend on open parity implementation beads.",
-    "open_critical_gate_domains": [
-      "cli",
-      "json-and-rpc",
-      "sdk",
-      "config-and-env",
-      "session-and-errors",
-      "differential-testing",
-      "quality-gates"
-    ]
+    "overall_verdict_now": "CERTIFIED",
+    "reason": "docs/evidence/dropin-certification-verdict.json reports 22/22 hard gates pass, including all 16 blocking gates, with no blocking reasons.",
+    "open_critical_gate_domains": []
   },
   "maintenance_policy": {
     "update_trigger": "Any newly discovered mismatch or gate-topology change.",
