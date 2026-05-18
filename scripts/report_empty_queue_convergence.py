@@ -777,6 +777,17 @@ def build_next_actions(
     closeout: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
+    if beads.get("source_error_count"):
+        actions.append(
+            {
+                "action": "inspect_queue_source_inputs",
+                "source_errors": beads.get("source_errors", []),
+                "reason": (
+                    "required queue source input was malformed or unreadable; repair "
+                    "the source before declaring empty-queue convergence."
+                ),
+            }
+        )
     if beads["ready_count"]:
         first = beads["ready_items"][0]
         actions.append(
@@ -886,6 +897,8 @@ def overall_status(
     validation_broker: dict[str, Any],
     closeout: dict[str, Any],
 ) -> str:
+    if beads.get("source_error_count"):
+        return "needs_attention"
     if beads["stale_in_progress_count"] or bv["tombstone_mismatch_count"]:
         return "needs_attention"
     if beads["ready_count"]:
@@ -925,8 +938,26 @@ def build_report(
         br_ready = normalize_issue_records(br_ready_json.payload)
 
     beads = analyze_beads(issues, br_ready=br_ready, now=now, stale_hours=stale_hours)
+    source_errors: list[dict[str, str | None]] = []
     if issues_error is not None:
         beads["load_error"] = issues_error
+        source_errors.append(
+            {
+                "source": "beads_jsonl",
+                "path": str(beads_path),
+                "error": issues_error,
+            }
+        )
+    if br_ready_json.error is not None:
+        source_errors.append(
+            {
+                "source": "br_ready_json",
+                "path": br_ready_json.path,
+                "error": br_ready_json.error,
+            }
+        )
+    beads["source_error_count"] = len(source_errors)
+    beads["source_errors"] = source_errors
     issue_by_id = {str(issue.get("id")): issue for issue in issues if issue.get("id")}
 
     bv = analyze_bv(bv_plan_json.payload, issue_by_id)
@@ -979,6 +1010,7 @@ def build_report(
             "deferred_count": beads["deferred_count"],
             "deferred_planning_count": beads["deferred_planning_count"],
             "tombstone_count": beads["tombstone_count"],
+            "beads_source_error_count": beads["source_error_count"],
             "bv_actionable_count": bv["actionable_count"],
             "bv_tombstone_mismatch_count": bv["tombstone_mismatch_count"],
             "agent_mail_status": agent_mail["status"],
@@ -1116,6 +1148,70 @@ def run_self_test() -> int:
             clean_report["next_actions"][0]["action"] == "stop_queue_clean",
             "clean queue should tell operator to stop",
             clean_report,
+        )
+
+        malformed_ready_json = root / "malformed-ready.json"
+        malformed_ready_json.write_text("{", encoding="utf-8")
+        malformed_ready_report = build_report(
+            repo_root=root,
+            beads_path=clean_beads,
+            br_ready_json=read_json(malformed_ready_json),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            validation_broker_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=read_json(closeout_json),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            malformed_ready_report["status"] == "needs_attention",
+            "malformed br ready JSON should fail closed",
+            malformed_ready_report,
+        )
+        assert_condition(
+            malformed_ready_report["summary"]["beads_source_error_count"] == 1,
+            "malformed br ready JSON should be counted as a queue source error",
+            malformed_ready_report,
+        )
+        assert_condition(
+            malformed_ready_report["beads"]["source_errors"][0]["source"] == "br_ready_json",
+            "malformed br ready JSON should preserve source identity",
+            malformed_ready_report,
+        )
+        assert_condition(
+            malformed_ready_report["next_actions"][0]["action"] == "inspect_queue_source_inputs",
+            "malformed br ready JSON should produce source-inspection action",
+            malformed_ready_report,
+        )
+
+        malformed_beads = root / "malformed/.beads/issues.jsonl"
+        malformed_beads.parent.mkdir(parents=True, exist_ok=True)
+        malformed_beads.write_text(
+            json_dumps(fixture_issue("bd-done", "Closed work", status="closed")) + "{",
+            encoding="utf-8",
+        )
+        malformed_beads_report = build_report(
+            repo_root=root,
+            beads_path=malformed_beads,
+            br_ready_json=LoadedJson(None, [], None),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            validation_broker_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=read_json(closeout_json),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            malformed_beads_report["status"] == "needs_attention",
+            "malformed Beads JSONL should fail closed",
+            malformed_beads_report,
+        )
+        assert_condition(
+            malformed_beads_report["beads"]["source_errors"][0]["source"] == "beads_jsonl",
+            "malformed Beads JSONL should preserve source identity",
+            malformed_beads_report,
         )
 
         planning_beads = root / "planning/.beads/issues.jsonl"
