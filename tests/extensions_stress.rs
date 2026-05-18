@@ -112,7 +112,7 @@ impl Default for S3FifoStressDiagnostics {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct BravoStressDiagnostics {
     mode: &'static str,
     transitions: u64,
@@ -250,6 +250,120 @@ struct HostcallQosStarvationEvidence {
     bravo: BravoStressDiagnostics,
     operator_explanations: Vec<String>,
     decision_trace: Vec<HostcallQosDecisionTrace>,
+}
+
+const HOSTCALL_COST_ATTRIBUTION_SCHEMA: &str = "pi.ext.hostcall_cost_attribution.v1";
+
+#[derive(Clone, Debug)]
+struct HostcallCostReplayStep {
+    extension_id: &'static str,
+    fixture_role: &'static str,
+    lane: &'static str,
+    hostcall_class: &'static str,
+    key: &'static str,
+    cpu_cost_units: u64,
+    memory_cost_bytes: u64,
+    io_cost_bytes: u64,
+    payload_bytes: u64,
+    denied_by_policy: bool,
+    fallback_reason: Option<&'static str>,
+    bravo_rollback: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct HostcallCostAttributionTotals {
+    hostcalls: u64,
+    cpu_cost_units: u64,
+    memory_cost_bytes: u64,
+    io_cost_bytes: u64,
+    queue_occupancy_units: u64,
+    denied_hostcalls: u64,
+    fallback_count: u64,
+    bravo_rollbacks: u64,
+    s3fifo_fairness_rejections: u64,
+    s3fifo_fallback_bypasses: u64,
+    peer_progress_events: u64,
+    payload_bodies_redacted: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct HostcallCostAttributionS3FifoCounters {
+    admissions_total: u64,
+    promotions_total: u64,
+    ghost_hits_total: u64,
+    fairness_rejections_total: u64,
+    fallback_bypasses_total: u64,
+    live_depth_final: usize,
+    small_depth_final: usize,
+    main_depth_final: usize,
+    ghost_depth_final: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct HostcallCostAttributionRow {
+    extension_id: String,
+    fixture_role: String,
+    lane: String,
+    hostcall_class: String,
+    hostcalls: u64,
+    cpu_cost_units: u64,
+    memory_cost_bytes: u64,
+    io_cost_bytes: u64,
+    queue_occupancy_units: u64,
+    admission_decisions: BTreeMap<String, u64>,
+    fallback_reasons: BTreeMap<String, u64>,
+    denied_hostcalls: u64,
+    bravo_rollbacks: u64,
+    s3fifo_fairness_rejections: u64,
+    s3fifo_progress_events: u64,
+    s3fifo_fallback_bypasses: u64,
+    peer_progress_events: u64,
+    payload_bytes_observed: u64,
+    payload_body_redacted: bool,
+    operator_next_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostcallCostAttributionEvent {
+    step: usize,
+    extension_id: String,
+    fixture_role: String,
+    lane: String,
+    hostcall_class: String,
+    admission_decision: String,
+    fallback_reason: Option<String>,
+    s3fifo_decision_kind: String,
+    queue_occupancy_units: u64,
+    cpu_cost_units: u64,
+    memory_cost_bytes: u64,
+    io_cost_bytes: u64,
+    payload_bytes_observed: u64,
+    payload_body_redacted: bool,
+    bravo_rollback: bool,
+    made_progress: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostcallCostAttributionNegativeControl {
+    name: String,
+    rejected: bool,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostcallCostAttributionLedger {
+    schema: String,
+    generated_at: String,
+    fixture: String,
+    verdict: String,
+    source_boundary: String,
+    totals: HostcallCostAttributionTotals,
+    s3fifo: HostcallCostAttributionS3FifoCounters,
+    bravo: BravoStressDiagnostics,
+    extensions: Vec<HostcallCostAttributionRow>,
+    operator_next_actions: Vec<String>,
+    negative_controls: Vec<HostcallCostAttributionNegativeControl>,
+    events: Vec<HostcallCostAttributionEvent>,
 }
 
 // ─── Pure Helper Functions ──────────────────────────────────────────────────
@@ -464,6 +578,574 @@ fn write_hostcall_qos_starvation_evidence(evidence: &HostcallQosStarvationEviden
         serde_json::to_string_pretty(evidence).expect("serialize hostcall QoS evidence"),
     )
     .expect("write hostcall QoS starvation evidence");
+    output_path
+}
+
+fn increment_count(counts: &mut BTreeMap<String, u64>, key: &str) {
+    let count = counts.entry(key.to_string()).or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+fn hostcall_cost_operator_action(fixture_role: &str) -> &'static str {
+    match fixture_role {
+        "cheap_read_flooder" => "Throttle cheap read flooder lane and inspect cache churn.",
+        "large_payload_emitter" => {
+            "Route large payload hostcalls through payload-size budget review."
+        }
+        "denied_capability_churner" => {
+            "Inspect denied capability churn without granting new permissions."
+        }
+        "steady_peer" => "Keep steady peer admitted; no starvation intervention required.",
+        _ => "Inspect extension hostcall cost attribution row.",
+    }
+}
+
+fn hostcall_cost_admission_decision(
+    denied_by_policy: bool,
+    decision_kind: Option<S3FifoDecisionKind>,
+    fallback_reason: Option<&str>,
+) -> &'static str {
+    if denied_by_policy {
+        return "DeniedByPolicy";
+    }
+    if decision_kind == Some(S3FifoDecisionKind::RejectFairnessBudget) {
+        return "RejectedByS3FifoFairness";
+    }
+    if fallback_reason.is_some() {
+        return "AllowedWithFallback";
+    }
+    "Allowed"
+}
+
+#[allow(clippy::too_many_lines)]
+fn hostcall_cost_replay_steps() -> Vec<HostcallCostReplayStep> {
+    vec![
+        HostcallCostReplayStep {
+            extension_id: "cheap-read-flooder",
+            fixture_role: "cheap_read_flooder",
+            lane: "fast-read",
+            hostcall_class: "tool.read",
+            key: "cheap-read-1",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 128,
+            payload_bytes: 64,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "steady-peer",
+            fixture_role: "steady_peer",
+            lane: "balanced-interactive",
+            hostcall_class: "tool.read",
+            key: "steady-key",
+            cpu_cost_units: 2,
+            memory_cost_bytes: 128,
+            io_cost_bytes: 256,
+            payload_bytes: 96,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "large-payload-emitter",
+            fixture_role: "large_payload_emitter",
+            lane: "bulk-payload",
+            hostcall_class: "tool.write",
+            key: "large-payload-1",
+            cpu_cost_units: 8,
+            memory_cost_bytes: 524_288,
+            io_cost_bytes: 1_048_576,
+            payload_bytes: 1_048_576,
+            denied_by_policy: false,
+            fallback_reason: Some("large_tool_payload"),
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "denied-capability-churner",
+            fixture_role: "denied_capability_churner",
+            lane: "policy-denied",
+            hostcall_class: "process.exec",
+            key: "denied-exec-1",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 16,
+            payload_bytes: 128,
+            denied_by_policy: true,
+            fallback_reason: Some("capability_denied"),
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "cheap-read-flooder",
+            fixture_role: "cheap_read_flooder",
+            lane: "fast-read",
+            hostcall_class: "tool.read",
+            key: "cheap-read-2",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 128,
+            payload_bytes: 64,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "steady-peer",
+            fixture_role: "steady_peer",
+            lane: "balanced-interactive",
+            hostcall_class: "tool.read",
+            key: "steady-key",
+            cpu_cost_units: 2,
+            memory_cost_bytes: 128,
+            io_cost_bytes: 256,
+            payload_bytes: 96,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "cheap-read-flooder",
+            fixture_role: "cheap_read_flooder",
+            lane: "fast-read",
+            hostcall_class: "tool.read",
+            key: "cheap-read-3",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 128,
+            payload_bytes: 64,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "denied-capability-churner",
+            fixture_role: "denied_capability_churner",
+            lane: "policy-denied",
+            hostcall_class: "env.read",
+            key: "denied-env-1",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 16,
+            payload_bytes: 128,
+            denied_by_policy: true,
+            fallback_reason: Some("capability_denied"),
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "large-payload-emitter",
+            fixture_role: "large_payload_emitter",
+            lane: "bulk-payload",
+            hostcall_class: "tool.write",
+            key: "large-payload-2",
+            cpu_cost_units: 10,
+            memory_cost_bytes: 786_432,
+            io_cost_bytes: 1_572_864,
+            payload_bytes: 1_572_864,
+            denied_by_policy: false,
+            fallback_reason: Some("bravo_writer_recovery"),
+            bravo_rollback: true,
+        },
+        HostcallCostReplayStep {
+            extension_id: "steady-peer",
+            fixture_role: "steady_peer",
+            lane: "balanced-interactive",
+            hostcall_class: "tool.read",
+            key: "steady-key",
+            cpu_cost_units: 2,
+            memory_cost_bytes: 128,
+            io_cost_bytes: 256,
+            payload_bytes: 96,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "cheap-read-flooder",
+            fixture_role: "cheap_read_flooder",
+            lane: "fast-read",
+            hostcall_class: "tool.read",
+            key: "cheap-read-4",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 128,
+            payload_bytes: 64,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "denied-capability-churner",
+            fixture_role: "denied_capability_churner",
+            lane: "policy-denied",
+            hostcall_class: "process.exec",
+            key: "denied-exec-2",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 16,
+            payload_bytes: 128,
+            denied_by_policy: true,
+            fallback_reason: Some("capability_denied"),
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "steady-peer",
+            fixture_role: "steady_peer",
+            lane: "balanced-interactive",
+            hostcall_class: "tool.read",
+            key: "steady-key",
+            cpu_cost_units: 2,
+            memory_cost_bytes: 128,
+            io_cost_bytes: 256,
+            payload_bytes: 96,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+        HostcallCostReplayStep {
+            extension_id: "cheap-read-flooder",
+            fixture_role: "cheap_read_flooder",
+            lane: "fast-read",
+            hostcall_class: "tool.read",
+            key: "cheap-read-5",
+            cpu_cost_units: 1,
+            memory_cost_bytes: 64,
+            io_cost_bytes: 128,
+            payload_bytes: 64,
+            denied_by_policy: false,
+            fallback_reason: None,
+            bravo_rollback: false,
+        },
+    ]
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_hostcall_cost_attribution_ledger() -> HostcallCostAttributionLedger {
+    let mut policy = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 8,
+        small_capacity: 4,
+        ghost_capacity: 8,
+        max_entries_per_owner: 1,
+        fallback_window: 64,
+        min_ghost_hits_in_window: 0,
+        max_budget_rejections_in_window: 64,
+    });
+    let mut totals = HostcallCostAttributionTotals::default();
+    let mut rows = BTreeMap::<String, HostcallCostAttributionRow>::new();
+    let mut events = Vec::new();
+
+    for (step, replay) in hostcall_cost_replay_steps().iter().enumerate() {
+        let decision = if replay.denied_by_policy {
+            None
+        } else {
+            Some(policy.access(replay.extension_id, replay.key.to_string()))
+        };
+        let decision_kind = decision.map(|decision| decision.kind);
+        let made_progress = decision_kind.is_some_and(s3fifo_decision_makes_progress);
+        let fallback_reason = replay.fallback_reason.map_or_else(
+            || {
+                decision
+                    .and_then(|decision| decision.fallback_reason)
+                    .map(|reason| format!("{reason:?}"))
+            },
+            |reason| Some(reason.to_string()),
+        );
+        let admission_decision = hostcall_cost_admission_decision(
+            replay.denied_by_policy,
+            decision_kind,
+            fallback_reason.as_deref(),
+        );
+        let queue_occupancy_units = u64::try_from(decision.map_or_else(
+            || policy.telemetry().live_depth,
+            |decision| decision.live_depth,
+        ))
+        .unwrap_or(u64::MAX);
+        let s3fifo_decision_kind =
+            decision_kind.map_or_else(|| "PolicyDenied".to_string(), |kind| format!("{kind:?}"));
+
+        let row_key = format!(
+            "{}|{}|{}",
+            replay.extension_id, replay.lane, replay.hostcall_class
+        );
+        let row = rows
+            .entry(row_key)
+            .or_insert_with(|| HostcallCostAttributionRow {
+                extension_id: replay.extension_id.to_string(),
+                fixture_role: replay.fixture_role.to_string(),
+                lane: replay.lane.to_string(),
+                hostcall_class: replay.hostcall_class.to_string(),
+                payload_body_redacted: true,
+                operator_next_actions: vec![
+                    hostcall_cost_operator_action(replay.fixture_role).to_string(),
+                ],
+                ..Default::default()
+            });
+
+        totals.hostcalls = totals.hostcalls.saturating_add(1);
+        totals.cpu_cost_units = totals.cpu_cost_units.saturating_add(replay.cpu_cost_units);
+        totals.memory_cost_bytes = totals
+            .memory_cost_bytes
+            .saturating_add(replay.memory_cost_bytes);
+        totals.io_cost_bytes = totals.io_cost_bytes.saturating_add(replay.io_cost_bytes);
+        totals.queue_occupancy_units = totals
+            .queue_occupancy_units
+            .saturating_add(queue_occupancy_units);
+        totals.payload_bodies_redacted = totals.payload_bodies_redacted.saturating_add(1);
+
+        row.hostcalls = row.hostcalls.saturating_add(1);
+        row.cpu_cost_units = row.cpu_cost_units.saturating_add(replay.cpu_cost_units);
+        row.memory_cost_bytes = row
+            .memory_cost_bytes
+            .saturating_add(replay.memory_cost_bytes);
+        row.io_cost_bytes = row.io_cost_bytes.saturating_add(replay.io_cost_bytes);
+        row.queue_occupancy_units = row
+            .queue_occupancy_units
+            .saturating_add(queue_occupancy_units);
+        row.payload_bytes_observed = row
+            .payload_bytes_observed
+            .saturating_add(replay.payload_bytes);
+        increment_count(&mut row.admission_decisions, admission_decision);
+
+        if let Some(reason) = fallback_reason.as_deref() {
+            totals.fallback_count = totals.fallback_count.saturating_add(1);
+            increment_count(&mut row.fallback_reasons, reason);
+        }
+        if replay.denied_by_policy {
+            totals.denied_hostcalls = totals.denied_hostcalls.saturating_add(1);
+            row.denied_hostcalls = row.denied_hostcalls.saturating_add(1);
+        }
+        if replay.bravo_rollback {
+            totals.bravo_rollbacks = totals.bravo_rollbacks.saturating_add(1);
+            row.bravo_rollbacks = row.bravo_rollbacks.saturating_add(1);
+        }
+        if decision_kind == Some(S3FifoDecisionKind::RejectFairnessBudget) {
+            totals.s3fifo_fairness_rejections = totals.s3fifo_fairness_rejections.saturating_add(1);
+            row.s3fifo_fairness_rejections = row.s3fifo_fairness_rejections.saturating_add(1);
+        }
+        if decision_kind == Some(S3FifoDecisionKind::FallbackBypass) {
+            totals.s3fifo_fallback_bypasses = totals.s3fifo_fallback_bypasses.saturating_add(1);
+            row.s3fifo_fallback_bypasses = row.s3fifo_fallback_bypasses.saturating_add(1);
+        }
+        if made_progress {
+            row.s3fifo_progress_events = row.s3fifo_progress_events.saturating_add(1);
+        }
+        if replay.fixture_role == "steady_peer" && made_progress {
+            totals.peer_progress_events = totals.peer_progress_events.saturating_add(1);
+            row.peer_progress_events = row.peer_progress_events.saturating_add(1);
+        }
+
+        events.push(HostcallCostAttributionEvent {
+            step,
+            extension_id: replay.extension_id.to_string(),
+            fixture_role: replay.fixture_role.to_string(),
+            lane: replay.lane.to_string(),
+            hostcall_class: replay.hostcall_class.to_string(),
+            admission_decision: admission_decision.to_string(),
+            fallback_reason,
+            s3fifo_decision_kind,
+            queue_occupancy_units,
+            cpu_cost_units: replay.cpu_cost_units,
+            memory_cost_bytes: replay.memory_cost_bytes,
+            io_cost_bytes: replay.io_cost_bytes,
+            payload_bytes_observed: replay.payload_bytes,
+            payload_body_redacted: true,
+            bravo_rollback: replay.bravo_rollback,
+            made_progress,
+        });
+    }
+
+    let telemetry = policy.telemetry();
+    let s3fifo = HostcallCostAttributionS3FifoCounters {
+        admissions_total: telemetry.admissions_total,
+        promotions_total: telemetry.promotions_total,
+        ghost_hits_total: telemetry.ghost_hits_total,
+        fairness_rejections_total: telemetry.budget_rejections_total,
+        fallback_bypasses_total: totals.s3fifo_fallback_bypasses,
+        live_depth_final: telemetry.live_depth,
+        small_depth_final: telemetry.small_depth,
+        main_depth_final: telemetry.main_depth,
+        ghost_depth_final: telemetry.ghost_depth,
+    };
+
+    let mut ledger = HostcallCostAttributionLedger {
+        schema: HOSTCALL_COST_ATTRIBUTION_SCHEMA.to_string(),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        fixture: "abuse_replay_cost_attribution_cheap_reads_large_payloads_denied_caps".to_string(),
+        verdict: "pending".to_string(),
+        source_boundary:
+            "deterministic test fixture; payload bodies are represented only by byte counts"
+                .to_string(),
+        totals,
+        s3fifo,
+        bravo: BravoStressDiagnostics {
+            mode: "RollbackObserved",
+            transitions: 1,
+            rollbacks: 1,
+            writer_recovery_remaining: 0,
+        },
+        extensions: rows.into_values().collect(),
+        operator_next_actions: vec![
+            "Use extension_id, lane, and hostcall_class to find the consuming actor.".to_string(),
+            "Investigate denied capability churn without granting additional capabilities."
+                .to_string(),
+            "Keep scheduler decisions unchanged; this ledger is attribution evidence only."
+                .to_string(),
+        ],
+        negative_controls: Vec::new(),
+        events,
+    };
+    ledger.verdict = if validate_hostcall_cost_attribution_contract(&ledger).is_ok() {
+        "pass"
+    } else {
+        "fail"
+    }
+    .to_string();
+    let negative_reason = hostcall_cost_missing_counter_negative_control_reason(&ledger)
+        .unwrap_or_else(|| "missing cost counter negative control unexpectedly passed".to_string());
+    ledger.negative_controls = vec![HostcallCostAttributionNegativeControl {
+        name: "missing_queue_occupancy_counter".to_string(),
+        rejected: true,
+        reason: negative_reason,
+    }];
+    ledger
+}
+
+fn hostcall_cost_missing_counter_negative_control_reason(
+    ledger: &HostcallCostAttributionLedger,
+) -> Option<String> {
+    let mut negative = ledger.clone();
+    negative.totals.queue_occupancy_units = 0;
+    for row in &mut negative.extensions {
+        row.queue_occupancy_units = 0;
+    }
+    validate_hostcall_cost_attribution_contract(&negative).err()
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_hostcall_cost_attribution_contract(
+    ledger: &HostcallCostAttributionLedger,
+) -> Result<(), String> {
+    if ledger.schema != HOSTCALL_COST_ATTRIBUTION_SCHEMA {
+        return Err(format!("unexpected schema {}", ledger.schema));
+    }
+    if ledger.totals.hostcalls == 0
+        || ledger.totals.cpu_cost_units == 0
+        || ledger.totals.memory_cost_bytes == 0
+        || ledger.totals.io_cost_bytes == 0
+        || ledger.totals.queue_occupancy_units == 0
+    {
+        return Err("missing cost counters in hostcall attribution totals".to_string());
+    }
+    if ledger.totals.payload_bodies_redacted != ledger.totals.hostcalls {
+        return Err("payload body redaction count must match hostcall count".to_string());
+    }
+    if ledger.extensions.len() < 4 {
+        return Err("ledger must include all four abuse replay roles".to_string());
+    }
+    for required_role in [
+        "cheap_read_flooder",
+        "large_payload_emitter",
+        "denied_capability_churner",
+        "steady_peer",
+    ] {
+        if !ledger
+            .extensions
+            .iter()
+            .any(|row| row.fixture_role == required_role)
+        {
+            return Err(format!("missing abuse replay role {required_role}"));
+        }
+    }
+    for row in &ledger.extensions {
+        if row.hostcalls == 0
+            || row.cpu_cost_units == 0
+            || row.memory_cost_bytes == 0
+            || row.io_cost_bytes == 0
+            || row.queue_occupancy_units == 0
+        {
+            return Err(format!(
+                "missing cost counters for extension {}",
+                row.extension_id
+            ));
+        }
+        if row.admission_decisions.is_empty() {
+            return Err(format!(
+                "missing admission decision attribution for {}",
+                row.extension_id
+            ));
+        }
+        if !row.payload_body_redacted {
+            return Err(format!(
+                "payload body was not redacted for {}",
+                row.extension_id
+            ));
+        }
+    }
+    if ledger.totals.s3fifo_fairness_rejections == 0 || ledger.s3fifo.fairness_rejections_total == 0
+    {
+        return Err("missing S3-FIFO fairness rejection counters".to_string());
+    }
+    if ledger.totals.bravo_rollbacks == 0 || ledger.bravo.rollbacks == 0 {
+        return Err("missing BRAVO rollback attribution".to_string());
+    }
+    if ledger.totals.denied_hostcalls == 0 {
+        return Err("missing denied capability churn attribution".to_string());
+    }
+    if ledger.totals.fallback_count == 0 {
+        return Err("missing fallback reason attribution".to_string());
+    }
+    if ledger.totals.peer_progress_events < 3 {
+        return Err("steady peer did not continue progressing".to_string());
+    }
+    if !ledger
+        .extensions
+        .iter()
+        .any(|row| row.fixture_role == "cheap_read_flooder" && row.s3fifo_fairness_rejections > 0)
+    {
+        return Err("cheap read flooder did not trip S3-FIFO fairness counters".to_string());
+    }
+    if !ledger.extensions.iter().any(|row| {
+        row.fixture_role == "large_payload_emitter"
+            && row.memory_cost_bytes >= 1_000_000
+            && !row.fallback_reasons.is_empty()
+    }) {
+        return Err("large payload fixture did not expose payload cost and fallback".to_string());
+    }
+    if !ledger.extensions.iter().any(|row| {
+        row.fixture_role == "denied_capability_churner"
+            && row.denied_hostcalls > 0
+            && row.admission_decisions.contains_key("DeniedByPolicy")
+    }) {
+        return Err("denied capability churn fixture did not stay denied".to_string());
+    }
+    if ledger.operator_next_actions.is_empty()
+        || ledger
+            .extensions
+            .iter()
+            .any(|row| row.operator_next_actions.is_empty())
+    {
+        return Err("missing operator-visible next actions".to_string());
+    }
+    if ledger
+        .events
+        .iter()
+        .any(|event| !event.payload_body_redacted)
+    {
+        return Err("event payload body was not redacted".to_string());
+    }
+    Ok(())
+}
+
+fn write_hostcall_cost_attribution_ledger(ledger: &HostcallCostAttributionLedger) -> PathBuf {
+    let output_dir = report_dir();
+    std::fs::create_dir_all(&output_dir)
+        .expect("create hostcall cost attribution evidence directory");
+    let output_path = output_dir.join("hostcall_cost_attribution_ledger.json");
+    std::fs::write(
+        &output_path,
+        serde_json::to_string_pretty(ledger).expect("serialize hostcall cost attribution ledger"),
+    )
+    .expect("write hostcall cost attribution ledger");
     output_path
 }
 
@@ -1298,6 +1980,108 @@ fn hostcall_qos_starvation_projection_preserves_non_flooding_progress() {
     assert!(
         evidence_path.exists(),
         "hostcall QoS starvation evidence should be written under target/perf"
+    );
+}
+
+#[test]
+fn hostcall_cost_attribution_ledger_records_abuse_roles_and_peer_progress() {
+    let ledger = build_hostcall_cost_attribution_ledger();
+    let ledger_path = write_hostcall_cost_attribution_ledger(&ledger);
+
+    validate_hostcall_cost_attribution_contract(&ledger)
+        .expect("hostcall cost attribution ledger should satisfy contract");
+    assert_eq!(ledger.schema, HOSTCALL_COST_ATTRIBUTION_SCHEMA);
+    assert_eq!(ledger.verdict, "pass");
+    assert!(
+        ledger.totals.cpu_cost_units > 0
+            && ledger.totals.memory_cost_bytes > 0
+            && ledger.totals.io_cost_bytes > 0
+            && ledger.totals.queue_occupancy_units > 0,
+        "ledger should expose CPU, memory, I/O, and queue occupancy costs"
+    );
+    assert!(
+        ledger.totals.payload_bodies_redacted == ledger.totals.hostcalls,
+        "all payload bodies should be redacted"
+    );
+
+    let cheap_flooder = ledger
+        .extensions
+        .iter()
+        .find(|row| row.fixture_role == "cheap_read_flooder")
+        .expect("cheap read flooder row");
+    assert!(
+        cheap_flooder.s3fifo_fairness_rejections > 0,
+        "cheap read flooder should trip S3-FIFO fairness counters"
+    );
+
+    let large_payload = ledger
+        .extensions
+        .iter()
+        .find(|row| row.fixture_role == "large_payload_emitter")
+        .expect("large payload emitter row");
+    assert!(
+        large_payload.memory_cost_bytes >= 1_000_000 && !large_payload.fallback_reasons.is_empty(),
+        "large payload fixture should carry memory/I/O cost and fallback attribution"
+    );
+
+    let denied_churn_rows = ledger
+        .extensions
+        .iter()
+        .filter(|row| row.fixture_role == "denied_capability_churner")
+        .collect::<Vec<_>>();
+    assert!(
+        denied_churn_rows
+            .iter()
+            .any(|row| row.hostcall_class == "process.exec")
+            && denied_churn_rows
+                .iter()
+                .any(|row| row.hostcall_class == "env.read"),
+        "denied capability churn should preserve per-hostcall-class attribution"
+    );
+    assert!(
+        denied_churn_rows.iter().all(|row| {
+            row.denied_hostcalls > 0 && row.admission_decisions.contains_key("DeniedByPolicy")
+        }),
+        "denied capability churn should remain denied by policy"
+    );
+
+    let steady_peer = ledger
+        .extensions
+        .iter()
+        .find(|row| row.fixture_role == "steady_peer")
+        .expect("steady peer row");
+    assert!(
+        steady_peer.peer_progress_events >= 3,
+        "normal peer should continue making progress during abuse replay"
+    );
+    assert!(
+        ledger
+            .events
+            .iter()
+            .all(|event| event.payload_body_redacted),
+        "event-level payload bodies should be redacted"
+    );
+    assert!(
+        ledger
+            .negative_controls
+            .iter()
+            .any(|control| control.rejected && control.reason.contains("missing cost counters")),
+        "ledger should record the missing-counter negative control"
+    );
+    assert!(
+        ledger_path.exists(),
+        "hostcall cost attribution ledger should be written under target/perf"
+    );
+}
+
+#[test]
+fn hostcall_cost_attribution_ledger_rejects_missing_cost_counters() {
+    let ledger = build_hostcall_cost_attribution_ledger();
+    let error = hostcall_cost_missing_counter_negative_control_reason(&ledger)
+        .expect("missing queue occupancy counters should fail validation");
+    assert!(
+        error.contains("missing cost counters"),
+        "negative control should fail the cost-counter contract: {error}"
     );
 }
 
