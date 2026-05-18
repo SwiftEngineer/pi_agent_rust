@@ -468,6 +468,35 @@ fn test_api_usage_matrix_assert_strict_shim_contract() {
 }
 
 #[test]
+fn test_api_usage_matrix_low_volume_builtin_contract() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
+    let bytes = fs::read(&matrix_path).expect("read api_usage_matrix.json");
+    let matrix: ApiUsageMatrix =
+        serde_json::from_slice(&bytes).expect("parse api_usage_matrix.json");
+
+    for (module, status) in [
+        ("node:tty", "stub"),
+        ("node:zlib", "partial"),
+        ("node:v8", "stub"),
+        ("node:perf_hooks", "stub"),
+        ("node:vm", "stub"),
+    ] {
+        let actual = matrix
+            .node_modules
+            .iter()
+            .find(|entry| entry.module == module)
+            .map(|entry| entry.shim_status.as_str());
+
+        assert_eq!(
+            actual,
+            Some(status),
+            "{module} should match the registered PiJS virtual module support level"
+        );
+    }
+}
+
+#[test]
 fn test_ext_conformance_pinned_sample_compat_ledger_snapshot() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest_path = repo_root.join("docs/extension-sample.json");

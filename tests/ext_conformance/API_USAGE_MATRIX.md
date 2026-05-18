@@ -41,11 +41,11 @@ Generated: 2026-02-07 | Corpus: 1,167 files across 230 extensions
 | `node:process` | 1 | - | - | 1 | Real | P1 |
 | `node:assert` | 1 | - | - | 1 | Real | P3 |
 | `node:string_decoder` | 1 | - | - | 1 | Stub | P3 |
-| `node:tty` | 1 | - | - | 1 | **Missing** | P3 |
+| `node:tty` | 1 | - | - | 1 | Stub | P3 |
 | `node:zlib` | 1 | - | - | 1 | Partial | P3 |
-| `node:v8` | 1 | - | - | 1 | **Missing** | P3 |
-| `node:perf_hooks` | 1 | - | - | 1 | **Missing** | P3 |
-| `node:vm` | 1 | - | - | 1 | **Missing** | P3 |
+| `node:v8` | 1 | - | - | 1 | Stub | P3 |
+| `node:perf_hooks` | 1 | - | - | 1 | Stub | P3 |
+| `node:vm` | 1 | - | - | 1 | Stub | P3 |
 | `node:stream/web` | 1 | - | - | 1 | Partial | P3 |
 | `node:readline/promises` | 1 | - | - | 1 | Partial | P3 |
 

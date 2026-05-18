@@ -368,40 +368,45 @@
       "module": "node:tty",
       "extensions_using": 1,
       "tier_breakdown": { "T3_npm": 1 },
-      "shim_status": "missing",
+      "shim_status": "stub",
       "criticality": "P3",
+      "notes": "Terminal probe facade: isatty false plus ReadStream/WriteStream stubs",
       "apis": []
     },
     {
       "module": "node:zlib",
       "extensions_using": 1,
       "tier_breakdown": { "T3_npm": 1 },
-      "shim_status": "missing",
+      "shim_status": "partial",
       "criticality": "P3",
+      "notes": "gzip/gunzip subset; streaming and Brotli APIs fail closed",
       "apis": []
     },
     {
       "module": "node:v8",
       "extensions_using": 1,
       "tier_breakdown": { "T3_npm": 1 },
-      "shim_status": "missing",
+      "shim_status": "stub",
       "criticality": "P3",
+      "notes": "JSON-backed serialize/deserialize fallback",
       "apis": []
     },
     {
       "module": "node:perf_hooks",
       "extensions_using": 1,
       "tier_breakdown": { "T3_npm": 1 },
-      "shim_status": "missing",
+      "shim_status": "stub",
       "criticality": "P3",
+      "notes": "Lightweight performance clock facade",
       "apis": []
     },
     {
       "module": "node:vm",
       "extensions_using": 1,
       "tier_breakdown": { "T3_npm": 1 },
-      "shim_status": "missing",
+      "shim_status": "stub",
       "criticality": "P3",
+      "notes": "Sandbox execution APIs fail closed; createContext returns the sandbox object",
       "apis": []
     },
     {
@@ -613,19 +618,13 @@
     "total_virtual_modules": 62,
     "shim_completeness": {
       "real": 18,
-      "partial": 19,
-      "stub": 16,
+      "partial": 20,
+      "stub": 20,
       "external": 5,
       "error_throw": 2,
-      "missing_from_corpus": 5
+      "missing_from_corpus": 0
     },
-    "missing_modules_used_by_corpus": [
-      "node:tty (1 ext)",
-      "node:zlib (1 ext)",
-      "node:v8 (1 ext)",
-      "node:perf_hooks (1 ext)",
-      "node:vm (1 ext)"
-    ],
+    "missing_modules_used_by_corpus": [],
     "top_gaps_by_impact": [
       "child_process.fork (72 calls, error throw)",
       "process.getuid/getgid (16 calls, stubbed identity)",
