@@ -137,6 +137,48 @@ fn matrix_api_status<'a>(module: &'a ApiUsageModule, name: &str) -> Option<&'a s
         .map(|api| api.shim_status.as_str())
 }
 
+fn normalize_markdown_status(status: &str) -> String {
+    status
+        .trim()
+        .trim_matches('*')
+        .to_ascii_lowercase()
+        .replace(' ', "_")
+}
+
+fn parse_markdown_npm_package_rows(markdown: &str) -> BTreeMap<&str, String> {
+    let mut rows = BTreeMap::new();
+    let mut in_section = false;
+
+    for line in markdown.lines() {
+        if line.trim() == "## npm Package Usage" {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            break;
+        }
+        if !in_section || !line.starts_with('|') || line.contains("---") || line.contains("Package")
+        {
+            continue;
+        }
+
+        let mut cells = line.trim_matches('|').split('|').map(str::trim);
+        let Some(raw_package) = cells.next() else {
+            continue;
+        };
+        let _extensions_using = cells.next();
+        let Some(raw_status) = cells.next() else {
+            continue;
+        };
+
+        let package = raw_package.trim_matches('`');
+        let status = normalize_markdown_status(raw_status);
+        rows.insert(package, status);
+    }
+
+    rows
+}
+
 #[test]
 fn test_compat_scanner_unit_fixture_ordering() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -411,6 +453,45 @@ fn test_api_usage_matrix_npm_virtual_module_contract() {
 }
 
 #[test]
+fn test_api_usage_matrix_markdown_npm_table_matches_json() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
+    let markdown_path = repo_root.join("tests/ext_conformance/API_USAGE_MATRIX.md");
+    let bytes = fs::read(&matrix_path).expect("read api_usage_matrix.json");
+    let matrix: ApiUsageMatrix =
+        serde_json::from_slice(&bytes).expect("parse api_usage_matrix.json");
+    let markdown = fs::read_to_string(&markdown_path).expect("read API_USAGE_MATRIX.md");
+    let markdown_rows = parse_markdown_npm_package_rows(&markdown);
+
+    assert!(
+        !markdown_rows.is_empty(),
+        "API_USAGE_MATRIX.md npm package table should have parsed rows"
+    );
+
+    let json_rows: BTreeMap<&str, &str> = matrix
+        .npm_packages
+        .iter()
+        .map(|entry| (entry.module.as_str(), entry.shim_status.as_str()))
+        .collect();
+
+    let mut missing_json_rows = Vec::new();
+    for (&package, markdown_status) in &markdown_rows {
+        let Some(json_status) = json_rows.get(package) else {
+            missing_json_rows.push(package);
+            continue;
+        };
+        assert_eq!(
+            markdown_status, json_status,
+            "{package} Markdown npm status should match api_usage_matrix.json"
+        );
+    }
+    assert!(
+        missing_json_rows.is_empty(),
+        "Markdown npm packages should exist in JSON rows: {missing_json_rows:?}"
+    );
+}
+
+#[test]
 fn test_api_usage_matrix_missing_summary_matches_rows() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
@@ -453,7 +534,7 @@ fn test_api_usage_matrix_markdown_fs_gap_narrative_matches_json() {
         .expect("node:fs entry missing from api_usage_matrix.json");
 
     for api_name in ["createReadStream", "createWriteStream", "readlink"] {
-        let api_status = api_shim_status(fs_module, api_name);
+        let api_status = matrix_api_status(fs_module, api_name);
         assert_eq!(
             api_status,
             Some("real"),
