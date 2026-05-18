@@ -306,8 +306,9 @@ Extensions `require()` Node/npm modules that are shimmed in QuickJS:
 `node:child_process`, `node:events`, `node:buffer`, `node:url`,
 `node:http`, `node:net`, `node:readline`, `node:util`, `node:stream`
 
-**npm stubs**: `glob`, `uuid`, `jsonwebtoken`, `shell-quote`, `chalk`,
-`chokidar`, `jsdom`, `turndown`, `node-pty`, `@opentelemetry/*`,
+**npm/package shims and stubs**: `uuid`, bounded-HMAC `jsonwebtoken`,
+`shell-quote`, `glob`, `chalk`, `chokidar`, `jsdom`, `turndown`,
+`node-pty`, `@opentelemetry/*`,
 `@xterm/*`, `vscode-languageserver-protocol`, `@sinclair/typebox`,
 `@mariozechner/pi-ai`
 

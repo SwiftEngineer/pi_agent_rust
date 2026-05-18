@@ -92,6 +92,8 @@ struct ArtifactChecksum {
 #[derive(Debug, Deserialize)]
 struct ApiUsageMatrix {
     node_modules: Vec<ApiUsageModule>,
+    #[serde(default)]
+    npm_packages: Vec<ApiUsagePackage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +107,12 @@ struct ApiUsageModule {
 #[derive(Debug, Deserialize)]
 struct ApiUsageApi {
     name: String,
+    shim_status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiUsagePackage {
+    module: String,
     shim_status: String,
 }
 
@@ -336,6 +344,26 @@ fn test_api_usage_matrix_fs_shim_contract() {
     assert_eq!(matrix_api_status(fs_promises, "chmod"), Some("partial"));
     assert_eq!(matrix_api_status(fs_promises, "chown"), Some("partial"));
     assert_eq!(matrix_api_status(fs_promises, "utimes"), Some("partial"));
+}
+
+#[test]
+fn test_api_usage_matrix_jsonwebtoken_shim_contract() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
+    let bytes = fs::read(&matrix_path).expect("read api_usage_matrix.json");
+    let matrix: ApiUsageMatrix =
+        serde_json::from_slice(&bytes).expect("parse api_usage_matrix.json");
+
+    let jsonwebtoken = matrix
+        .npm_packages
+        .iter()
+        .find(|entry| entry.module == "jsonwebtoken")
+        .expect("jsonwebtoken entry missing from api_usage_matrix.json");
+
+    assert_eq!(
+        jsonwebtoken.shim_status, "partial",
+        "jsonwebtoken should stay partial: HS256/HS384/HS512 are supported, RSA/ECDSA fail closed"
+    );
 }
 
 #[test]

@@ -558,7 +558,7 @@
     {
       "module": "jsonwebtoken",
       "extensions_using": 1,
-      "shim_status": "stub",
+      "shim_status": "partial",
       "criticality": "P3"
     }
   ],
@@ -613,8 +613,8 @@
     "total_virtual_modules": 62,
     "shim_completeness": {
       "real": 17,
-      "partial": 13,
-      "stub": 20,
+      "partial": 14,
+      "stub": 19,
       "external": 5,
       "error_throw": 2,
       "missing_from_corpus": 8
