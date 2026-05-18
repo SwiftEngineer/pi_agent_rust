@@ -647,6 +647,226 @@ fn diagnostic_codes(report: &pi::swarm_replay::SwarmReplayReport) -> BTreeSet<St
         .collect()
 }
 
+fn metamorphic_semantic_events() -> Vec<SwarmReplayEvent> {
+    vec![
+        replay_event(
+            "mr-bead-in-progress",
+            10,
+            "2026-05-13T18:00:00Z",
+            "bead_lifecycle",
+            "beads_jsonl",
+            json!({
+                "bead_id": "bd-metamorphic",
+                "to_status": "in_progress",
+                "priority": 2,
+                "assignee": "Codex"
+            }),
+        ),
+        replay_event(
+            "mr-validation-gate",
+            20,
+            "2026-05-13T18:01:00Z",
+            "cargo_gate_result",
+            "validation_command_records",
+            json!({
+                "command": "rch exec -- cargo test metamorphic_swarm -- --nocapture",
+                "runner": "rch",
+                "exit_code": 0,
+                "target_dir": "/data/tmp/pi_agent_rust_cargo/codex/target",
+                "tmpdir": "/data/tmp/pi_agent_rust_cargo/codex/tmp"
+            }),
+        ),
+        replay_event(
+            "mr-runpack-recommendation",
+            30,
+            "2026-05-13T18:02:00Z",
+            "runpack_recommendation",
+            "operator_runpack",
+            json!({
+                "action": "continue_bd_zeccr_5",
+                "severity": "normal",
+                "evidence_paths": [
+                    "tests/swarm_replay_ingestor.rs",
+                    "tests/golden_corpus/swarm_replay_trace/normalized_trace.json"
+                ]
+            }),
+        ),
+        replay_event(
+            "mr-operator-handoff",
+            40,
+            "2026-05-13T18:03:00Z",
+            "operator_handoff",
+            "operator_runpack",
+            json!({
+                "handoff_id": "handoff-metamorphic",
+                "summary": "Metamorphic replay state converged",
+                "next_actions": [
+                    "inspect metamorphic comparison log",
+                    "close bd-zeccr.5 after validation"
+                ],
+                "evidence_paths": ["target/swarm_replay_ingestor_tests"]
+            }),
+        ),
+        replay_event(
+            "mr-worktree-final",
+            50,
+            "2026-05-13T18:04:00Z",
+            "worktree_state",
+            "git_refs",
+            json!({
+                "head": "metamorphic-head",
+                "branch": "main",
+                "dirty": false,
+                "changed_paths": ["tests/swarm_replay_ingestor.rs"]
+            }),
+        ),
+        replay_event(
+            "mr-bead-closed",
+            60,
+            "2026-05-13T18:05:00Z",
+            "bead_lifecycle",
+            "beads_jsonl",
+            json!({
+                "bead_id": "bd-metamorphic",
+                "to_status": "closed",
+                "priority": 2,
+                "assignee": "Codex"
+            }),
+        ),
+    ]
+}
+
+fn with_event(mut events: Vec<SwarmReplayEvent>, event: SwarmReplayEvent) -> Vec<SwarmReplayEvent> {
+    events.push(event);
+    events
+}
+
+fn metamorphic_state_projection(report: &pi::swarm_replay::SwarmReplayReport) -> Value {
+    let beads = report
+        .final_state
+        .beads
+        .values()
+        .map(|bead| {
+            json!({
+                "bead_id": bead.bead_id,
+                "status": bead.status,
+                "priority": bead.priority,
+                "assignee": bead.assignee
+            })
+        })
+        .collect::<Vec<_>>();
+    let operator_handoffs = report
+        .final_state
+        .operator_handoffs
+        .values()
+        .map(|handoff| {
+            json!({
+                "handoff_id": handoff.handoff_id,
+                "summary": handoff.summary,
+                "next_actions": handoff.next_actions,
+                "evidence_paths": handoff.evidence_paths
+            })
+        })
+        .collect::<Vec<_>>();
+    let validation_gates = report
+        .final_state
+        .validation_gates
+        .values()
+        .map(|gate| {
+            json!({
+                "command": gate.command,
+                "runner": gate.runner,
+                "exit_code": gate.exit_code,
+                "target_dir": gate.target_dir,
+                "tmpdir": gate.tmpdir
+            })
+        })
+        .collect::<Vec<_>>();
+    let runpack_recommendations = report
+        .final_state
+        .runpack_recommendations
+        .values()
+        .map(|recommendation| {
+            json!({
+                "action": recommendation.action,
+                "severity": recommendation.severity,
+                "evidence_paths": recommendation.evidence_paths
+            })
+        })
+        .collect::<Vec<_>>();
+    let worktree = report.final_state.worktree.as_ref().map(|worktree| {
+        json!({
+            "head": worktree.head,
+            "branch": worktree.branch,
+            "dirty": worktree.dirty,
+            "changed_paths": worktree.changed_paths
+        })
+    });
+    json!({
+        "beads": beads,
+        "operator_handoffs": operator_handoffs,
+        "validation_gates": validation_gates,
+        "runpack_recommendations": runpack_recommendations,
+        "worktree": worktree,
+        "coordination": {
+            "agent_mail_available": report.final_state.coordination.agent_mail_available,
+            "missing_agent_mail_evidence": report.final_state.coordination.missing_agent_mail_evidence,
+            "reservation_conflict_count": report.final_state.coordination.reservation_conflict_count,
+            "last_operator_action": report.final_state.coordination.last_operator_action
+        }
+    })
+}
+
+fn push_metamorphic_comparison(
+    records: &mut Vec<Value>,
+    transform_id: &str,
+    fixture_id: &str,
+    left: &pi::swarm_replay::SwarmReplayReport,
+    right: &pi::swarm_replay::SwarmReplayReport,
+    expected_equivalent: bool,
+) -> bool {
+    let compared_fields = [
+        "beads",
+        "operator_handoffs",
+        "validation_gates",
+        "runpack_recommendations",
+        "worktree",
+        "coordination",
+    ];
+    let left_projection = metamorphic_state_projection(left);
+    let right_projection = metamorphic_state_projection(right);
+    let mismatches = compared_fields
+        .iter()
+        .filter(|field| left_projection.get(*field) != right_projection.get(*field))
+        .map(|field| {
+            json!({
+                "field": field,
+                "left": left_projection.get(*field),
+                "right": right_projection.get(*field)
+            })
+        })
+        .collect::<Vec<_>>();
+    let equivalent = mismatches.is_empty();
+    records.push(json!({
+        "schema": "pi.swarm.metamorphic_replay_comparison.v1",
+        "transform_id": transform_id,
+        "fixture_id": fixture_id,
+        "expected_equivalent": expected_equivalent,
+        "equivalent": equivalent,
+        "compared_state_fields": compared_fields,
+        "mismatch_reason": if mismatches.is_empty() {
+            Value::Null
+        } else {
+            json!(mismatches)
+        },
+        "left_replayed_event_count": left.replayed_event_count,
+        "right_replayed_event_count": right.replayed_event_count,
+        "left_diagnostic_codes": diagnostic_codes(left),
+        "right_diagnostic_codes": diagnostic_codes(right)
+    }));
+    equivalent
+}
+
 fn decision<'a>(
     decisions: &'a [SwarmReplayPolicyDecision],
     policy_id: &str,
@@ -1678,6 +1898,239 @@ fn replay_engine_classifies_agent_mail_outage_without_live_mail() -> TestResult 
     assert!(report.final_state.coordination.missing_agent_mail_evidence);
     assert!(diagnostic_codes(&report).contains("agent_mail_source_unavailable"));
     assert!(report.replay_guards.consumed_trace_only);
+    Ok(())
+}
+
+#[test]
+fn metamorphic_swarm_replay_equivalence_transforms_emit_jsonl() -> TestResult {
+    let root = test_workspace("metamorphic_swarm")?;
+    let mut comparison_records = Vec::new();
+
+    let low_value_original = with_event(
+        with_event(
+            metamorphic_semantic_events(),
+            replay_event(
+                "mr-low-value-progress-a",
+                15,
+                "2026-05-13T18:00:30Z",
+                "doctor_finding",
+                "doctor_swarm_diagnostics",
+                json!({
+                    "finding_id": "progress-a",
+                    "severity": "info",
+                    "surface": "swarm",
+                    "status": "observed"
+                }),
+            ),
+        ),
+        replay_event(
+            "mr-low-value-progress-b",
+            25,
+            "2026-05-13T18:01:30Z",
+            "validation_artifact",
+            "swarm_flight_recorder",
+            json!({
+                "artifact_id": "progress-b",
+                "class": "low_value_progress",
+                "semantic": false
+            }),
+        ),
+    );
+    let mut low_value_coalesced = with_event(
+        metamorphic_semantic_events(),
+        replay_event(
+            "mr-low-value-coalesced",
+            15,
+            "2026-05-13T18:00:30Z",
+            "validation_artifact",
+            "swarm_flight_recorder",
+            json!({
+                "artifact_id": "coalesced-progress",
+                "class": "low_value_progress",
+                "coalesced_event_ids": [
+                    "mr-low-value-progress-a",
+                    "mr-low-value-progress-b"
+                ],
+                "semantic": false
+            }),
+        ),
+    );
+    low_value_coalesced.reverse();
+    let low_value_original_report = replay_swarm_trace(&trace_from_events(low_value_original))?;
+    let low_value_coalesced_report = replay_swarm_trace(&trace_from_events(low_value_coalesced))?;
+    assert!(push_metamorphic_comparison(
+        &mut comparison_records,
+        "low_value_event_reorder_coalesce",
+        "fixture-metamorphic-low-value",
+        &low_value_original_report,
+        &low_value_coalesced_report,
+        true,
+    ));
+
+    let compaction_before = with_event(
+        with_event(
+            metamorphic_semantic_events(),
+            replay_event(
+                "mr-compaction-before-tool",
+                18,
+                "2026-05-13T18:00:45Z",
+                "validation_artifact",
+                "swarm_activity_ledger",
+                json!({
+                    "artifact_id": "compaction-before-tool",
+                    "transform_role": "compaction_boundary",
+                    "compacted_entries": 3
+                }),
+            ),
+        ),
+        replay_event(
+            "mr-compaction-after-handoff",
+            42,
+            "2026-05-13T18:03:30Z",
+            "validation_artifact",
+            "swarm_activity_ledger",
+            json!({
+                "artifact_id": "compaction-after-handoff",
+                "transform_role": "compaction_boundary",
+                "compacted_entries": 5
+            }),
+        ),
+    );
+    let compaction_shifted = with_event(
+        with_event(
+            metamorphic_semantic_events(),
+            replay_event(
+                "mr-compaction-before-bead",
+                8,
+                "2026-05-13T17:59:45Z",
+                "validation_artifact",
+                "swarm_activity_ledger",
+                json!({
+                    "artifact_id": "compaction-before-bead",
+                    "transform_role": "compaction_boundary",
+                    "compacted_entries": 3
+                }),
+            ),
+        ),
+        replay_event(
+            "mr-compaction-before-close",
+            55,
+            "2026-05-13T18:04:30Z",
+            "validation_artifact",
+            "swarm_activity_ledger",
+            json!({
+                "artifact_id": "compaction-before-close",
+                "transform_role": "compaction_boundary",
+                "compacted_entries": 5
+            }),
+        ),
+    );
+    let compaction_before_report = replay_swarm_trace(&trace_from_events(compaction_before))?;
+    let compaction_shifted_report = replay_swarm_trace(&trace_from_events(compaction_shifted))?;
+    assert!(push_metamorphic_comparison(
+        &mut comparison_records,
+        "compaction_boundary_shift",
+        "fixture-metamorphic-compaction",
+        &compaction_before_report,
+        &compaction_shifted_report,
+        true,
+    ));
+
+    let branch_a = with_event(
+        metamorphic_semantic_events(),
+        replay_event(
+            "mr-branch-a-start",
+            5,
+            "2026-05-13T17:59:00Z",
+            "worktree_state",
+            "git_refs",
+            json!({
+                "head": "branch-a-head",
+                "branch": "feature/metamorphic-a",
+                "dirty": true,
+                "changed_paths": ["tests/swarm_replay_ingestor.rs"]
+            }),
+        ),
+    );
+    let branch_b = with_event(
+        with_event(
+            metamorphic_semantic_events(),
+            replay_event(
+                "mr-branch-b-start",
+                5,
+                "2026-05-13T17:59:00Z",
+                "worktree_state",
+                "git_refs",
+                json!({
+                    "head": "branch-b-head",
+                    "branch": "feature/metamorphic-b",
+                    "dirty": true,
+                    "changed_paths": ["tests/swarm_replay_ingestor.rs"]
+                }),
+            ),
+        ),
+        replay_event(
+            "mr-branch-b-summary",
+            35,
+            "2026-05-13T18:02:30Z",
+            "validation_artifact",
+            "swarm_activity_ledger",
+            json!({
+                "artifact_id": "branch-b-summary",
+                "branch": "feature/metamorphic-b",
+                "final_semantic_marker": "handoff-metamorphic"
+            }),
+        ),
+    );
+    let primary_replay_report = replay_swarm_trace(&trace_from_events(branch_a))?;
+    let replay_with_branch_summary_report = replay_swarm_trace(&trace_from_events(branch_b))?;
+    assert!(push_metamorphic_comparison(
+        &mut comparison_records,
+        "branch_replay_identical_final_markers",
+        "fixture-metamorphic-branch-replay",
+        &primary_replay_report,
+        &replay_with_branch_summary_report,
+        true,
+    ));
+
+    let mut non_equivalent_events = metamorphic_semantic_events();
+    let last_event = non_equivalent_events
+        .last_mut()
+        .ok_or("missing final metamorphic event")?;
+    let last_payload = last_event
+        .payload
+        .as_object_mut()
+        .ok_or("missing final metamorphic payload object")?;
+    last_payload.insert("to_status".to_owned(), json!("in_progress"));
+    let non_equivalent_report = replay_swarm_trace(&trace_from_events(non_equivalent_events))?;
+    assert!(!push_metamorphic_comparison(
+        &mut comparison_records,
+        "negative_non_equivalent_final_bead_state",
+        "fixture-metamorphic-negative-control",
+        &primary_replay_report,
+        &non_equivalent_report,
+        false,
+    ));
+
+    write_jsonl_rows(
+        &root,
+        "evidence/metamorphic-comparison.jsonl",
+        &comparison_records,
+    )?;
+    let comparison_log = fs::read_to_string(root.join("evidence/metamorphic-comparison.jsonl"))?;
+    for required_fragment in [
+        "low_value_event_reorder_coalesce",
+        "compaction_boundary_shift",
+        "branch_replay_identical_final_markers",
+        "negative_non_equivalent_final_bead_state",
+        "mismatch_reason",
+        "compared_state_fields",
+    ] {
+        assert!(
+            comparison_log.contains(required_fragment),
+            "missing metamorphic log fragment: {required_fragment}"
+        );
+    }
     Ok(())
 }
 
