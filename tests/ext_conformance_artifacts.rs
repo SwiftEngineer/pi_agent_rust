@@ -94,6 +94,7 @@ struct ApiUsageMatrix {
     node_modules: Vec<ApiUsageModule>,
     #[serde(default)]
     npm_packages: Vec<ApiUsagePackage>,
+    summary: ApiUsageSummary,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +114,19 @@ struct ApiUsageApi {
 #[derive(Debug, Deserialize)]
 struct ApiUsagePackage {
     module: String,
+    extensions_using: u64,
     shim_status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiUsageSummary {
+    shim_completeness: ApiUsageShimCompleteness,
+    missing_modules_used_by_corpus: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiUsageShimCompleteness {
+    missing_from_corpus: usize,
 }
 
 fn matrix_api_status<'a>(module: &'a ApiUsageModule, name: &str) -> Option<&'a str> {
@@ -395,6 +408,32 @@ fn test_api_usage_matrix_npm_virtual_module_contract() {
             "{module} should match the registered PiJS npm virtual module support level"
         );
     }
+}
+
+#[test]
+fn test_api_usage_matrix_missing_summary_matches_rows() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
+    let bytes = fs::read(&matrix_path).expect("read api_usage_matrix.json");
+    let matrix: ApiUsageMatrix =
+        serde_json::from_slice(&bytes).expect("parse api_usage_matrix.json");
+
+    let expected: Vec<String> = matrix
+        .npm_packages
+        .iter()
+        .filter(|entry| entry.shim_status == "missing")
+        .map(|entry| format!("{} ({} ext)", entry.module, entry.extensions_using))
+        .collect();
+
+    assert_eq!(
+        matrix.summary.missing_modules_used_by_corpus, expected,
+        "summary.missing_modules_used_by_corpus should match missing npm package rows"
+    );
+    assert_eq!(
+        matrix.summary.shim_completeness.missing_from_corpus,
+        expected.len(),
+        "summary missing_from_corpus count should match missing npm package rows"
+    );
 }
 
 #[test]
