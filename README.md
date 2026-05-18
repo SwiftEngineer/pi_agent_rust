@@ -2092,6 +2092,19 @@ artifact is `docs/evidence/predictive-operations-closeout-gate.json`. The gate
 is advisory closeout evidence only and does not replace Beads, git, RCH, Agent
 Mail, UBS, CI, claim-integrity gates, child evidence, or source artifacts.
 
+The ninth-wave incident replay and proof-memory closeout gate emits
+`pi.swarm.incident_replay_proof_memory.closeout_gate.v1`. It maps the
+`bd-9yq7i` child Beads to incident corpus, incident replay, validation
+proof-memory, operator work recommendation, operator smoothness SLO, extension
+resource firewall matrix, and no-mock incident replay E2E evidence. It is
+governed by
+`docs/contracts/ninth-wave-incident-replay-proof-memory-closeout-gate-contract.json`;
+the current artifact is
+`docs/evidence/ninth-wave-incident-replay-proof-memory-closeout-gate.json`. The
+gate is advisory closeout evidence only and does not replace Beads, git, RCH,
+Agent Mail, UBS, CI, claim-integrity gates, child evidence, generated target/perf
+outputs, prior-wave evidence, or source artifacts.
+
 The operator-perceived latency trace emits
 `pi.operator.perceived_latency_trace.v1`. It joins deterministic provider,
 RPC, TUI, tool-update, and operator-visible fixture timelines so operators can

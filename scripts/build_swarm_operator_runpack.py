@@ -171,6 +171,12 @@ PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA = (
 PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
     "pi.swarm.predictive_operations.closeout_gate_contract.v1"
 )
+NINTH_WAVE_CLOSEOUT_GATE_SCHEMA = (
+    "pi.swarm.incident_replay_proof_memory.closeout_gate.v1"
+)
+NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
+    "pi.swarm.incident_replay_proof_memory.closeout_gate_contract.v1"
+)
 BACKPRESSURE_BUDGET_CONTRACT_SCHEMA = (
     "pi.swarm.provider_rpc_tui_backpressure_budget_contract.v1"
 )
@@ -237,6 +243,9 @@ EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_GATE_CONTRACT_PATH = Path(
 )
 PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH = Path(
     "docs/contracts/predictive-operations-closeout-gate-contract.json"
+)
+NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH = Path(
+    "docs/contracts/ninth-wave-incident-replay-proof-memory-closeout-gate-contract.json"
 )
 BACKPRESSURE_BUDGET_CONTRACT_PATH = Path(
     "docs/contracts/provider-rpc-tui-backpressure-budget-contract.json"
@@ -1113,6 +1122,52 @@ PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES = (
     "closeout_does_not_replace_child_artifacts",
 )
 PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES = (
+    "py_compile",
+    "runpack_self_test",
+    "json_contracts",
+    "git_diff_check",
+    "staged_ubs",
+    "beads_ledger_reconcile",
+)
+NINTH_WAVE_CLOSEOUT_CHILD_BEADS = (
+    "bd-9yq7i.1",
+    "bd-9yq7i.2",
+    "bd-9yq7i.3",
+    "bd-9yq7i.4",
+    "bd-9yq7i.5",
+    "bd-9yq7i.6",
+    "bd-9yq7i.7",
+)
+NINTH_WAVE_CLOSEOUT_REQUIRED_CHECKS = (
+    "child_beads_closed",
+    "child_artifact_mapping",
+    "remaining_follow_ups_tracked",
+    "incident_corpus_contract",
+    "incident_replay_harness",
+    "validation_proof_memory_index",
+    "operator_work_recommendation",
+    "operator_smoothness_slo",
+    "extension_resource_firewall_matrix",
+    "incident_replay_e2e",
+    "source_boundaries",
+    "pushed_commits",
+    "quality_gates",
+)
+NINTH_WAVE_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES = (
+    "beads_are_source_of_truth",
+    "agent_mail_is_coordination_only",
+    "read_only_gate",
+    "rch_required_for_heavy_cargo",
+    "staged_ubs_required",
+    "beads_ledger_required",
+    "no_file_deletion_authority",
+    "no_release_performance_capacity_or_dropin_claims",
+    "no_live_service_mutation",
+    "no_local_heavy_cargo_fallback",
+    "prior_wave_evidence_not_replaced",
+    "closeout_does_not_replace_child_artifacts",
+)
+NINTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES = (
     "py_compile",
     "runpack_self_test",
     "json_contracts",
@@ -31436,6 +31491,2017 @@ def write_predictive_operations_closeout_gate_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def ninth_wave_closeout_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-9yq7i.1",
+            "commit": "4df2b454eaa81e7fcd96acd61cb27ca807578b1a",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/swarm-incident-corpus-contract.json",
+                "docs/evidence/swarm-incident-corpus.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/swarm-incident-corpus-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-corpus.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The incident corpus is deterministic advisory fixture evidence over "
+                "checked-in sources only; it does not authorize live mutation, file "
+                "deletion, release performance, capacity, benchmark, or drop-in claims."
+            ),
+            "negative_control": {
+                "id": "incident_corpus_required_negative_controls",
+                "evidence": list(SWARM_INCIDENT_CORPUS_REQUIRED_NEGATIVE_CONTROL_IDS),
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.2",
+            "commit": "d601942a85edf008d824339cd278487036f494c5",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/swarm-incident-replay-contract.json",
+                "docs/evidence/swarm-incident-replay.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/swarm-incident-replay-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-replay.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The incident replay harness consumes checked-in corpus evidence and "
+                "emits advisory replay evidence; it never treats replay output as "
+                "Beads, Agent Mail, RCH, git, or source-of-truth authority."
+            ),
+            "negative_control": {
+                "id": "incident_replay_required_negative_controls",
+                "evidence": list(SWARM_INCIDENT_REPLAY_REQUIRED_NEGATIVE_CONTROL_IDS),
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.3",
+            "commit": "c47068c2a1292e4d4bb9137e4bbaf54aaf3726f0",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/validation-proof-memory-index-contract.json",
+                "docs/evidence/validation-proof-memory-index.json",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/validation-proof-memory-index-contract.json",
+                "python3 -m json.tool docs/evidence/validation-proof-memory-index.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The proof-memory index is read-only reusable validation evidence; "
+                "stale, missing, local-fallback, dirty-worktree, command-mismatch, "
+                "path-coverage, and non-authoritative proofs are not reusable."
+            ),
+            "negative_control": {
+                "id": "proof_memory_required_classifications",
+                "evidence": list(VALIDATION_PROOF_MEMORY_REQUIRED_CLASSIFICATIONS),
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.4",
+            "commit": "dc69419b536d767fb0d593b5764acb2bb8094d54",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/operator-work-recommendation-contract.json",
+                "docs/evidence/operator-work-recommendation.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/operator-work-recommendation-contract.json",
+                "python3 -m json.tool docs/evidence/operator-work-recommendation.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Operator work recommendation is read-only advisory planning evidence "
+                "over replay and proof-memory inputs; it cannot mutate Beads, Agent "
+                "Mail, RCH, git, source files, or another agent's work."
+            ),
+            "negative_control": {
+                "id": "operator_work_required_negative_controls",
+                "evidence": list(OPERATOR_WORK_RECOMMENDATION_REQUIRED_NEGATIVE_CONTROL_IDS),
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.5",
+            "commit": "841ab68ece432587d8f742e3d6469595ca2dcd82",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/operator-smoothness-slo-contract.json",
+                "docs/evidence/operator-smoothness-slo.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/operator-smoothness-slo-contract.json",
+                "python3 -m json.tool docs/evidence/operator-smoothness-slo.json",
+                "cargo fmt --check",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The smoothness SLO is deterministic engineering fixture evidence only; "
+                "it is not a benchmark, release performance, capacity, runtime, RCH, "
+                "cargo, git, Beads, or drop-in certification claim."
+            ),
+            "negative_control": {
+                "id": "operator_smoothness_required_negative_controls",
+                "evidence": list(OPERATOR_SMOOTHNESS_SLO_REQUIRED_NEGATIVE_CONTROL_IDS),
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.6",
+            "commit": "570ada12857d73214d16b5cc6a533770d93d0747",
+            "code_paths": ["tests/extensions_stress.rs"],
+            "test_paths": ["tests/extensions_stress.rs"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/extension-resource-firewall-matrix-contract.json",
+                "docs/swarm-operations-runbook.md",
+                "tests/extensions_stress.rs",
+            ],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test --test extensions_stress resource_firewall_matrix -- --nocapture",
+                "cargo fmt --check",
+                "rch exec -- env ... cargo check --all-targets",
+                "rch exec -- env ... cargo clippy --all-targets -- -D warnings",
+                "python3 -m json.tool docs/contracts/extension-resource-firewall-matrix-contract.json",
+                "git diff --check",
+                "git diff --cached --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The extension resource firewall matrix is deterministic stress evidence "
+                "with target/perf output from focused tests; it does not relax extension "
+                "policy, replace hostcall cost attribution, or make release/capacity claims."
+            ),
+            "negative_control": {
+                "id": "extension_resource_firewall_required_negative_controls",
+                "evidence": [
+                    "resource_firewall_missing_counter_negative_control_reason",
+                    "resource_firewall_missing_peer_progress_negative_control_reason",
+                    "resource_firewall_unredacted_payload_negative_control_reason",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.7",
+            "commit": "8f0ff0f04840032117826cd48893a63e6f74165e",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/swarm-incident-replay-e2e-contract.json",
+                "docs/evidence/swarm-incident-replay-e2e.json",
+                "docs/evidence/swarm-incident-replay-e2e-events.jsonl",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 scripts/build_swarm_operator_runpack.py --run-swarm-incident-replay-e2e --out-swarm-incident-replay-e2e-json <tmp> --out-swarm-incident-replay-e2e-events-jsonl <tmp>",
+                "python3 -m json.tool docs/contracts/swarm-incident-replay-e2e-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-replay-e2e.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-replay-e2e-events.jsonl",
+                "cargo fmt --check",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "The incident replay E2E combines real temp Beads/git workspaces with "
+                "fixture-captured degraded Agent Mail and RCH inputs; it does not mutate "
+                "live services, run providers, delete artifacts, or authorize local heavy Cargo."
+            ),
+            "negative_control": {
+                "id": "incident_replay_e2e_required_scenarios",
+                "evidence": list(SWARM_INCIDENT_REPLAY_E2E_REQUIRED_SCENARIOS),
+            },
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def ninth_wave_closeout_source_boundary_checks() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "beads_are_source_of_truth",
+            "status": "pass",
+            "evidence": [".beads/issues.jsonl"],
+            "boundary": "Beads issue state, dependency edges, comments, and close reasons remain the work ledger.",
+        },
+        {
+            "id": "agent_mail_is_coordination_only",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": (
+                "Agent Mail is coordination and reservation evidence only; when the "
+                "mailbox schema is corrupt, Beads assignee/status/comments are the soft lock."
+            ),
+        },
+        {
+            "id": "read_only_gate",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py"],
+            "boundary": (
+                "The ninth-wave closeout gate summarizes existing child evidence and "
+                "does not mutate runtime, scheduler, Agent Mail, RCH, git refs, temp state, or source artifacts."
+            ),
+        },
+        {
+            "id": "rch_required_for_heavy_cargo",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Heavy Cargo validation referenced by child work remains RCH-backed.",
+        },
+        {
+            "id": "staged_ubs_required",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Staged UBS remains mandatory before committing closeout changes.",
+        },
+        {
+            "id": "beads_ledger_required",
+            "status": "pass",
+            "evidence": ["scripts/reconcile_beads_ledger.sh"],
+            "boundary": "Beads ledger reconciliation remains mandatory before closeout commit.",
+        },
+        {
+            "id": "no_file_deletion_authority",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "The closeout gate does not authorize deleting files, directories, temp artifacts, generated evidence, or logs.",
+        },
+        {
+            "id": "no_release_performance_capacity_or_dropin_claims",
+            "status": "pass",
+            "evidence": [
+                "docs/contracts/dropin-certification-contract.json",
+                "docs/evidence/dropin-certification-verdict.json",
+                "README.md",
+            ],
+            "boundary": (
+                "Ninth-wave incident replay and proof-memory evidence is advisory "
+                "operator evidence only; it does not authorize release, benchmark, "
+                "capacity, performance, or strict drop-in claims."
+            ),
+        },
+        {
+            "id": "no_live_service_mutation",
+            "status": "pass",
+            "evidence": [
+                "scripts/build_swarm_operator_runpack.py",
+                "docs/evidence/swarm-incident-replay-e2e.json",
+            ],
+            "boundary": (
+                "The gate must not write Agent Mail, reserve or schedule RCH workers, "
+                "call providers, mutate Beads outside normal closeout, change production services, or touch live networks."
+            ),
+        },
+        {
+            "id": "no_local_heavy_cargo_fallback",
+            "status": "pass",
+            "evidence": ["AGENTS.md", "docs/swarm-operations-runbook.md"],
+            "boundary": "If heavy Cargo validation is needed, local fallback is not authorized by this closeout gate.",
+        },
+        {
+            "id": "prior_wave_evidence_not_replaced",
+            "status": "pass",
+            "evidence": [
+                "docs/evidence/sixth-wave-validation-hardening-closeout-gate.json",
+                "docs/evidence/seventh-wave-runtime-autonomy-closeout-gate.json",
+                "docs/evidence/proof-carrying-swarm-test-fabric-closeout-gate.json",
+                "docs/evidence/predictive-operations-closeout-gate.json",
+            ],
+            "boundary": "This gate may cite prior-wave boundaries but must not rewrite or replace prior-wave contracts or evidence.",
+        },
+        {
+            "id": "closeout_does_not_replace_child_artifacts",
+            "status": "pass",
+            "evidence": [
+                "docs/evidence/swarm-incident-corpus.json",
+                "docs/evidence/swarm-incident-replay.json",
+                "docs/evidence/validation-proof-memory-index.json",
+                "docs/evidence/operator-work-recommendation.json",
+                "docs/evidence/operator-smoothness-slo.json",
+                "tests/extensions_stress.rs",
+                "docs/evidence/swarm-incident-replay-e2e.json",
+            ],
+            "boundary": (
+                "The closeout gate maps child evidence but does not replace child "
+                "contracts, checked-in artifacts, generated target/perf outputs, tests, Beads, pushed commits, RCH, UBS, CI, or review."
+            ),
+        },
+    ]
+
+
+def ninth_wave_closeout_quality_gate_heavy_cargo_posture(
+    quality_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    heavy_markers = (
+        "cargo check",
+        "cargo clippy",
+        "cargo test",
+        "cargo build",
+    )
+    heavy_cargo_gate_ids = [
+        gate_id
+        for gate_id, item in quality_by_id.items()
+        if any(marker in str(item.get("command", "")) for marker in heavy_markers)
+    ]
+    return {
+        "heavy_cargo_required_for_closeout_script": False,
+        "heavy_cargo_gate_ids": heavy_cargo_gate_ids,
+        "local_heavy_cargo_fallback_absent": all(
+            "rch exec --" in str(quality_by_id.get(gate_id, {}).get("command", ""))
+            for gate_id in heavy_cargo_gate_ids
+        ),
+    }
+
+
+def _draft_build_ninth_wave_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = ninth_wave_closeout_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    runpack_path = root / "scripts/build_swarm_operator_runpack.py"
+    extensions_stress_path = root / "tests/extensions_stress.rs"
+    closeout_contract_path = root / NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH
+    corpus_contract_path = root / SWARM_INCIDENT_CORPUS_CONTRACT_PATH
+    corpus_evidence_path = root / "docs/evidence/swarm-incident-corpus.json"
+    replay_contract_path = root / SWARM_INCIDENT_REPLAY_CONTRACT_PATH
+    replay_evidence_path = root / "docs/evidence/swarm-incident-replay.json"
+    proof_memory_contract_path = root / VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_PATH
+    proof_memory_evidence_path = root / "docs/evidence/validation-proof-memory-index.json"
+    operator_work_contract_path = root / OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH
+    operator_work_evidence_path = root / "docs/evidence/operator-work-recommendation.json"
+    smoothness_contract_path = root / OPERATOR_SMOOTHNESS_SLO_CONTRACT_PATH
+    smoothness_evidence_path = root / "docs/evidence/operator-smoothness-slo.json"
+    firewall_contract_path = root / EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_PATH
+    e2e_contract_path = root / SWARM_INCIDENT_REPLAY_E2E_CONTRACT_PATH
+    e2e_evidence_path = root / "docs/evidence/swarm-incident-replay-e2e.json"
+    e2e_events_path = root / "docs/evidence/swarm-incident-replay-e2e-events.jsonl"
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in NINTH_WAVE_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in NINTH_WAVE_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All ninth-wave incident replay and proof-memory child Beads are closed before closeout.",
+            not missing_children,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                }
+            ],
+            issue=f"children not closed: {', '.join(missing_children)}"
+            if missing_children
+            else None,
+        )
+    )
+
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    weak_child_rows = [
+        row["bead_id"]
+        for row in child_artifacts
+        if row.get("status") != "closed"
+        or not row.get("close_reason")
+        or not row.get("validation_commands")
+        or not isinstance(row.get("negative_control"), dict)
+        or not row.get("negative_control", {}).get("evidence")
+        or not row.get("code_paths")
+        or not row.get("test_paths")
+        or not row.get("docs_or_evidence_paths")
+        or not str(row.get("claim_boundary_text") or "").strip()
+    ]
+    checklist.append(
+        gate_check(
+            "child_artifact_mapping",
+            "Every child bead maps to pushed commits, source paths, tests or fixtures, evidence artifacts, validation commands, close reason, negative controls, and claim-boundary text.",
+            artifact_paths_exist and bool(commits_present) and not weak_child_rows,
+            [
+                {
+                    "child_artifact_map": child_artifacts,
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits_present": bool(commits_present),
+                    "weak_child_rows": weak_child_rows,
+                }
+            ],
+            issue=(
+                "missing paths, commits, validation commands, close reasons, negative controls, or claim boundaries"
+                if not artifact_paths_exist or not commits_present or weak_child_rows
+                else None
+            ),
+        )
+    )
+
+    final_gate_issue = issues.get("bd-9yq7i.8") or {}
+    remaining_follow_ups = [
+        {
+            "id": issue_id,
+            "status": issue.get("status"),
+            "title": issue.get("title"),
+        }
+        for issue_id, issue in sorted(issues.items())
+        if issue_id.startswith("bd-9yq7i.")
+        and issue_id != "bd-9yq7i.8"
+        and issue.get("status") not in {"closed", "deferred"}
+    ]
+    checklist.append(
+        gate_check(
+            "remaining_follow_ups_tracked",
+            "No ninth-wave child follow-up remains unclosed or untracked before closeout.",
+            not remaining_follow_ups and final_gate_issue.get("status") in {"in_progress", "closed"},
+            [
+                {
+                    "remaining_follow_ups": remaining_follow_ups,
+                    "final_gate_status": final_gate_issue.get("status"),
+                    "final_gate_assignee": final_gate_issue.get("assignee"),
+                }
+            ],
+            issue="open ninth-wave follow-ups remain" if remaining_follow_ups else None,
+        )
+    )
+
+    checklist.append(
+        gate_check(
+            "incident_corpus_contract",
+            "Incident corpus contract and evidence cover degraded coordination, RCH saturation, stale evidence, duplicate work, dirty worktree, malformed source, and deletion/live-mutation rejection.",
+            all(
+                (
+                    file_contains(corpus_contract_path, SWARM_INCIDENT_CORPUS_CONTRACT_SCHEMA),
+                    file_contains(corpus_contract_path, SWARM_INCIDENT_CORPUS_SCHEMA),
+                    file_contains(corpus_evidence_path, SWARM_INCIDENT_CORPUS_SCHEMA),
+                    file_contains(runpack_path, "build_swarm_incident_corpus_summary"),
+                    all(
+                        file_contains(corpus_evidence_path, incident_id)
+                        for incident_id in SWARM_INCIDENT_CORPUS_REQUIRED_INCIDENT_IDS
+                    ),
+                    all(
+                        file_contains(corpus_evidence_path, control_id)
+                        or file_contains(runpack_path, control_id)
+                        for control_id in SWARM_INCIDENT_CORPUS_REQUIRED_NEGATIVE_CONTROL_IDS
+                    ),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_CORPUS_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-corpus.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "incident_replay_harness",
+            "Incident replay contract and evidence consume the corpus, cover required phases/scenarios, and preserve advisory source-of-truth boundaries.",
+            all(
+                (
+                    file_contains(replay_contract_path, SWARM_INCIDENT_REPLAY_CONTRACT_SCHEMA),
+                    file_contains(replay_contract_path, SWARM_INCIDENT_REPLAY_SCHEMA),
+                    file_contains(replay_evidence_path, SWARM_INCIDENT_REPLAY_SCHEMA),
+                    file_contains(runpack_path, "build_swarm_incident_replay_summary"),
+                    all(
+                        file_contains(replay_evidence_path, phase_id)
+                        for phase_id in SWARM_INCIDENT_REPLAY_REQUIRED_PHASE_IDS
+                    ),
+                    all(
+                        file_contains(replay_evidence_path, scenario_id)
+                        for scenario_id in SWARM_INCIDENT_REPLAY_REQUIRED_SCENARIO_IDS
+                    ),
+                    all(
+                        file_contains(replay_evidence_path, control_id)
+                        or file_contains(runpack_path, control_id)
+                        for control_id in SWARM_INCIDENT_REPLAY_REQUIRED_NEGATIVE_CONTROL_IDS
+                    ),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_REPLAY_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-replay.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "validation_proof_memory_index",
+            "Validation proof-memory index records reusable and non-reusable proof classifications with stale/local-fallback/dirty-worktree/path coverage controls.",
+            all(
+                (
+                    file_contains(proof_memory_contract_path, VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_SCHEMA),
+                    file_contains(proof_memory_contract_path, VALIDATION_PROOF_MEMORY_INDEX_SCHEMA),
+                    file_contains(proof_memory_evidence_path, VALIDATION_PROOF_MEMORY_INDEX_SCHEMA),
+                    file_contains(runpack_path, "build_validation_proof_memory_index"),
+                    all(
+                        file_contains(proof_memory_evidence_path, fixture_id)
+                        for fixture_id in VALIDATION_PROOF_MEMORY_REQUIRED_FIXTURE_IDS
+                    ),
+                    all(
+                        file_contains(proof_memory_evidence_path, classification)
+                        for classification in VALIDATION_PROOF_MEMORY_REQUIRED_CLASSIFICATIONS
+                    ),
+                )
+            ),
+            [
+                {"path": str(VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_PATH)},
+                {"path": "docs/evidence/validation-proof-memory-index.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_work_recommendation",
+            "Operator work recommendation consumes incident replay and proof-memory evidence, emits safe actions, and fails closed on missing/stale/contradictory/unredacted/advisory-authority inputs.",
+            all(
+                (
+                    file_contains(operator_work_contract_path, OPERATOR_WORK_RECOMMENDATION_CONTRACT_SCHEMA),
+                    file_contains(operator_work_contract_path, OPERATOR_WORK_RECOMMENDATION_SCHEMA),
+                    file_contains(operator_work_evidence_path, OPERATOR_WORK_RECOMMENDATION_SCHEMA),
+                    file_contains(runpack_path, "build_operator_work_recommendation"),
+                    all(
+                        file_contains(operator_work_evidence_path, fixture_id)
+                        for fixture_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS
+                    ),
+                    all(
+                        file_contains(operator_work_evidence_path, action_id)
+                        for action_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS
+                    ),
+                    all(
+                        file_contains(operator_work_evidence_path, control_id)
+                        or file_contains(runpack_path, control_id)
+                        for control_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_NEGATIVE_CONTROL_IDS
+                    ),
+                )
+            ),
+            [
+                {"path": str(OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-work-recommendation.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_smoothness_slo",
+            "Operator smoothness SLO covers provider/RPC/TUI/tool/session pressure with deterministic visibility counters and fail-closed negative controls.",
+            all(
+                (
+                    file_contains(smoothness_contract_path, OPERATOR_SMOOTHNESS_SLO_CONTRACT_SCHEMA),
+                    file_contains(smoothness_contract_path, OPERATOR_SMOOTHNESS_SLO_SCHEMA),
+                    file_contains(smoothness_evidence_path, OPERATOR_SMOOTHNESS_SLO_SCHEMA),
+                    file_contains(runpack_path, "build_operator_smoothness_slo_summary"),
+                    all(
+                        file_contains(smoothness_evidence_path, surface_id)
+                        for surface_id in OPERATOR_SMOOTHNESS_SLO_REQUIRED_SURFACE_IDS
+                    ),
+                    all(
+                        file_contains(smoothness_evidence_path, case_id)
+                        for case_id in OPERATOR_SMOOTHNESS_SLO_REQUIRED_CASE_IDS
+                    ),
+                    all(
+                        file_contains(smoothness_evidence_path, control_id)
+                        or file_contains(runpack_path, control_id)
+                        for control_id in OPERATOR_SMOOTHNESS_SLO_REQUIRED_NEGATIVE_CONTROL_IDS
+                    ),
+                )
+            ),
+            [
+                {"path": str(OPERATOR_SMOOTHNESS_SLO_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-smoothness-slo.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "extension_resource_firewall_matrix",
+            "Extension resource firewall matrix records resource budgets, denial modes, peer-progress preservation, payload redaction, and fail-closed controls.",
+            all(
+                (
+                    file_contains(firewall_contract_path, EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_SCHEMA),
+                    file_contains(firewall_contract_path, EXTENSION_RESOURCE_FIREWALL_MATRIX_SCHEMA),
+                    file_contains(extensions_stress_path, "RESOURCE_FIREWALL_MATRIX_SCHEMA"),
+                    file_contains(extensions_stress_path, "resource_firewall_matrix_records_budgets_denials_and_peer_progress"),
+                    file_contains(extensions_stress_path, "resource_firewall_matrix_rejects_missing_counters_peer_progress_and_payload_bodies"),
+                    file_contains(extensions_stress_path, "resource_firewall_missing_counter_negative_control_reason"),
+                    file_contains(extensions_stress_path, "resource_firewall_missing_peer_progress_negative_control_reason"),
+                    file_contains(extensions_stress_path, "resource_firewall_unredacted_payload_negative_control_reason"),
+                    file_contains(extensions_stress_path, "payload_body_redacted"),
+                )
+            ),
+            [
+                {"path": str(EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_PATH)},
+                {"path": "tests/extensions_stress.rs"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "incident_replay_e2e",
+            "Incident replay E2E evidence uses real temp Beads/git workspaces with fixture-captured degraded Agent Mail/RCH inputs and JSONL logging.",
+            all(
+                (
+                    file_contains(e2e_contract_path, SWARM_INCIDENT_REPLAY_E2E_CONTRACT_SCHEMA),
+                    file_contains(e2e_contract_path, SWARM_INCIDENT_REPLAY_E2E_SCHEMA),
+                    file_contains(e2e_contract_path, SWARM_INCIDENT_REPLAY_E2E_EVENT_SCHEMA),
+                    file_contains(e2e_evidence_path, SWARM_INCIDENT_REPLAY_E2E_SCHEMA),
+                    file_contains(e2e_events_path, SWARM_INCIDENT_REPLAY_E2E_EVENT_SCHEMA),
+                    file_contains(runpack_path, "build_swarm_incident_replay_e2e_summary"),
+                    all(
+                        file_contains(e2e_evidence_path, scenario_id)
+                        for scenario_id in SWARM_INCIDENT_REPLAY_E2E_REQUIRED_SCENARIOS
+                    ),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_REPLAY_E2E_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-replay-e2e.json"},
+                {"path": "docs/evidence/swarm-incident-replay-e2e-events.jsonl"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+
+    source_boundaries = ninth_wave_closeout_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = set(NINTH_WAVE_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, staged UBS, ledger reconciliation, no-delete policy, no live mutation, prior waves, and release/drop-in authorities.",
+            not missing_boundaries
+            and file_contains(closeout_contract_path, NINTH_WAVE_CLOSEOUT_GATE_SCHEMA),
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All child implementation commits are pushed to origin/main and mirrored to legacy origin/master before closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in NINTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    heavy_cargo_posture = ninth_wave_closeout_quality_gate_heavy_cargo_posture(quality_by_id)
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed for Python compilation, runpack self-test, JSON validation, git diff cleanliness, staged UBS, and Beads ledger reconciliation.",
+            not missing_quality
+            and heavy_cargo_posture["local_heavy_cargo_fallback_absent"],
+            [
+                {
+                    "required_quality_gates": list(NINTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES),
+                    "provided_quality_gates": quality_gate_results,
+                    **heavy_cargo_posture,
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [item["id"] for item in checklist if item.get("status") != "pass"]
+    parent_issue = issues.get("bd-9yq7i") or {}
+    status = "pass" if not missing_checks else "fail"
+    operator_summary = {
+        "verdict": status,
+        "ready_to_close_parent_after_commit": status == "pass",
+        "covered_child_beads": list(NINTH_WAVE_CLOSEOUT_CHILD_BEADS),
+        "claim_boundary": "advisory ninth-wave incident replay and proof-memory closeout evidence only",
+        "next_action": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+    }
+    summary = {
+        "schema": NINTH_WAVE_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_ninth_wave_incident_replay_proof_memory_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-9yq7i",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-9yq7i.8",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "operator_summary": operator_summary,
+        "required_checks": list(NINTH_WAVE_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": remaining_follow_ups,
+        "known_limitations": [
+            "Ninth-wave incident replay and proof-memory closeout evidence is advisory operator evidence only.",
+            "Child contracts, checked-in evidence, generated target/perf outputs, tests, Beads, pushed commits, RCH, Agent Mail health, staged UBS, and CI remain their own sources of truth.",
+            "Agent Mail was schema-corrupt during closeout; Beads assignment/comments were used as the soft lock and this artifact does not prove reservations were absent.",
+            "This is not release performance evidence, not capacity evidence, not benchmark evidence, and not strict drop-in certification evidence.",
+            "This is not permission to skip RCH, staged UBS, Beads ledger reconciliation, pushed refs, child source artifact inspection, or CI.",
+            "This closeout does not authorize file deletion, production network access, live model calls, live Agent Mail mutation, live RCH worker mutation, runtime mutation, scheduler mutation, or local heavyweight Cargo fallback.",
+            "This closeout references prior-wave boundaries but does not rewrite prior-wave contracts or evidence.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "performance_or_capacity_claim_authorized": False,
+            "benchmark_claim_authorized": False,
+            "closeout_mutates_sources": False,
+            "closeout_mutates_agent_mail_rch_or_runtime": False,
+            "closeout_authorizes_file_deletion": False,
+            "closeout_runs_live_provider_or_network_calls": False,
+            "closeout_rewrites_prior_wave_artifacts": False,
+            "closeout_replaces_child_artifacts": False,
+            "closeout_replaces_source_artifacts": False,
+            "live_agent_mail_or_rch_mutation_authorized": False,
+            "production_network_or_model_calls_authorized": False,
+            "file_deletion_authorized": False,
+            "local_heavy_cargo_fallback_authorized": False,
+            "parent_can_close_before_closeout_commit_is_pushed": False,
+            "allowed_claim": "advisory ninth-wave incident replay and proof-memory closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks),
+        "follow_up_beads": [
+            {
+                "title": f"[NINTH-WAVE-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    _draft_assert_ninth_wave_closeout_gate_contract(summary)
+    return summary
+
+
+def _draft_assert_ninth_wave_closeout_gate_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing ninth-wave closeout gate contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"ninth-wave closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == NINTH_WAVE_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level ninth-wave closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"ninth-wave closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"ninth-wave closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    for row in child_map:
+        assert isinstance(row.get("code_paths"), list) and row.get("code_paths")
+        assert isinstance(row.get("test_paths"), list) and row.get("test_paths")
+        assert isinstance(row.get("docs_or_evidence_paths"), list) and row.get(
+            "docs_or_evidence_paths"
+        )
+        assert isinstance(row.get("validation_commands"), list) and row.get(
+            "validation_commands"
+        )
+        negative_control = row.get("negative_control")
+        assert isinstance(negative_control, dict)
+        assert str(negative_control.get("id") or "").strip()
+        assert isinstance(negative_control.get("evidence"), list) and negative_control.get(
+            "evidence"
+        )
+        assert str(row.get("claim_boundary_text") or "").strip()
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = (
+        set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    )
+    assert not missing_boundaries, (
+        f"ninth-wave closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert provided.issuperset(required_quality)
+        assert summary.get("epic_can_close_after_this_commit") is True
+        assert not summary.get("remaining_follow_ups")
+        operator_summary = summary.get("operator_summary")
+        assert isinstance(operator_summary, dict)
+        assert operator_summary.get("ready_to_close_parent_after_commit") is True
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        for flag in contract.get("required_false_claim_boundary_flags", []):
+            assert claim_boundaries.get(flag) is False, (
+                f"ninth-wave claim boundary must be false: {flag}"
+            )
+
+
+def _draft_write_ninth_wave_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_ninth_wave_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite ninth-wave final gate: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
+def ninth_wave_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-9yq7i.1",
+            "commit": "4df2b454eaa81e7fcd96acd61cb27ca807578b1a",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/swarm-incident-corpus-contract.json",
+                "docs/evidence/swarm-incident-corpus.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/swarm-incident-corpus-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-corpus.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Incident corpus evidence is deterministic advisory operator evidence; "
+                "it does not replace Beads, Agent Mail, RCH, git, source artifacts, "
+                "or destructive-action authority."
+            ),
+            "negative_control": {
+                "id": "incident_corpus_fail_closed_controls",
+                "evidence": [
+                    "missing_source_path_fails_closed",
+                    "unsafe_unredacted_body_fails_closed",
+                    "contradictory_status_fails_closed",
+                    "deletion_or_live_mutation_authorization_fails_closed",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.2",
+            "commit": "d601942a85edf008d824339cd278487036f494c5",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/swarm-incident-replay-contract.json",
+                "docs/evidence/swarm-incident-replay.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/swarm-incident-replay-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-replay.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Incident replay output is advisory fixture evidence over source captures; "
+                "it must not be treated as source-of-truth authority for Beads, Agent Mail, "
+                "RCH, git, or runtime state."
+            ),
+            "negative_control": {
+                "id": "incident_replay_fail_closed_controls",
+                "evidence": [
+                    "out_of_order_events_fail_closed",
+                    "missing_required_source_fails_closed",
+                    "unredacted_sensitive_content_fails_closed",
+                    "advisory_evidence_as_source_of_truth_fails_closed",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.3",
+            "commit": "c47068c2a1292e4d4bb9137e4bbaf54aaf3726f0",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/validation-proof-memory-index-contract.json",
+                "docs/evidence/validation-proof-memory-index.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/validation-proof-memory-index-contract.json",
+                "python3 -m json.tool docs/evidence/validation-proof-memory-index.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Proof-memory evidence indexes validation proof posture only; stale, local, "
+                "dirty, missing, or fingerprint-mismatched proofs must refresh before reuse."
+            ),
+            "negative_control": {
+                "id": "proof_memory_fail_closed_classifications",
+                "evidence": [
+                    "stale_git_head_proof",
+                    "missing_artifact_proof",
+                    "local_fallback_proof",
+                    "dirty_worktree_mismatch_proof",
+                    "command_fingerprint_mismatch_proof",
+                    "path_coverage_mismatch_proof",
+                    "not_authoritative_proof",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.4",
+            "commit": "dc69419b536d767fb0d593b5764acb2bb8094d54",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/operator-work-recommendation-contract.json",
+                "docs/evidence/operator-work-recommendation.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/operator-work-recommendation-contract.json",
+                "python3 -m json.tool docs/evidence/operator-work-recommendation.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Operator work recommendations are read-only advisory queue hints; they do "
+                "not mutate Beads, Agent Mail, RCH, git, or another agent's work."
+            ),
+            "negative_control": {
+                "id": "operator_work_fail_closed_controls",
+                "evidence": [
+                    "missing_source_fails_closed",
+                    "stale_source_fails_closed",
+                    "contradictory_source_fails_closed",
+                    "unredacted_source_fails_closed",
+                    "advisory_evidence_as_authority_fails_closed",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.5",
+            "commit": "841ab68ece432587d8f742e3d6469595ca2dcd82",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/operator-smoothness-slo-contract.json",
+                "docs/evidence/operator-smoothness-slo.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/operator-smoothness-slo-contract.json",
+                "python3 -m json.tool docs/evidence/operator-smoothness-slo.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Operator smoothness SLO evidence is deterministic fixture evidence only; "
+                "it does not authorize release, performance, benchmark, capacity, or drop-in claims."
+            ),
+            "negative_control": {
+                "id": "operator_smoothness_fail_closed_controls",
+                "evidence": [
+                    "delayed_semantic_visibility_fails_closed",
+                    "non_monotonic_timeline_fails_closed",
+                    "runaway_frame_backlog_fails_closed",
+                    "missing_surface_coverage_fails_closed",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.6",
+            "commit": "570ada12857d73214d16b5cc6a533770d93d0747",
+            "code_paths": ["tests/extensions_stress.rs"],
+            "test_paths": ["tests/extensions_stress.rs"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/extension-resource-firewall-matrix-contract.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_bd_9yq7i_6/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_bd_9yq7i_6/tmp cargo test --test extensions_stress resource_firewall_matrix -- --nocapture",
+                "cargo fmt --check",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Extension resource firewall matrix is deterministic stress evidence; "
+                "runtime enforcement, hostcall accounting, Beads, RCH, Agent Mail, UBS, CI, "
+                "and source tests remain authoritative."
+            ),
+            "negative_control": {
+                "id": "resource_firewall_fail_closed_controls",
+                "evidence": [
+                    "missing_resource_counter",
+                    "missing_peer_progress",
+                    "unredacted_payload_body",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-9yq7i.7",
+            "commit": "8f0ff0f04840032117826cd48893a63e6f74165e",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "README.md",
+                "docs/contracts/swarm-incident-replay-e2e-contract.json",
+                "docs/evidence/swarm-incident-replay-e2e-events.jsonl",
+                "docs/evidence/swarm-incident-replay-e2e.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 scripts/build_swarm_operator_runpack.py --run-swarm-incident-replay-e2e --out-swarm-incident-replay-e2e-json docs/evidence/swarm-incident-replay-e2e.json --out-swarm-incident-replay-e2e-events-jsonl docs/evidence/swarm-incident-replay-e2e-events.jsonl",
+                "python3 -m json.tool docs/contracts/swarm-incident-replay-e2e-contract.json",
+                "python3 -m json.tool docs/evidence/swarm-incident-replay-e2e.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Incident replay E2E evidence uses temporary Beads/git workspaces and "
+                "fixture-captured degraded inputs; it does not authorize live mutation, "
+                "local heavyweight Cargo fallback, release, benchmark, capacity, or drop-in claims."
+            ),
+            "negative_control": {
+                "id": "incident_replay_e2e_fail_closed_scenarios",
+                "evidence": [
+                    "agent_mail_corrupt_soft_lock",
+                    "rch_saturated_proof_refresh",
+                    "dirty_worktree_denial",
+                    "stale_proof_memory_refresh",
+                    "extension_resource_firewall_failure",
+                    "smoothness_slo_failure",
+                ],
+            },
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def ninth_wave_source_boundary_checks() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "beads_are_source_of_truth",
+            "status": "pass",
+            "evidence": [".beads/issues.jsonl"],
+            "boundary": "Beads issue state, dependencies, comments, assignee, and close reasons remain the work ledger.",
+        },
+        {
+            "id": "agent_mail_is_coordination_only",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": (
+                "Agent Mail is coordination and reservation evidence only; if the mailbox "
+                "schema is corrupt, Beads assignee/status/comments are the soft lock."
+            ),
+        },
+        {
+            "id": "read_only_gate",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py"],
+            "boundary": (
+                "The ninth-wave closeout gate summarizes checked-in evidence and does not "
+                "mutate Beads, Agent Mail, RCH, git refs, source files, temp state, runtime, "
+                "providers, or schedulers."
+            ),
+        },
+        {
+            "id": "rch_required_for_heavy_cargo",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Any heavyweight Cargo validation referenced by child work remains RCH-backed.",
+        },
+        {
+            "id": "staged_ubs_required",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Staged UBS remains mandatory before committing closeout changes.",
+        },
+        {
+            "id": "beads_ledger_required",
+            "status": "pass",
+            "evidence": ["scripts/reconcile_beads_ledger.sh"],
+            "boundary": "Beads ledger reconciliation remains mandatory before the closeout commit.",
+        },
+        {
+            "id": "no_file_deletion_authority",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "The closeout gate does not authorize deleting files, directories, temp artifacts, or generated evidence.",
+        },
+        {
+            "id": "no_release_performance_capacity_or_dropin_claims",
+            "status": "pass",
+            "evidence": [
+                "docs/contracts/dropin-certification-contract.json",
+                "docs/evidence/dropin-certification-verdict.json",
+                "README.md",
+            ],
+            "boundary": (
+                "Ninth-wave closeout evidence is advisory operator evidence only; it does "
+                "not authorize release, benchmark, performance, capacity, or strict drop-in claims."
+            ),
+        },
+        {
+            "id": "no_live_service_mutation",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py", "docs/swarm-operations-runbook.md"],
+            "boundary": (
+                "The gate must not perform live Agent Mail writes, reserve RCH workers, "
+                "execute providers, mutate runtime state, or touch production services."
+            ),
+        },
+        {
+            "id": "no_local_heavy_cargo_fallback",
+            "status": "pass",
+            "evidence": ["AGENTS.md", "docs/evidence/operator-work-recommendation.json"],
+            "boundary": "RCH saturation evidence must surface or back off; local heavyweight Cargo fallback remains unauthorized.",
+        },
+        {
+            "id": "prior_wave_evidence_not_replaced",
+            "status": "pass",
+            "evidence": [
+                "docs/evidence/sixth-wave-validation-hardening-closeout-gate.json",
+                "docs/evidence/seventh-wave-runtime-autonomy-closeout-gate.json",
+                "docs/evidence/predictive-operations-closeout-gate.json",
+            ],
+            "boundary": "This closeout may reference prior-wave authority boundaries but must not rewrite prior-wave evidence.",
+        },
+        {
+            "id": "closeout_does_not_replace_child_artifacts",
+            "status": "pass",
+            "evidence": ["docs/evidence/ninth-wave-incident-replay-proof-memory-closeout-gate.json"],
+            "boundary": (
+                "The closeout gate summarizes child evidence and does not replace child tests, "
+                "contracts, checked-in artifacts, Beads, pushed commits, RCH, UBS, CI, or review."
+            ),
+        },
+    ]
+
+
+def ninth_wave_quality_gate_heavy_cargo_posture(
+    quality_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    cargo_gate_ids = [
+        gate_id
+        for gate_id, item in quality_by_id.items()
+        if "cargo" in str(item.get("command", ""))
+    ]
+    return {
+        "heavy_cargo_required_for_closeout_script": False,
+        "cargo_gate_ids": cargo_gate_ids,
+        "heavy_cargo_uses_rch": all(
+            "rch exec --" in str(quality_by_id.get(gate_id, {}).get("command", ""))
+            for gate_id in cargo_gate_ids
+        ),
+    }
+
+
+def build_ninth_wave_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = ninth_wave_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    runpack_path = root / "scripts/build_swarm_operator_runpack.py"
+    closeout_contract_path = root / NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH
+    incident_corpus_contract_path = root / SWARM_INCIDENT_CORPUS_CONTRACT_PATH
+    incident_corpus_evidence_path = root / "docs/evidence/swarm-incident-corpus.json"
+    incident_replay_contract_path = root / SWARM_INCIDENT_REPLAY_CONTRACT_PATH
+    incident_replay_evidence_path = root / "docs/evidence/swarm-incident-replay.json"
+    proof_memory_contract_path = root / VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_PATH
+    proof_memory_evidence_path = root / "docs/evidence/validation-proof-memory-index.json"
+    operator_work_contract_path = root / OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH
+    operator_work_evidence_path = root / "docs/evidence/operator-work-recommendation.json"
+    smoothness_contract_path = root / OPERATOR_SMOOTHNESS_SLO_CONTRACT_PATH
+    smoothness_evidence_path = root / "docs/evidence/operator-smoothness-slo.json"
+    resource_firewall_contract_path = root / EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_PATH
+    extensions_stress_path = root / "tests/extensions_stress.rs"
+    incident_replay_e2e_contract_path = root / SWARM_INCIDENT_REPLAY_E2E_CONTRACT_PATH
+    incident_replay_e2e_evidence_path = root / "docs/evidence/swarm-incident-replay-e2e.json"
+    incident_replay_e2e_events_path = root / "docs/evidence/swarm-incident-replay-e2e-events.jsonl"
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in NINTH_WAVE_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in NINTH_WAVE_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All ninth-wave incident replay and proof-memory child Beads are closed before closeout.",
+            not missing_children,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                }
+            ],
+            issue=f"children not closed: {', '.join(missing_children)}"
+            if missing_children
+            else None,
+        )
+    )
+
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    weak_child_rows = [
+        row["bead_id"]
+        for row in child_artifacts
+        if row.get("status") != "closed"
+        or not row.get("close_reason")
+        or not row.get("validation_commands")
+        or not isinstance(row.get("negative_control"), dict)
+        or not row.get("negative_control", {}).get("evidence")
+        or not row.get("code_paths")
+        or not row.get("test_paths")
+        or not row.get("docs_or_evidence_paths")
+        or not str(row.get("claim_boundary_text") or "").strip()
+    ]
+    checklist.append(
+        gate_check(
+            "child_artifact_mapping",
+            "Every ninth-wave child bead maps to pushed commits, source paths, tests or fixtures, evidence artifacts, validation commands, close reason, negative controls, and claim-boundary text.",
+            artifact_paths_exist and bool(commits_present) and not weak_child_rows,
+            [
+                {
+                    "child_artifact_map": child_artifacts,
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits_present": bool(commits_present),
+                    "weak_child_rows": weak_child_rows,
+                }
+            ],
+            issue=(
+                "missing paths, commits, validation commands, close reasons, negative controls, or claim boundaries"
+                if not artifact_paths_exist or not commits_present or weak_child_rows
+                else None
+            ),
+        )
+    )
+
+    final_gate_issue = issues.get("bd-9yq7i.8") or {}
+    remaining_follow_ups = [
+        {
+            "id": issue_id,
+            "status": issue.get("status"),
+            "title": issue.get("title"),
+        }
+        for issue_id, issue in sorted(issues.items())
+        if issue_id.startswith("bd-9yq7i.")
+        and issue_id != "bd-9yq7i.8"
+        and issue.get("status") not in {"closed", "deferred"}
+    ]
+    checklist.append(
+        gate_check(
+            "remaining_follow_ups_tracked",
+            "No ninth-wave child follow-up remains unclosed or untracked before closeout.",
+            not remaining_follow_ups and final_gate_issue.get("status") in {"in_progress", "closed"},
+            [
+                {
+                    "remaining_follow_ups": remaining_follow_ups,
+                    "final_gate_status": final_gate_issue.get("status"),
+                    "final_gate_assignee": final_gate_issue.get("assignee"),
+                }
+            ],
+            issue=(
+                "open ninth-wave follow-ups remain"
+                if remaining_follow_ups
+                else None
+            ),
+        )
+    )
+
+    checklist.append(
+        gate_check(
+            "incident_corpus_contract",
+            "Incident corpus contract and evidence cover source-boundary, required incident, negative-control, and no-live-mutation claims.",
+            all(
+                (
+                    file_contains(incident_corpus_contract_path, SWARM_INCIDENT_CORPUS_CONTRACT_SCHEMA),
+                    file_contains(incident_corpus_evidence_path, SWARM_INCIDENT_CORPUS_SCHEMA),
+                    file_contains(incident_corpus_evidence_path, "incident_corpus_passed"),
+                    file_contains(runpack_path, "build_swarm_incident_corpus_summary"),
+                    file_contains(runpack_path, "missing_source_path_fails_closed"),
+                    file_contains(runpack_path, "unsafe_unredacted_body_fails_closed"),
+                    file_contains(runpack_path, "deletion_or_live_mutation_authorization_fails_closed"),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_CORPUS_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-corpus.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "incident_replay_harness",
+            "Incident replay harness covers ordered phases, required scenarios, source assertions, and fail-closed replay authority boundaries.",
+            all(
+                (
+                    file_contains(incident_replay_contract_path, SWARM_INCIDENT_REPLAY_CONTRACT_SCHEMA),
+                    file_contains(incident_replay_evidence_path, SWARM_INCIDENT_REPLAY_SCHEMA),
+                    file_contains(incident_replay_evidence_path, "replay_passed"),
+                    file_contains(runpack_path, "build_swarm_incident_replay_summary"),
+                    file_contains(runpack_path, "out_of_order_events_fail_closed"),
+                    file_contains(runpack_path, "missing_required_source_fails_closed"),
+                    file_contains(runpack_path, "unredacted_sensitive_content_fails_closed"),
+                    file_contains(runpack_path, "advisory_evidence_as_source_of_truth_fails_closed"),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_REPLAY_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-replay.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "validation_proof_memory_index",
+            "Validation proof-memory index classifies stale, missing, local-fallback, dirty-worktree, fingerprint, coverage, and non-authoritative proof evidence.",
+            all(
+                (
+                    file_contains(proof_memory_contract_path, VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_SCHEMA),
+                    file_contains(proof_memory_evidence_path, VALIDATION_PROOF_MEMORY_INDEX_SCHEMA),
+                    file_contains(proof_memory_evidence_path, "proof_memory_index_ready"),
+                    file_contains(runpack_path, "build_validation_proof_memory_index"),
+                    file_contains(runpack_path, "stale_git_head_proof"),
+                    file_contains(runpack_path, "missing_artifact_proof"),
+                    file_contains(runpack_path, "local_fallback_proof"),
+                    file_contains(runpack_path, "dirty_worktree_mismatch_proof"),
+                    file_contains(runpack_path, "command_fingerprint_mismatch_proof"),
+                    file_contains(runpack_path, "path_coverage_mismatch_proof"),
+                    file_contains(runpack_path, "not_authoritative_proof"),
+                )
+            ),
+            [
+                {"path": str(VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_PATH)},
+                {"path": "docs/evidence/validation-proof-memory-index.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_work_recommendation",
+            "Operator work recommender consumes incident replay and proof-memory evidence, ranks safe actions, and rejects missing, stale, contradictory, unredacted, or authority-escalating inputs.",
+            all(
+                (
+                    file_contains(operator_work_contract_path, OPERATOR_WORK_RECOMMENDATION_CONTRACT_SCHEMA),
+                    file_contains(operator_work_evidence_path, OPERATOR_WORK_RECOMMENDATION_SCHEMA),
+                    file_contains(operator_work_evidence_path, "operator_work_recommendations_ready"),
+                    file_contains(runpack_path, "build_operator_work_recommendation_from_args"),
+                    file_contains(runpack_path, "agent_mail_corrupt_soft_lock"),
+                    file_contains(runpack_path, "rch_saturated"),
+                    file_contains(runpack_path, "stale_proof_refresh"),
+                    file_contains(runpack_path, "dirty_worktree_admission_denial"),
+                    file_contains(runpack_path, "missing_source_fails_closed"),
+                    file_contains(runpack_path, "stale_source_fails_closed"),
+                    file_contains(runpack_path, "unredacted_source_fails_closed"),
+                )
+            ),
+            [
+                {"path": str(OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-work-recommendation.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_smoothness_slo",
+            "Operator smoothness SLO covers semantic visibility, timeline monotonicity, frame backlog, and surface coverage without release-performance claims.",
+            all(
+                (
+                    file_contains(smoothness_contract_path, OPERATOR_SMOOTHNESS_SLO_CONTRACT_SCHEMA),
+                    file_contains(smoothness_evidence_path, OPERATOR_SMOOTHNESS_SLO_SCHEMA),
+                    file_contains(smoothness_evidence_path, "smoothness_slo_passed"),
+                    file_contains(runpack_path, "build_operator_smoothness_slo_summary"),
+                    file_contains(runpack_path, "delayed_semantic_visibility_fails_closed"),
+                    file_contains(runpack_path, "non_monotonic_timeline_fails_closed"),
+                    file_contains(runpack_path, "runaway_frame_backlog_fails_closed"),
+                    file_contains(runpack_path, "missing_surface_coverage_fails_closed"),
+                    file_contains(smoothness_evidence_path, "release_performance_claim_authorized"),
+                )
+            ),
+            [
+                {"path": str(OPERATOR_SMOOTHNESS_SLO_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-smoothness-slo.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "extension_resource_firewall_matrix",
+            "Extension resource firewall matrix links hostcall cost attribution, budgets, denials, peer progress, payload redaction, and fail-closed resource controls.",
+            all(
+                (
+                    file_contains(resource_firewall_contract_path, EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_SCHEMA),
+                    file_contains(resource_firewall_contract_path, EXTENSION_RESOURCE_FIREWALL_MATRIX_SCHEMA),
+                    file_contains(extensions_stress_path, "build_resource_firewall_matrix"),
+                    file_contains(extensions_stress_path, "resource_firewall_matrix_records_budgets_denials_and_peer_progress"),
+                    file_contains(extensions_stress_path, "resource_firewall_matrix_rejects_missing_counters_peer_progress_and_payload_bodies"),
+                    file_contains(extensions_stress_path, "missing_resource_counter"),
+                    file_contains(extensions_stress_path, "missing_peer_progress"),
+                    file_contains(extensions_stress_path, "unredacted_payload_body"),
+                    file_contains(extensions_stress_path, "payload_body_redacted"),
+                )
+            ),
+            [
+                {"path": str(EXTENSION_RESOURCE_FIREWALL_MATRIX_CONTRACT_PATH)},
+                {"path": "tests/extensions_stress.rs"},
+            ],
+        )
+    )
+
+    e2e_scenario_ids: set[str] = set()
+    e2e_status = None
+    e2e_event_line_count = 0
+    e2e_json_valid = False
+    try:
+        e2e_summary = json.loads(
+            incident_replay_e2e_evidence_path.read_text(encoding="utf-8")
+        )
+        e2e_json_valid = True
+        e2e_status = e2e_summary.get("status")
+        e2e_scenarios = e2e_summary.get("scenarios")
+        if isinstance(e2e_scenarios, dict):
+            e2e_scenario_ids = set(e2e_scenarios)
+        elif isinstance(e2e_scenarios, list):
+            e2e_scenario_ids = {
+                row.get("id") or row.get("scenario_id")
+                for row in e2e_scenarios
+                if isinstance(row, dict)
+            }
+    except (FileNotFoundError, json.JSONDecodeError):
+        e2e_summary = {}
+    try:
+        e2e_event_line_count = sum(
+            1
+            for line in incident_replay_e2e_events_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        )
+    except FileNotFoundError:
+        e2e_event_line_count = 0
+    missing_e2e_scenarios = (
+        set(SWARM_INCIDENT_REPLAY_E2E_REQUIRED_SCENARIOS) - e2e_scenario_ids
+    )
+    checklist.append(
+        gate_check(
+            "incident_replay_e2e",
+            "Incident replay E2E evidence covers healthy replay, Agent Mail corruption, RCH saturation, duplicate-work risk, dirty-worktree denial, stale proof refresh, extension firewall failure, and smoothness SLO failure.",
+            all(
+                (
+                    e2e_json_valid,
+                    e2e_status == "pass",
+                    not missing_e2e_scenarios,
+                    e2e_event_line_count == len(SWARM_INCIDENT_REPLAY_E2E_REQUIRED_SCENARIOS),
+                    file_contains(incident_replay_e2e_contract_path, SWARM_INCIDENT_REPLAY_E2E_CONTRACT_SCHEMA),
+                    file_contains(incident_replay_e2e_evidence_path, SWARM_INCIDENT_REPLAY_E2E_SCHEMA),
+                    file_contains(incident_replay_e2e_events_path, SWARM_INCIDENT_REPLAY_E2E_EVENT_SCHEMA),
+                    file_contains(runpack_path, "build_swarm_incident_replay_e2e_summary"),
+                    file_contains(runpack_path, "agent_mail_corrupt_soft_lock"),
+                    file_contains(runpack_path, "rch_saturated_proof_refresh"),
+                    file_contains(runpack_path, "dirty_worktree_denial"),
+                    file_contains(runpack_path, "stale_proof_memory_refresh"),
+                    file_contains(runpack_path, "extension_resource_firewall_failure"),
+                    file_contains(runpack_path, "smoothness_slo_failure"),
+                )
+            ),
+            [
+                {"path": str(SWARM_INCIDENT_REPLAY_E2E_CONTRACT_PATH)},
+                {"path": "docs/evidence/swarm-incident-replay-e2e.json"},
+                {
+                    "path": "docs/evidence/swarm-incident-replay-e2e-events.jsonl",
+                    "event_line_count": e2e_event_line_count,
+                    "missing_scenarios": sorted(missing_e2e_scenarios),
+                },
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+            issue=(
+                "missing incident replay E2E scenarios: "
+                + ", ".join(sorted(missing_e2e_scenarios))
+                if missing_e2e_scenarios
+                else None
+            ),
+        )
+    )
+
+    source_boundaries = ninth_wave_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = (
+        set(NINTH_WAVE_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    )
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, staged UBS, ledger reconciliation, no-delete policy, no live service mutation, no local heavyweight fallback, prior-wave evidence, and claim authorities.",
+            not missing_boundaries
+            and file_contains(closeout_contract_path, NINTH_WAVE_CLOSEOUT_GATE_SCHEMA),
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All child implementation commits are pushed to origin/main and mirrored to legacy origin/master before closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in NINTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed for Python compilation, runpack self-test, JSON validation, git diff cleanliness, staged UBS, and Beads ledger reconciliation.",
+            not missing_quality
+            and ninth_wave_quality_gate_heavy_cargo_posture(quality_by_id)[
+                "heavy_cargo_uses_rch"
+            ],
+            [
+                {
+                    "required_quality_gates": list(
+                        NINTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES
+                    ),
+                    "provided_quality_gates": quality_gate_results,
+                    **ninth_wave_quality_gate_heavy_cargo_posture(quality_by_id),
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [item["id"] for item in checklist if item.get("status") != "pass"]
+    parent_issue = issues.get("bd-9yq7i") or {}
+    status = "pass" if not missing_checks else "fail"
+    operator_summary = {
+        "verdict": status,
+        "ready_to_close_parent_after_commit": status == "pass",
+        "covered_child_beads": list(NINTH_WAVE_CLOSEOUT_CHILD_BEADS),
+        "claim_boundary": "advisory ninth-wave incident replay and proof-memory closeout evidence only",
+        "next_action": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+    }
+    summary = {
+        "schema": NINTH_WAVE_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_ninth_wave_incident_replay_proof_memory_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-9yq7i",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-9yq7i.8",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "operator_summary": operator_summary,
+        "required_checks": list(NINTH_WAVE_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": remaining_follow_ups,
+        "known_limitations": [
+            "Ninth-wave closeout evidence is advisory operator evidence only.",
+            "Child tests, checked-in evidence, Beads, pushed commits, RCH, Agent Mail health, staged UBS, and CI remain their own sources of truth.",
+            "Agent Mail may be schema-corrupt during closeout; Beads assignment/comments remain the soft lock and this artifact does not prove reservations were absent.",
+            "This is not release performance evidence, capacity evidence, benchmark evidence, strict drop-in certification evidence, or live-swarm safety proof.",
+            "This is not permission to skip RCH for heavy Cargo, staged UBS, Beads ledger reconciliation, pushed refs, child source artifact inspection, or CI.",
+            "This closeout does not authorize file deletion, production network access, live model calls, live Agent Mail mutation, live RCH worker mutation, runtime mutation, scheduler mutation, or local heavyweight Cargo fallback.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "performance_or_capacity_claim_authorized": False,
+            "benchmark_claim_authorized": False,
+            "closeout_mutates_sources": False,
+            "closeout_mutates_agent_mail_rch_or_runtime": False,
+            "closeout_authorizes_file_deletion": False,
+            "closeout_runs_live_provider_or_network_calls": False,
+            "closeout_rewrites_prior_wave_artifacts": False,
+            "closeout_replaces_child_artifacts": False,
+            "closeout_replaces_source_artifacts": False,
+            "live_agent_mail_or_rch_mutation_authorized": False,
+            "local_heavy_cargo_fallback_authorized": False,
+            "production_network_or_model_calls_authorized": False,
+            "file_deletion_authorized": False,
+            "parent_can_close_before_closeout_commit_is_pushed": False,
+            "allowed_claim": "advisory ninth-wave incident replay and proof-memory closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks),
+        "follow_up_beads": [
+            {
+                "title": f"[NINTH-WAVE-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    assert_ninth_wave_closeout_gate_contract(summary)
+    return summary
+
+
+def assert_ninth_wave_closeout_gate_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing ninth-wave closeout gate contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"ninth-wave closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == NINTH_WAVE_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == NINTH_WAVE_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level ninth-wave closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"ninth-wave closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"ninth-wave closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    for row in child_map:
+        assert isinstance(row.get("code_paths"), list) and row.get("code_paths")
+        assert isinstance(row.get("test_paths"), list) and row.get("test_paths")
+        assert isinstance(row.get("docs_or_evidence_paths"), list) and row.get(
+            "docs_or_evidence_paths"
+        )
+        assert isinstance(row.get("validation_commands"), list) and row.get(
+            "validation_commands"
+        )
+        negative_control = row.get("negative_control")
+        assert isinstance(negative_control, dict)
+        assert str(negative_control.get("id") or "").strip()
+        assert isinstance(negative_control.get("evidence"), list) and negative_control.get(
+            "evidence"
+        )
+        assert str(row.get("claim_boundary_text") or "").strip()
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = (
+        set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    )
+    assert not missing_boundaries, (
+        f"ninth-wave closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    claim_boundaries = summary.get("claim_boundaries")
+    assert isinstance(claim_boundaries, dict)
+    for flag in contract.get("required_false_claim_boundary_flags", []):
+        assert claim_boundaries.get(flag) is False, (
+            f"ninth-wave closeout claim-boundary flag must be false: {flag}"
+        )
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert provided.issuperset(required_quality)
+        assert summary.get("epic_can_close_after_this_commit") is True
+        assert not summary.get("remaining_follow_ups")
+        operator_summary = summary.get("operator_summary")
+        assert isinstance(operator_summary, dict)
+        assert operator_summary.get("ready_to_close_parent_after_commit") is True
+        assert claim_boundaries.get("strict_dropin_or_release_claim_authorized") is False
+        assert claim_boundaries.get("performance_or_capacity_claim_authorized") is False
+        assert claim_boundaries.get("benchmark_claim_authorized") is False
+        assert claim_boundaries.get("closeout_mutates_sources") is False
+        assert claim_boundaries.get("closeout_mutates_agent_mail_rch_or_runtime") is False
+        assert claim_boundaries.get("closeout_authorizes_file_deletion") is False
+        assert claim_boundaries.get("closeout_runs_live_provider_or_network_calls") is False
+        assert claim_boundaries.get("closeout_rewrites_prior_wave_artifacts") is False
+        assert claim_boundaries.get("closeout_replaces_child_artifacts") is False
+        assert claim_boundaries.get("local_heavy_cargo_fallback_authorized") is False
+
+
+def write_ninth_wave_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_ninth_wave_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(f"refusing to overwrite ninth-wave final gate: {output_path}")
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def run_self_test() -> int:
     workspace = Path(tempfile.mkdtemp(prefix="pi_swarm_runpack_"))
     generated_at = "2026-05-09T09:00:00+00:00"
@@ -36161,6 +38227,138 @@ def run_self_test() -> int:
         )
         assert "quality_gates" in failing_predictive_ops_gate["missing_checks"]
         assert failing_predictive_ops_gate["follow_up_required"] is True
+        ninth_wave_gate_issues = [
+            {
+                "id": "bd-9yq7i",
+                "title": "Ninth-wave swarm incident replay and proof-memory roadmap",
+                "status": "deferred",
+            },
+            {
+                "id": "bd-9yq7i.8",
+                "title": "Add ninth-wave incident replay and proof-memory closeout gate",
+                "status": "in_progress",
+                "assignee": "Codex",
+            },
+        ]
+        ninth_wave_gate_issues.extend(
+            {
+                "id": issue_id,
+                "status": "closed",
+                "close_reason": f"{issue_id} self-test evidence closed",
+            }
+            for issue_id in NINTH_WAVE_CLOSEOUT_CHILD_BEADS
+        )
+        ninth_wave_gate_issues_path = (
+            workspace / "ninth-wave-incident-replay-proof-memory-final-gate-issues.jsonl"
+        )
+        ninth_wave_gate_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in ninth_wave_gate_issues) + "\n",
+            encoding="utf-8",
+        )
+        ninth_wave_final_gate_quality = [
+            {
+                "id": "py_compile",
+                "status": "pass",
+                "command": "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+            },
+            {
+                "id": "runpack_self_test",
+                "status": "pass",
+                "command": "python3 scripts/build_swarm_operator_runpack.py --self-test",
+            },
+            {
+                "id": "json_contracts",
+                "status": "pass",
+                "command": (
+                    "python3 -m json.tool "
+                    "docs/contracts/ninth-wave-incident-replay-proof-memory-closeout-gate-contract.json "
+                    ">/dev/null && python3 -m json.tool "
+                    "docs/evidence/ninth-wave-incident-replay-proof-memory-closeout-gate.json >/dev/null"
+                ),
+            },
+            {
+                "id": "git_diff_check",
+                "status": "pass",
+                "command": "git diff --check",
+            },
+            {
+                "id": "staged_ubs",
+                "status": "pass",
+                "command": "timeout 60s ubs --staged --only=rust .",
+            },
+            {
+                "id": "beads_ledger_reconcile",
+                "status": "pass",
+                "command": "./scripts/reconcile_beads_ledger.sh",
+            },
+        ]
+        ninth_wave_final_gate = build_ninth_wave_closeout_gate_summary(
+            generated_at=generated_at,
+            quality_gate_results=ninth_wave_final_gate_quality,
+            issue_export_path=ninth_wave_gate_issues_path,
+            git_refs={
+                "head": "ninthwavefinalgatefixture",
+                "origin_main": "ninthwavefinalgatefixture",
+                "origin_master": "ninthwavefinalgatefixture",
+            },
+            commit_check_override=True,
+        )
+        assert ninth_wave_final_gate["schema"] == NINTH_WAVE_CLOSEOUT_GATE_SCHEMA
+        assert ninth_wave_final_gate["status"] == "pass"
+        assert (
+            ninth_wave_final_gate["decision"]
+            == "close_final_gate_and_parent_epic"
+        )
+        assert ninth_wave_final_gate["follow_up_required"] is False
+        assert not ninth_wave_final_gate["follow_up_beads"]
+        assert ninth_wave_final_gate["remaining_follow_ups"] == []
+        assert ninth_wave_final_gate["child_artifact_map"]
+        degraded_ninth_wave_issues = [
+            {**issue}
+            for issue in ninth_wave_gate_issues
+        ]
+        for index, issue in enumerate(degraded_ninth_wave_issues):
+            if issue.get("id") == "bd-9yq7i.7":
+                degraded_ninth_wave_issues[index] = {
+                    **issue,
+                    "status": "open",
+                    "close_reason": None,
+                }
+                break
+        degraded_ninth_wave_issues.append(
+            {
+                "id": "bd-9yq7i.99",
+                "status": "open",
+                "title": "Untracked ninth-wave follow-up",
+            }
+        )
+        degraded_ninth_wave_issues_path = (
+            workspace / "ninth-wave-open-child.jsonl"
+        )
+        degraded_ninth_wave_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in degraded_ninth_wave_issues)
+            + "\n",
+            encoding="utf-8",
+        )
+        failing_ninth_wave_gate = build_ninth_wave_closeout_gate_summary(
+            generated_at=generated_at,
+            quality_gate_results=ninth_wave_final_gate_quality[:-1],
+            issue_export_path=degraded_ninth_wave_issues_path,
+            git_refs={
+                "head": "ninthwavefinalgatefixture",
+                "origin_main": "ninthwavefinalgatefixture",
+                "origin_master": "ninthwavefinalgatefixture",
+            },
+            commit_check_override=True,
+        )
+        assert failing_ninth_wave_gate["status"] == "fail"
+        assert "child_beads_closed" in failing_ninth_wave_gate["missing_checks"]
+        assert (
+            "remaining_follow_ups_tracked"
+            in failing_ninth_wave_gate["missing_checks"]
+        )
+        assert "quality_gates" in failing_ninth_wave_gate["missing_checks"]
+        assert failing_ninth_wave_gate["follow_up_required"] is True
         backpressure_budget_contract = build_backpressure_budget_contract_summary(
             generated_at=generated_at,
         )
@@ -36979,6 +39177,21 @@ def parse_args() -> argparse.Namespace:
         help="print the final predictive operations closeout gate JSON",
     )
     parser.add_argument(
+        "--run-ninth-wave-final-gate",
+        action="store_true",
+        help="build the final prompt-to-artifact ninth-wave incident replay and proof-memory closeout gate",
+    )
+    parser.add_argument(
+        "--out-ninth-wave-final-gate-json",
+        type=Path,
+        help="write pi.swarm.incident_replay_proof_memory.closeout_gate.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-ninth-wave-final-gate",
+        action="store_true",
+        help="print the final ninth-wave incident replay and proof-memory closeout gate JSON",
+    )
+    parser.add_argument(
         "--run-backpressure-budget-contract",
         action="store_true",
         help="build the read-only provider/RPC/TUI backpressure budget contract",
@@ -37287,6 +39500,10 @@ def main() -> int:
         args.out_predictive_ops_final_gate_json
         or args.print_predictive_ops_final_gate
     )
+    ninth_wave_final_gate_options_used = (
+        args.out_ninth_wave_final_gate_json
+        or args.print_ninth_wave_final_gate
+    )
     backpressure_budget_contract_options_used = (
         args.out_backpressure_budget_contract_json
         or args.print_backpressure_budget_contract
@@ -37337,6 +39554,7 @@ def main() -> int:
         args.run_seventh_wave_final_gate,
         args.run_test_fabric_final_gate,
         args.run_predictive_ops_final_gate,
+        args.run_ninth_wave_final_gate,
     ]
     if sum(1 for used in final_gate_modes if used) > 1:
         print("ERROR: run only one final-gate mode at a time", file=sys.stderr)
@@ -37534,6 +39752,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if ninth_wave_final_gate_options_used and not args.run_ninth_wave_final_gate:
+        print(
+            "ERROR: ninth-wave final-gate options require --run-ninth-wave-final-gate",
+            file=sys.stderr,
+        )
+        return 2
     if (
         backpressure_budget_contract_options_used
         and not args.run_backpressure_budget_contract
@@ -37614,6 +39838,7 @@ def main() -> int:
         or args.run_seventh_wave_final_gate
         or args.run_test_fabric_final_gate
         or args.run_predictive_ops_final_gate
+        or args.run_ninth_wave_final_gate
     ):
         print("ERROR: --quality-gate-result requires a final-gate run mode", file=sys.stderr)
         return 2
@@ -37786,6 +40011,18 @@ def main() -> int:
             if (
                 args.print_predictive_ops_final_gate
                 or args.out_predictive_ops_final_gate_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
+        if args.run_ninth_wave_final_gate:
+            summary = build_ninth_wave_closeout_gate_summary(
+                generated_at=args.generated_at or utc_now_iso(),
+                quality_gate_results=parse_quality_gate_results(args.quality_gate_results),
+            )
+            write_ninth_wave_closeout_gate_output(args, summary)
+            if (
+                args.print_ninth_wave_final_gate
+                or args.out_ninth_wave_final_gate_json is None
             ):
                 print(json_dumps(summary, pretty=True))
             return 0
