@@ -137,6 +137,12 @@ EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_GATE_SCHEMA = (
 EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
     "pi.swarm.proof_carrying_test_fabric.closeout_gate_contract.v1"
 )
+PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA = (
+    "pi.swarm.predictive_operations.closeout_gate.v1"
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
+    "pi.swarm.predictive_operations.closeout_gate_contract.v1"
+)
 BACKPRESSURE_BUDGET_CONTRACT_SCHEMA = (
     "pi.swarm.provider_rpc_tui_backpressure_budget_contract.v1"
 )
@@ -192,6 +198,9 @@ SEVENTH_WAVE_RUNTIME_CLOSEOUT_GATE_CONTRACT_PATH = Path(
 )
 EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_GATE_CONTRACT_PATH = Path(
     "docs/contracts/proof-carrying-swarm-test-fabric-closeout-gate-contract.json"
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH = Path(
+    "docs/contracts/predictive-operations-closeout-gate-contract.json"
 )
 BACKPRESSURE_BUDGET_CONTRACT_PATH = Path(
     "docs/contracts/provider-rpc-tui-backpressure-budget-contract.json"
@@ -854,6 +863,49 @@ EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_REQUIRED_QUALITY_GATES = (
     "cargo_fmt",
     "cargo_check_all_targets_rch",
     "cargo_clippy_all_targets_rch",
+    "git_diff_check",
+    "staged_ubs",
+    "beads_ledger_reconcile",
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS = (
+    "bd-63x3v.11.1",
+    "bd-63x3v.11.2",
+    "bd-63x3v.11.3",
+    "bd-63x3v.11.4",
+    "bd-63x3v.11.5",
+    "bd-63x3v.11.6",
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_CHECKS = (
+    "child_beads_closed",
+    "child_artifact_mapping",
+    "remaining_follow_ups_tracked",
+    "predictive_telemetry_ledger",
+    "validation_scheduler_plan",
+    "semantic_compaction_quality",
+    "hostcall_cost_attribution_ledger",
+    "operator_perceived_latency_trace",
+    "redundant_agent_work_detector",
+    "source_boundaries",
+    "pushed_commits",
+    "quality_gates",
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES = (
+    "beads_are_source_of_truth",
+    "agent_mail_is_coordination_only",
+    "read_only_gate",
+    "rch_required_for_heavy_cargo",
+    "staged_ubs_required",
+    "beads_ledger_required",
+    "no_file_deletion_authority",
+    "no_release_performance_capacity_or_dropin_claims",
+    "no_mail_rch_or_runtime_mutation",
+    "no_sixth_or_seventh_wave_rewrite",
+    "closeout_does_not_replace_child_artifacts",
+)
+PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES = (
+    "py_compile",
+    "runpack_self_test",
+    "json_contracts",
     "git_diff_check",
     "staged_ubs",
     "beads_ledger_reconcile",
@@ -21159,6 +21211,1656 @@ def write_eighth_wave_test_fabric_closeout_gate_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def _draft_predictive_operations_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-63x3v.11.1",
+            "commit": "19021b2c82f9b7fc89778ba9f581576d0bb92092",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/predictive-swarm-telemetry-ledger-contract.json",
+                "docs/evidence/predictive-swarm-telemetry-ledger.json",
+                "README.md",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/predictive-swarm-telemetry-ledger-contract.json",
+                "python3 -m json.tool docs/evidence/predictive-swarm-telemetry-ledger.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Predictive telemetry is read-only advisory fusion over existing "
+                "signals and never mutates scheduler, Agent Mail, RCH, Beads, git, "
+                "or release/capacity claims."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.11.2",
+            "commit": "9bc9420c67e8569627566a5e5f4f0aaa4960f8d0",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/validation-scheduler-plan-contract.json",
+                "docs/evidence/validation-scheduler-plan.json",
+                "README.md",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/validation-scheduler-plan-contract.json",
+                "python3 -m json.tool docs/evidence/validation-scheduler-plan.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Validation scheduler output preserves exact RCH-backed command "
+                "strings but does not execute cargo, reserve workers, mutate Agent "
+                "Mail or Beads, delete temp artifacts, or allow local heavy-Cargo fallback."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.11.3",
+            "commit": "57455f9f712688553fe4fa30b3acecd307999de1",
+            "code_paths": ["src/compaction.rs"],
+            "test_paths": ["src/compaction.rs", "tests/compaction.rs"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/semantic-compaction-quality-contract.json",
+                "docs/evidence/semantic-compaction-quality.json",
+            ],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_semantic/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_semantic/tmp cargo test semantic_compaction_quality -- --nocapture",
+                "cargo fmt --check",
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo check --all-targets",
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo clippy --all-targets -- -D warnings",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Semantic compaction quality evidence uses deterministic markers "
+                "and negative controls; it does not use live model judging or "
+                "replace replay acceleration evidence."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.11.4",
+            "commit": "c802fb2adfb73904559b7c1dd0af257aa5e601c3",
+            "code_paths": ["tests/extensions_stress.rs"],
+            "test_paths": ["tests/extensions_stress.rs"],
+            "docs_or_evidence_paths": ["tests/extensions_stress.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/tmp cargo test --test extensions_stress hostcall_cost_attribution -- --nocapture",
+                "cargo fmt --check",
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/tmp cargo check --all-targets",
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/tmp cargo clippy --all-targets -- -D warnings",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Hostcall cost-attribution evidence records deterministic abuse "
+                "replays and target/perf output without relaxing extension policy, "
+                "privacy redaction, S3-FIFO, or BRAVO boundaries."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.11.5",
+            "commit": "18ac30178bfa7859bcc9c73530959b758c380758",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/operator-perceived-latency-trace-contract.json",
+                "docs/evidence/operator-perceived-latency-trace.json",
+                "README.md",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/operator-perceived-latency-trace-contract.json",
+                "python3 -m json.tool docs/evidence/operator-perceived-latency-trace.json",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Operator-perceived latency traces are fixture-backed advisory "
+                "visibility evidence and do not authorize benchmark, capacity, "
+                "release-performance, strict drop-in, or backpressure replacement claims."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.11.6",
+            "commit": "2185da6c1fa3537b7205cb3cfb086a819098e698",
+            "code_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "test_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "docs_or_evidence_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "validation_commands": [
+                "python3 -m py_compile scripts/report_swarm_claim_readiness.py",
+                "python3 scripts/report_swarm_claim_readiness.py --self-test",
+                "python3 scripts/report_swarm_claim_readiness.py --json | jq '.redundant_agent_work.schema'",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Redundant-agent-work detection is report-only advisory evidence; "
+                "it never auto-reassigns, reopens, closes, reverts, deletes, or "
+                "mutates Beads, Agent Mail, or git state."
+            ),
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def _draft_predictive_operations_source_boundary_checks() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "beads_are_source_of_truth",
+            "status": "pass",
+            "evidence": [".beads/issues.jsonl"],
+            "boundary": (
+                "Beads issue state, dependencies, comments, close reasons, and "
+                "the final parent-close decision remain the work ledger."
+            ),
+        },
+        {
+            "id": "agent_mail_is_coordination_only",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": (
+                "Agent Mail coordinates ownership and reservations; when schema-corrupt, "
+                "Beads assignee/status/comment state is the soft lock and this gate records "
+                "that limitation instead of treating Mail as source of truth."
+            ),
+        },
+        {
+            "id": "read_only_gate",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py"],
+            "boundary": (
+                "The predictive-operations closeout gate summarizes existing child "
+                "evidence and does not mutate runtime, coordination, RCH, temp, or source state."
+            ),
+        },
+        {
+            "id": "rch_required_for_heavy_cargo",
+            "status": "pass",
+            "evidence": ["AGENTS.md", "docs/evidence/validation-scheduler-plan.json"],
+            "boundary": (
+                "Heavy Cargo validation remains RCH-backed with isolated "
+                "CARGO_TARGET_DIR and TMPDIR and cannot fail open into local expensive builds."
+            ),
+        },
+        {
+            "id": "staged_ubs_required",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Staged UBS remains mandatory before the closeout commit.",
+        },
+        {
+            "id": "beads_ledger_required",
+            "status": "pass",
+            "evidence": ["scripts/reconcile_beads_ledger.sh"],
+            "boundary": "Beads ledger reconciliation remains mandatory before the closeout commit.",
+        },
+        {
+            "id": "no_file_deletion_authority",
+            "status": "pass",
+            "evidence": ["AGENTS.md", "scripts/report_swarm_claim_readiness.py"],
+            "boundary": (
+                "The closeout gate and redundant-work detector do not authorize file "
+                "deletion, temp cleanup, revert, reset, or destructive filesystem actions."
+            ),
+        },
+        {
+            "id": "no_release_performance_capacity_or_dropin_claims",
+            "status": "pass",
+            "evidence": [
+                "docs/contracts/dropin-certification-contract.json",
+                "docs/evidence/dropin-certification-verdict.json",
+                "README.md",
+            ],
+            "boundary": (
+                "Predictive-operations evidence is advisory operator evidence and "
+                "does not authorize release, benchmark, capacity, performance, or strict drop-in claims."
+            ),
+        },
+        {
+            "id": "no_mail_rch_or_runtime_mutation",
+            "status": "pass",
+            "evidence": [
+                "scripts/build_swarm_operator_runpack.py",
+                "scripts/report_swarm_claim_readiness.py",
+            ],
+            "boundary": (
+                "This gate must not mutate Agent Mail storage, RCH worker state, "
+                "installed extensions, user config, runtime throttles, git refs, or temp artifacts."
+            ),
+        },
+        {
+            "id": "no_sixth_or_seventh_wave_rewrite",
+            "status": "pass",
+            "evidence": [
+                "docs/evidence/sixth-wave-validation-hardening-closeout-gate.json",
+                "docs/evidence/seventh-wave-runtime-autonomy-closeout-gate.json",
+            ],
+            "boundary": (
+                "The predictive-operations gate may reference sixth- and seventh-wave "
+                "authority boundaries but must not rewrite those contracts or evidence."
+            ),
+        },
+        {
+            "id": "closeout_does_not_replace_child_artifacts",
+            "status": "pass",
+            "evidence": ["docs/evidence/predictive-operations-closeout-gate.json"],
+            "boundary": (
+                "The closeout gate summarizes child evidence and does not replace "
+                "source tests, checked-in artifacts, generated target/perf evidence, Beads, "
+                "pushed commits, RCH, UBS, CI, or human review."
+            ),
+        },
+    ]
+
+
+def _draft_build_predictive_operations_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = predictive_operations_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    runpack_path = root / "scripts/build_swarm_operator_runpack.py"
+    claim_readiness_path = root / "scripts/report_swarm_claim_readiness.py"
+    compaction_path = root / "src/compaction.rs"
+    compaction_test_path = root / "tests/compaction.rs"
+    extensions_stress_path = root / "tests/extensions_stress.rs"
+    predictive_contract_path = root / PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_PATH
+    predictive_evidence_path = root / "docs/evidence/predictive-swarm-telemetry-ledger.json"
+    scheduler_contract_path = root / VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH
+    scheduler_evidence_path = root / "docs/evidence/validation-scheduler-plan.json"
+    semantic_contract_path = root / "docs/contracts/semantic-compaction-quality-contract.json"
+    semantic_evidence_path = root / "docs/evidence/semantic-compaction-quality.json"
+    latency_contract_path = root / OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH
+    latency_evidence_path = root / "docs/evidence/operator-perceived-latency-trace.json"
+    closeout_contract_path = root / PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All predictive-operations child Beads are closed before closeout.",
+            not missing_children,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                }
+            ],
+            issue=f"children not closed: {', '.join(missing_children)}"
+            if missing_children
+            else None,
+        )
+    )
+
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    weak_child_rows = [
+        row["bead_id"]
+        for row in child_artifacts
+        if row.get("status") != "closed"
+        or not row.get("close_reason")
+        or not row.get("validation_commands")
+        or not row.get("code_paths")
+        or not row.get("test_paths")
+        or not row.get("docs_or_evidence_paths")
+        or not str(row.get("claim_boundary_text") or "").strip()
+    ]
+    checklist.append(
+        gate_check(
+            "child_artifact_mapping",
+            "Every predictive-operations child bead maps to pushed commits, source paths, tests or fixtures, evidence artifacts, validation commands, close reason, and claim-boundary text.",
+            artifact_paths_exist and bool(commits_present) and not weak_child_rows,
+            [
+                {
+                    "child_artifact_map": child_artifacts,
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits_present": bool(commits_present),
+                    "weak_child_rows": weak_child_rows,
+                }
+            ],
+            issue=(
+                "missing paths, commits, validation commands, close reasons, or claim boundaries"
+                if not artifact_paths_exist or not commits_present or weak_child_rows
+                else None
+            ),
+        )
+    )
+
+    tracked_issue_ids = set(PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS)
+    tracked_issue_ids.add("bd-63x3v.11.7")
+    remaining_follow_ups = sorted(
+        issue_id
+        for issue_id, issue in issues.items()
+        if issue_id.startswith("bd-63x3v.11.")
+        and issue_id not in tracked_issue_ids
+        and issue.get("status") in {"open", "in_progress"}
+    )
+    checklist.append(
+        gate_check(
+            "remaining_follow_ups_tracked",
+            "No untracked open or in-progress follow-up Beads remain under the predictive-operations roadmap.",
+            not remaining_follow_ups,
+            [{"path": ".beads/issues.jsonl", "remaining_follow_ups": remaining_follow_ups}],
+            issue=(
+                "untracked predictive-operations follow-ups remain: "
+                + ", ".join(remaining_follow_ups)
+                if remaining_follow_ups
+                else None
+            ),
+        )
+    )
+
+    checklist.append(
+        gate_check(
+            "predictive_telemetry_ledger",
+            "Predictive telemetry ledger fuses existing signals into ordered observations and next-bottleneck hypotheses without becoming scheduler or claim authority.",
+            all(
+                (
+                    file_contains(runpack_path, "build_predictive_telemetry_ledger"),
+                    file_contains(predictive_contract_path, PREDICTIVE_TELEMETRY_LEDGER_SCHEMA),
+                    file_contains(predictive_evidence_path, PREDICTIVE_TELEMETRY_LEDGER_SCHEMA),
+                    file_contains(predictive_evidence_path, "next_bottleneck_hypotheses"),
+                    file_contains(predictive_evidence_path, "not_release_or_capacity_claim_evidence"),
+                )
+            ),
+            [
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+                {"path": str(PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_PATH)},
+                {"path": "docs/evidence/predictive-swarm-telemetry-ledger.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "validation_scheduler_plan",
+            "Validation scheduler plan preserves exact command strings, RCH env, local-fallback rejection, and safe deferral without executing cargo.",
+            all(
+                (
+                    file_contains(runpack_path, "build_validation_scheduler_plan"),
+                    file_contains(scheduler_contract_path, VALIDATION_SCHEDULER_PLAN_SCHEMA),
+                    file_contains(scheduler_evidence_path, VALIDATION_SCHEDULER_PLAN_SCHEMA),
+                    file_contains(scheduler_evidence_path, "local_fallback_rejected"),
+                    file_contains(scheduler_evidence_path, "heavy_cargo_requires_rch"),
+                )
+            ),
+            [
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+                {"path": str(VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH)},
+                {"path": "docs/evidence/validation-scheduler-plan.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "semantic_compaction_quality",
+            "Semantic compaction quality harness preserves structured markers and fails closed on missing, wrong-branch, stale-Beads, truncation, and false-positive controls.",
+            all(
+                (
+                    file_contains(compaction_path, "SEMANTIC_COMPACTION_QUALITY_SCHEMA"),
+                    file_contains(semantic_contract_path, "pi.session.semantic_compaction_quality.v1"),
+                    file_contains(semantic_evidence_path, "semantic_compaction_quality_missing_file_reference_fails_closed"),
+                    file_contains(compaction_test_path, "semantic_compaction_quality_wrong_branch_marker_fails_closed"),
+                    file_contains(compaction_test_path, "semantic_compaction_quality_false_positive_controls_do_not_satisfy_missing_marker"),
+                )
+            ),
+            [
+                {"path": "src/compaction.rs"},
+                {"path": "tests/compaction.rs"},
+                {"path": "docs/evidence/semantic-compaction-quality.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "hostcall_cost_attribution_ledger",
+            "Hostcall cost-attribution ledger records abuse roles, hostcall-class rows, S3-FIFO/BRAVO counters, redaction, operator actions, and missing-counter negative controls.",
+            all(
+                (
+                    file_contains(extensions_stress_path, "pi.ext.hostcall_cost_attribution.v1"),
+                    file_contains(extensions_stress_path, "hostcall_cost_attribution_ledger_records_abuse_roles_and_peer_progress"),
+                    file_contains(extensions_stress_path, "hostcall_cost_attribution_ledger_rejects_missing_cost_counters"),
+                    file_contains(extensions_stress_path, "payload_bodies_redacted"),
+                    file_contains(extensions_stress_path, "denied-capability-churner"),
+                    file_contains(extensions_stress_path, "target/perf"),
+                )
+            ),
+            [{"path": "tests/extensions_stress.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_perceived_latency_trace",
+            "Operator-perceived latency trace covers provider, RPC, TUI, tool-update, and operator-visible milestones with negative controls for semantic visibility.",
+            all(
+                (
+                    file_contains(runpack_path, "build_operator_perceived_latency_trace_summary"),
+                    file_contains(latency_contract_path, OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA),
+                    file_contains(latency_evidence_path, OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA),
+                    file_contains(latency_evidence_path, "semantic_visibility_delayed_beyond_budget"),
+                    file_contains(latency_evidence_path, "surface_pass_without_visibility"),
+                    file_contains(latency_evidence_path, "non_monotonic_timeline"),
+                )
+            ),
+            [
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+                {"path": str(OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-perceived-latency-trace.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "redundant_agent_work_detector",
+            "Redundant-agent-work detector correlates Beads, Mail availability, git path overlap, stale ownership, and already-closed duplicate requests without mutation or revert/delete advice.",
+            all(
+                (
+                    file_contains(claim_readiness_path, "pi.swarm.redundant_agent_work.v1"),
+                    file_contains(claim_readiness_path, "already_closed_duplicate_request"),
+                    file_contains(claim_readiness_path, "stale_owner_overlap"),
+                    file_contains(claim_readiness_path, "degraded_agent_mail"),
+                    file_contains(claim_readiness_path, "report_only_no_auto_reassign_no_revert_no_delete"),
+                    file_contains(claim_readiness_path, "Do not revert or delete"),
+                )
+            ),
+            [{"path": "scripts/report_swarm_claim_readiness.py"}],
+        )
+    )
+
+    source_boundaries = predictive_operations_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = (
+        set(PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    )
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, UBS, ledger reconciliation, no-delete, prior-wave, child-artifact, no-runtime-mutation, and no-claim authorities.",
+            not missing_boundaries
+            and file_contains(closeout_contract_path, PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA),
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All predictive-operations child commits are pushed to origin/main and mirrored to the legacy branch before closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed for script compilation, self-test, JSON contract/evidence validation, git diff cleanliness, staged UBS, and Beads ledger reconciliation.",
+            not missing_quality,
+            [
+                {
+                    "required_quality_gates": list(
+                        PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES
+                    ),
+                    "provided_quality_gates": quality_gate_results,
+                    "heavy_cargo_required_for_closeout_script": False,
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [item["id"] for item in checklist if item.get("status") != "pass"]
+    final_gate_issue = issues.get("bd-63x3v.11.7") or {}
+    parent_issue = issues.get("bd-63x3v.11") or {}
+    status = "pass" if not missing_checks else "fail"
+    operator_summary = {
+        "verdict": status,
+        "ready_to_close_parent_after_commit": status == "pass",
+        "covered_child_beads": list(PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS),
+        "claim_boundary": "advisory eighth-wave predictive-operations closeout evidence only",
+        "mail_degradation_note": (
+            "Agent Mail was schema-corrupt during closeout; Beads assignment and "
+            "comments were used as the soft lock."
+        ),
+        "next_action": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+    }
+    summary = {
+        "schema": PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_predictive_operations_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-63x3v.11",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-63x3v.11.7",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "operator_summary": operator_summary,
+        "required_checks": list(PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": remaining_follow_ups,
+        "known_limitations": [
+            "Predictive-operations closeout evidence is advisory operator evidence only.",
+            "Child tests, checked-in evidence, generated target/perf outputs, Beads, pushed commits, RCH, Agent Mail health, staged UBS, and CI remain their own sources of truth.",
+            "Agent Mail was schema-corrupt during closeout; Beads assignment/comments were used as the soft lock and this artifact does not prove healthy file reservations.",
+            "This is not release performance evidence, not capacity evidence, not benchmark evidence, and not strict drop-in certification evidence.",
+            "This closeout does not authorize file deletion, live provider calls, live Agent Mail mutation, live RCH worker mutation, runtime policy mutation, or local heavy-Cargo fallback.",
+            "This gate references sixth- and seventh-wave boundaries but does not rewrite those contracts or evidence.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "performance_or_capacity_claim_authorized": False,
+            "benchmark_claim_authorized": False,
+            "closeout_mutates_sources": False,
+            "closeout_mutates_agent_mail_rch_or_runtime": False,
+            "closeout_authorizes_file_deletion": False,
+            "closeout_runs_live_provider_or_network_calls": False,
+            "closeout_rewrites_sixth_or_seventh_wave_artifacts": False,
+            "closeout_replaces_child_artifacts": False,
+            "closeout_replaces_source_artifacts": False,
+            "live_agent_mail_or_rch_mutation_authorized": False,
+            "local_heavy_cargo_fallback_authorized": False,
+            "parent_can_close_before_closeout_commit_is_pushed": False,
+            "allowed_claim": "advisory eighth-wave predictive-operations closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks or remaining_follow_ups),
+        "follow_up_beads": [
+            {
+                "title": f"[PREDICTIVE-OPS-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    assert_predictive_operations_closeout_gate_contract(summary)
+    return summary
+
+
+def _draft_assert_predictive_operations_closeout_gate_contract(
+    summary: dict[str, Any],
+) -> None:
+    root = repo_root()
+    contract_path = root / PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing predictive operations closeout gate contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"predictive operations closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level predictive closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"predictive closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"predictive closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    for row in child_map:
+        assert isinstance(row.get("code_paths"), list) and row.get("code_paths")
+        assert isinstance(row.get("test_paths"), list) and row.get("test_paths")
+        assert isinstance(row.get("docs_or_evidence_paths"), list) and row.get(
+            "docs_or_evidence_paths"
+        )
+        assert isinstance(row.get("validation_commands"), list) and row.get(
+            "validation_commands"
+        )
+        assert str(row.get("claim_boundary_text") or "").strip()
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = (
+        set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    )
+    assert not missing_boundaries, (
+        f"predictive closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert summary.get("remaining_follow_ups") == []
+        assert provided.issuperset(required_quality)
+        assert summary.get("epic_can_close_after_this_commit") is True
+        operator_summary = summary.get("operator_summary")
+        assert isinstance(operator_summary, dict)
+        assert operator_summary.get("ready_to_close_parent_after_commit") is True
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        for flag in contract.get("required_false_claim_boundary_flags", []):
+            assert claim_boundaries.get(flag) is False, (
+                f"predictive closeout claim boundary must be false: {flag}"
+            )
+
+
+def _draft_write_predictive_operations_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_predictive_ops_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite predictive operations final gate: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
+def predictive_operations_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-63x3v.11.1",
+            "commit": "19021b2c82f9b7fc89778ba9f581576d0bb92092",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": [
+                "scripts/build_swarm_operator_runpack.py",
+                "tests/golden_corpus/swarm_operator_runpack/complete_runpack_projection.json",
+            ],
+            "docs_or_evidence_paths": [
+                "docs/contracts/predictive-swarm-telemetry-ledger-contract.json",
+                "docs/evidence/predictive-swarm-telemetry-ledger.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/predictive-swarm-telemetry-ledger-contract.json",
+                "python3 -m json.tool docs/evidence/predictive-swarm-telemetry-ledger.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Predictive telemetry ledger is advisory evidence over captured sources "
+                "only; it does not sample live runtime state or make capacity/release claims."
+            ),
+            "negative_control": {
+                "id": "missing_observation_or_disabled_guard_fails_closed",
+                "evidence": [
+                    "missing_observation_predictive",
+                    "bad_guard_predictive",
+                    "mixed_conflict_predictive",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-63x3v.11.2",
+            "commit": "9bc9420c67e8569627566a5e5f4f0aaa4960f8d0",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": [
+                "scripts/build_swarm_operator_runpack.py",
+                "tests/golden_corpus/swarm_operator_runpack/complete_runpack_projection.json",
+            ],
+            "docs_or_evidence_paths": [
+                "docs/contracts/validation-scheduler-plan-contract.json",
+                "docs/evidence/validation-scheduler-plan.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 -m json.tool docs/contracts/validation-scheduler-plan-contract.json",
+                "python3 -m json.tool docs/evidence/validation-scheduler-plan.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Validation scheduler plan is read-only planning evidence; it ranks "
+                "commands and rejects local fallback without executing cargo or reserving RCH workers."
+            ),
+            "negative_control": {
+                "id": "local_fallback_or_missing_group_fails_closed",
+                "evidence": [
+                    "missing_group_scheduler",
+                    "bad_local_fallback_scheduler",
+                    "critical_rch_pressure",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-63x3v.11.3",
+            "commit": "57455f9f712688553fe4fa30b3acecd307999de1",
+            "code_paths": ["src/compaction.rs"],
+            "test_paths": ["src/compaction.rs", "tests/compaction.rs"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/semantic-compaction-quality-contract.json",
+                "docs/evidence/semantic-compaction-quality.json",
+            ],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_semantic/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_semantic/tmp cargo test semantic_compaction_quality -- --nocapture",
+                "cargo fmt --check",
+                "rch exec -- env ... cargo check --all-targets",
+                "rch exec -- env ... cargo clippy --all-targets -- -D warnings",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Semantic compaction quality compares deterministic marker preservation "
+                "and fails closed without live model judging or full prompt/body leakage."
+            ),
+            "negative_control": {
+                "id": "critical_marker_loss_or_wrong_branch_fails_closed",
+                "evidence": [
+                    "semantic_compaction_quality_missing_file_reference_fails_closed",
+                    "semantic_compaction_quality_wrong_branch_marker_fails_closed",
+                    "semantic_compaction_quality_false_positive_controls_do_not_satisfy_missing_marker",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-63x3v.11.4",
+            "commit": "c802fb2adfb73904559b7c1dd0af257aa5e601c3",
+            "code_paths": ["tests/extensions_stress.rs"],
+            "test_paths": ["tests/extensions_stress.rs"],
+            "docs_or_evidence_paths": ["tests/extensions_stress.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/target TMPDIR=/data/tmp/pi_agent_rust_cargo/codex_bd_63x3v_11_4/tmp cargo test --test extensions_stress hostcall_cost_attribution -- --nocapture",
+                "cargo fmt --check",
+                "rch exec -- env ... cargo check --all-targets",
+                "rch exec -- env ... cargo clippy --all-targets -- -D warnings",
+                "git diff --check",
+                "timeout 60s ubs --staged --only=rust .",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Hostcall cost attribution is deterministic stress-test evidence with "
+                "payload bodies redacted; it does not relax extension capability policy or scheduler decisions."
+            ),
+            "negative_control": {
+                "id": "missing_queue_occupancy_counter_fails_contract",
+                "evidence": [
+                    "hostcall_cost_attribution_ledger_rejects_missing_cost_counters",
+                    "payload_body_redacted",
+                    "missing cost counters",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-63x3v.11.5",
+            "commit": "18ac30178bfa7859bcc9c73530959b758c380758",
+            "code_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "test_paths": ["scripts/build_swarm_operator_runpack.py"],
+            "docs_or_evidence_paths": [
+                "docs/contracts/operator-perceived-latency-trace-contract.json",
+                "docs/evidence/operator-perceived-latency-trace.json",
+                "docs/swarm-operations-runbook.md",
+            ],
+            "validation_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 scripts/build_swarm_operator_runpack.py --self-test",
+                "python3 scripts/build_swarm_operator_runpack.py --run-operator-perceived-latency-trace --out-operator-perceived-latency-trace-json docs/evidence/operator-perceived-latency-trace.json",
+                "python3 -m json.tool docs/contracts/operator-perceived-latency-trace-contract.json",
+                "python3 -m json.tool docs/evidence/operator-perceived-latency-trace.json",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Operator-perceived latency trace is fixture-backed advisory semantic "
+                "visibility evidence and not benchmark, capacity, or release performance evidence."
+            ),
+            "negative_control": {
+                "id": "delayed_semantic_visibility_or_non_monotonic_timeline_fails",
+                "evidence": [
+                    "semantic_visibility_delayed_beyond_budget",
+                    "surface_pass_without_visibility",
+                    "non_monotonic_timeline",
+                ],
+            },
+        },
+        {
+            "bead_id": "bd-63x3v.11.6",
+            "commit": "2185da6c1fa3537b7205cb3cfb086a819098e698",
+            "code_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "test_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "docs_or_evidence_paths": ["scripts/report_swarm_claim_readiness.py"],
+            "validation_commands": [
+                "python3 -m py_compile scripts/report_swarm_claim_readiness.py",
+                "python3 scripts/report_swarm_claim_readiness.py --self-test",
+                "python3 scripts/report_swarm_claim_readiness.py --json redundant-agent-work projection | jq .",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "claim_boundary_text": (
+                "Redundant-agent-work detector is read-only advisory coordination evidence; "
+                "it must not mutate Beads, Agent Mail, git, or recommend reverting another agent's work."
+            ),
+            "negative_control": {
+                "id": "mail_unavailable_and_already_closed_duplicate_classified_without_mutation",
+                "evidence": [
+                    "mail_unavailable",
+                    "already_closed_duplicate_request",
+                    "do_not_revert_or_delete",
+                ],
+            },
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def predictive_operations_source_boundary_checks() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "beads_are_source_of_truth",
+            "status": "pass",
+            "evidence": [".beads/issues.jsonl"],
+            "boundary": "Beads issue state, dependency edges, comments, and close reasons remain the work ledger.",
+        },
+        {
+            "id": "agent_mail_is_coordination_only",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": (
+                "Agent Mail is coordination and reservation evidence only; with the mailbox "
+                "schema corrupt, Beads assignee/status is the explicit soft lock."
+            ),
+        },
+        {
+            "id": "read_only_gate",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py"],
+            "boundary": (
+                "The predictive-operations closeout gate summarizes existing evidence and "
+                "does not mutate runtime, scheduler, Agent Mail, RCH, git refs, or temp state."
+            ),
+        },
+        {
+            "id": "rch_required_for_heavy_cargo",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Any heavy Cargo validation referenced by child work remains RCH-backed.",
+        },
+        {
+            "id": "staged_ubs_required",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Staged UBS remains mandatory before committing closeout changes.",
+        },
+        {
+            "id": "beads_ledger_required",
+            "status": "pass",
+            "evidence": ["scripts/reconcile_beads_ledger.sh"],
+            "boundary": "Beads ledger reconciliation remains mandatory before closeout commit.",
+        },
+        {
+            "id": "no_file_deletion_authority",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "The closeout gate does not authorize deleting files, directories, temp artifacts, or generated evidence.",
+        },
+        {
+            "id": "no_release_performance_capacity_or_dropin_claims",
+            "status": "pass",
+            "evidence": [
+                "docs/contracts/dropin-certification-contract.json",
+                "docs/evidence/dropin-certification-verdict.json",
+                "README.md",
+            ],
+            "boundary": (
+                "Predictive operations closeout evidence is advisory operator evidence only; "
+                "it does not authorize release, benchmark, capacity, performance, or strict drop-in claims."
+            ),
+        },
+        {
+            "id": "no_mail_rch_or_runtime_mutation",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py", "scripts/report_swarm_claim_readiness.py"],
+            "boundary": (
+                "The closeout gate must not perform live Agent Mail writes, reserve RCH workers, "
+                "execute providers, mutate runtime state, or alter scheduler decisions."
+            ),
+        },
+        {
+            "id": "no_sixth_or_seventh_wave_rewrite",
+            "status": "pass",
+            "evidence": [
+                "docs/evidence/sixth-wave-validation-hardening-closeout-gate.json",
+                "docs/evidence/seventh-wave-runtime-autonomy-closeout-gate.json",
+            ],
+            "boundary": "This closeout references prior-wave authority boundaries but must not rewrite sixth- or seventh-wave artifacts.",
+        },
+        {
+            "id": "closeout_does_not_replace_child_artifacts",
+            "status": "pass",
+            "evidence": ["docs/evidence/predictive-operations-closeout-gate.json"],
+            "boundary": (
+                "The closeout gate summarizes child evidence and does not replace child tests, "
+                "contracts, checked-in artifacts, Beads, pushed commits, RCH, UBS, CI, or review."
+            ),
+        },
+    ]
+
+
+def predictive_operations_quality_gate_heavy_cargo_posture(
+    quality_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    cargo_gate_ids = [
+        gate_id
+        for gate_id, item in quality_by_id.items()
+        if "cargo" in str(item.get("command", ""))
+    ]
+    return {
+        "heavy_cargo_required_for_closeout_script": False,
+        "cargo_gate_ids": cargo_gate_ids,
+        "heavy_cargo_uses_rch": all(
+            "rch exec --" in str(quality_by_id.get(gate_id, {}).get("command", ""))
+            for gate_id in cargo_gate_ids
+        ),
+    }
+
+
+def build_predictive_operations_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = predictive_operations_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    runpack_path = root / "scripts/build_swarm_operator_runpack.py"
+    claim_readiness_path = root / "scripts/report_swarm_claim_readiness.py"
+    compaction_src_path = root / "src/compaction.rs"
+    compaction_test_path = root / "tests/compaction.rs"
+    extensions_stress_path = root / "tests/extensions_stress.rs"
+    closeout_contract_path = root / PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH
+    predictive_contract_path = root / PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_PATH
+    predictive_evidence_path = root / "docs/evidence/predictive-swarm-telemetry-ledger.json"
+    scheduler_contract_path = root / VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH
+    scheduler_evidence_path = root / "docs/evidence/validation-scheduler-plan.json"
+    semantic_contract_path = root / "docs/contracts/semantic-compaction-quality-contract.json"
+    semantic_evidence_path = root / "docs/evidence/semantic-compaction-quality.json"
+    latency_contract_path = root / OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH
+    latency_evidence_path = root / "docs/evidence/operator-perceived-latency-trace.json"
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All predictive-operations child Beads are closed before closeout.",
+            not missing_children,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                }
+            ],
+            issue=f"children not closed: {', '.join(missing_children)}"
+            if missing_children
+            else None,
+        )
+    )
+
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    weak_child_rows = [
+        row["bead_id"]
+        for row in child_artifacts
+        if row.get("status") != "closed"
+        or not row.get("close_reason")
+        or not row.get("validation_commands")
+        or not isinstance(row.get("negative_control"), dict)
+        or not row.get("negative_control", {}).get("evidence")
+        or not row.get("code_paths")
+        or not row.get("test_paths")
+        or not row.get("docs_or_evidence_paths")
+        or not str(row.get("claim_boundary_text") or "").strip()
+    ]
+    checklist.append(
+        gate_check(
+            "child_artifact_mapping",
+            "Every child bead maps to pushed commits, source paths, tests or fixtures, evidence artifacts, validation commands, close reason, and claim-boundary text.",
+            artifact_paths_exist and bool(commits_present) and not weak_child_rows,
+            [
+                {
+                    "child_artifact_map": child_artifacts,
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits_present": bool(commits_present),
+                    "weak_child_rows": weak_child_rows,
+                }
+            ],
+            issue=(
+                "missing paths, commits, validation commands, close reasons, or claim boundaries"
+                if not artifact_paths_exist or not commits_present or weak_child_rows
+                else None
+            ),
+        )
+    )
+
+    final_gate_issue = issues.get("bd-63x3v.11.7") or {}
+    remaining_follow_ups = [
+        {
+            "id": issue_id,
+            "status": issue.get("status"),
+            "title": issue.get("title"),
+        }
+        for issue_id, issue in sorted(issues.items())
+        if issue_id.startswith("bd-63x3v.11.")
+        and issue_id != "bd-63x3v.11.7"
+        and issue.get("status") not in {"closed", "deferred"}
+    ]
+    checklist.append(
+        gate_check(
+            "remaining_follow_ups_tracked",
+            "No predictive-operations child follow-up remains unclosed or untracked before closeout.",
+            not remaining_follow_ups and final_gate_issue.get("status") in {"in_progress", "closed"},
+            [
+                {
+                    "remaining_follow_ups": remaining_follow_ups,
+                    "final_gate_status": final_gate_issue.get("status"),
+                    "final_gate_assignee": final_gate_issue.get("assignee"),
+                }
+            ],
+            issue=(
+                "open predictive-operations follow-ups remain"
+                if remaining_follow_ups
+                else None
+            ),
+        )
+    )
+
+    checklist.append(
+        gate_check(
+            "predictive_telemetry_ledger",
+            "Predictive telemetry ledger contract and evidence cover healthy, RCH-saturated, Agent-Mail-degraded, stale, and mixed-conflict inputs without live sampling.",
+            all(
+                (
+                    file_contains(predictive_contract_path, PREDICTIVE_TELEMETRY_LEDGER_SCHEMA),
+                    file_contains(predictive_evidence_path, PREDICTIVE_TELEMETRY_LEDGER_SCHEMA),
+                    file_contains(runpack_path, "build_predictive_telemetry_ledger"),
+                    file_contains(runpack_path, "missing_observation_predictive"),
+                    file_contains(runpack_path, "bad_guard_predictive"),
+                    file_contains(runpack_path, "mixed_conflict_predictive"),
+                )
+            ),
+            [
+                {"path": str(PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_PATH)},
+                {"path": "docs/evidence/predictive-swarm-telemetry-ledger.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "validation_scheduler_plan",
+            "Validation scheduler plan ranks validation commands, preserves exact RCH env, and fail-closes local fallback when RCH is unavailable.",
+            all(
+                (
+                    file_contains(scheduler_contract_path, VALIDATION_SCHEDULER_PLAN_SCHEMA),
+                    file_contains(scheduler_evidence_path, VALIDATION_SCHEDULER_PLAN_SCHEMA),
+                    file_contains(runpack_path, "build_validation_scheduler_plan"),
+                    file_contains(runpack_path, "bad_local_fallback_scheduler"),
+                    file_contains(runpack_path, "missing_group_scheduler"),
+                    file_contains(runpack_path, "validation_scheduler_required_env"),
+                )
+            ),
+            [
+                {"path": str(VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH)},
+                {"path": "docs/evidence/validation-scheduler-plan.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "semantic_compaction_quality",
+            "Semantic compaction quality evidence preserves structured markers and fail-closes missing file refs, wrong branch markers, stale Beads handoffs, large tool output loss, and false positives.",
+            all(
+                (
+                    file_contains(semantic_contract_path, "pi.session.semantic_compaction_quality_contract.v1"),
+                    file_contains(semantic_evidence_path, "pi.session.semantic_compaction_quality.v1"),
+                    file_contains(compaction_src_path, "SEMANTIC_COMPACTION_QUALITY_SCHEMA"),
+                    file_contains(compaction_test_path, "semantic_compaction_quality_missing_file_reference_fails_closed"),
+                    file_contains(compaction_test_path, "semantic_compaction_quality_wrong_branch_marker_fails_closed"),
+                    file_contains(compaction_test_path, "semantic_compaction_quality_false_positive_controls_do_not_satisfy_missing_marker"),
+                )
+            ),
+            [
+                {"path": "src/compaction.rs"},
+                {"path": "tests/compaction.rs"},
+                {"path": "docs/evidence/semantic-compaction-quality.json"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "hostcall_cost_attribution_ledger",
+            "Hostcall cost attribution ledger records cheap-read flooding, large payloads, denied capability churn, steady peer progress, fallback/rollback visibility, and payload redaction.",
+            all(
+                (
+                    file_contains(
+                        extensions_stress_path,
+                        "pi.ext.hostcall_cost_attribution.v1",
+                    ),
+                    file_contains(extensions_stress_path, "hostcall_cost_attribution_ledger_records_abuse_roles_and_peer_progress"),
+                    file_contains(extensions_stress_path, "hostcall_cost_attribution_ledger_rejects_missing_cost_counters"),
+                    file_contains(extensions_stress_path, "cheap_read_flooder"),
+                    file_contains(extensions_stress_path, "large_payload_emitter"),
+                    file_contains(extensions_stress_path, "denied_capability_churner"),
+                    file_contains(extensions_stress_path, "steady_peer"),
+                    file_contains(extensions_stress_path, "payload_body_redacted"),
+                )
+            ),
+            [{"path": "tests/extensions_stress.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "operator_perceived_latency_trace",
+            "Operator-perceived latency trace joins provider, RPC, TUI, tool update, and operator-visible semantic milestones with negative controls.",
+            all(
+                (
+                    file_contains(latency_contract_path, OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA),
+                    file_contains(latency_evidence_path, OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA),
+                    file_contains(runpack_path, "build_operator_perceived_latency_trace_summary"),
+                    file_contains(runpack_path, "semantic_visibility_delayed_beyond_budget"),
+                    file_contains(runpack_path, "surface_pass_without_visibility"),
+                    file_contains(runpack_path, "non_monotonic_timeline"),
+                )
+            ),
+            [
+                {"path": str(OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH)},
+                {"path": "docs/evidence/operator-perceived-latency-trace.json"},
+                {"path": "scripts/build_swarm_operator_runpack.py"},
+            ],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "redundant_agent_work_detector",
+            "Redundant-agent-work detector classifies clean single-owner, overlapping, stale, Mail-unavailable, and already-closed duplicate work without mutating coordination state.",
+            all(
+                (
+                    file_contains(claim_readiness_path, "pi.swarm.redundant_agent_work.v1"),
+                    file_contains(claim_readiness_path, "build_redundant_agent_work_report"),
+                    file_contains(claim_readiness_path, "degraded_agent_mail"),
+                    file_contains(claim_readiness_path, "already_closed"),
+                    file_contains(claim_readiness_path, "Do not revert"),
+                )
+            ),
+            [{"path": "scripts/report_swarm_claim_readiness.py"}],
+        )
+    )
+
+    source_boundaries = predictive_operations_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = (
+        set(PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    )
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, staged UBS, ledger reconciliation, no-delete policy, prior waves, and release/drop-in authorities.",
+            not missing_boundaries
+            and file_contains(closeout_contract_path, PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA),
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All child implementation commits are pushed to origin/main and mirrored to legacy origin/master before closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed for Python compilation, runpack self-test, JSON validation, git diff cleanliness, staged UBS, and Beads ledger reconciliation.",
+            not missing_quality
+            and predictive_operations_quality_gate_heavy_cargo_posture(quality_by_id)[
+                "heavy_cargo_uses_rch"
+            ],
+            [
+                {
+                    "required_quality_gates": list(
+                        PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_QUALITY_GATES
+                    ),
+                    "provided_quality_gates": quality_gate_results,
+                    **predictive_operations_quality_gate_heavy_cargo_posture(quality_by_id),
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [item["id"] for item in checklist if item.get("status") != "pass"]
+    parent_issue = issues.get("bd-63x3v.11") or {}
+    status = "pass" if not missing_checks else "fail"
+    operator_summary = {
+        "verdict": status,
+        "ready_to_close_parent_after_commit": status == "pass",
+        "covered_child_beads": list(PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS),
+        "claim_boundary": "advisory eighth-wave predictive operations closeout evidence only",
+        "next_action": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+    }
+    summary = {
+        "schema": PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_predictive_operations_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-63x3v.11",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-63x3v.11.7",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "operator_summary": operator_summary,
+        "required_checks": list(PREDICTIVE_OPERATIONS_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": remaining_follow_ups,
+        "known_limitations": [
+            "Predictive operations closeout evidence is advisory operator evidence only.",
+            "Child tests, checked-in evidence, Beads, pushed commits, RCH, Agent Mail health, staged UBS, and CI remain their own sources of truth.",
+            "Agent Mail was schema-corrupt during closeout; Beads assignment/comments were used as the soft lock and this artifact does not prove reservations were absent.",
+            "This is not release performance evidence, not capacity evidence, not benchmark evidence, and not strict drop-in certification evidence.",
+            "This is not permission to skip RCH, staged UBS, Beads ledger reconciliation, pushed refs, child source artifact inspection, or CI.",
+            "This closeout does not authorize file deletion, production network access, live model calls, live Agent Mail mutation, live RCH worker mutation, runtime mutation, or scheduler mutation.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "performance_or_capacity_claim_authorized": False,
+            "benchmark_claim_authorized": False,
+            "closeout_mutates_sources": False,
+            "closeout_mutates_agent_mail_rch_or_runtime": False,
+            "closeout_authorizes_file_deletion": False,
+            "closeout_runs_live_provider_or_network_calls": False,
+            "closeout_rewrites_sixth_or_seventh_wave_artifacts": False,
+            "closeout_replaces_child_artifacts": False,
+            "closeout_replaces_source_artifacts": False,
+            "live_agent_mail_or_rch_mutation_authorized": False,
+            "production_network_or_model_calls_authorized": False,
+            "file_deletion_authorized": False,
+            "parent_can_close_before_closeout_commit_is_pushed": False,
+            "allowed_claim": "advisory eighth-wave predictive operations closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks),
+        "follow_up_beads": [
+            {
+                "title": f"[PREDICTIVE-OPS-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    assert_predictive_operations_closeout_gate_contract(summary)
+    return summary
+
+
+def assert_predictive_operations_closeout_gate_contract(
+    summary: dict[str, Any],
+) -> None:
+    root = repo_root()
+    contract_path = root / PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing predictive operations closeout gate contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"predictive operations closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level predictive closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"predictive operations closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"predictive operations closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    for row in child_map:
+        assert isinstance(row.get("code_paths"), list) and row.get("code_paths")
+        assert isinstance(row.get("test_paths"), list) and row.get("test_paths")
+        assert isinstance(row.get("docs_or_evidence_paths"), list) and row.get(
+            "docs_or_evidence_paths"
+        )
+        assert isinstance(row.get("validation_commands"), list) and row.get(
+            "validation_commands"
+        )
+        negative_control = row.get("negative_control")
+        assert isinstance(negative_control, dict)
+        assert str(negative_control.get("id") or "").strip()
+        assert isinstance(negative_control.get("evidence"), list) and negative_control.get(
+            "evidence"
+        )
+        assert str(row.get("claim_boundary_text") or "").strip()
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = (
+        set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    )
+    assert not missing_boundaries, (
+        f"predictive operations closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert provided.issuperset(required_quality)
+        assert summary.get("epic_can_close_after_this_commit") is True
+        assert not summary.get("remaining_follow_ups")
+        operator_summary = summary.get("operator_summary")
+        assert isinstance(operator_summary, dict)
+        assert operator_summary.get("ready_to_close_parent_after_commit") is True
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        assert claim_boundaries.get("strict_dropin_or_release_claim_authorized") is False
+        assert claim_boundaries.get("performance_or_capacity_claim_authorized") is False
+        assert claim_boundaries.get("closeout_mutates_sources") is False
+        assert claim_boundaries.get("closeout_mutates_agent_mail_rch_or_runtime") is False
+        assert claim_boundaries.get("closeout_authorizes_file_deletion") is False
+        assert claim_boundaries.get("closeout_runs_live_provider_or_network_calls") is False
+        assert claim_boundaries.get("closeout_rewrites_sixth_or_seventh_wave_artifacts") is False
+        assert claim_boundaries.get("closeout_replaces_child_artifacts") is False
+
+
+def write_predictive_operations_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_predictive_ops_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite predictive operations final gate: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def run_self_test() -> int:
     workspace = Path(tempfile.mkdtemp(prefix="pi_swarm_runpack_"))
     generated_at = "2026-05-09T09:00:00+00:00"
@@ -25544,6 +27246,137 @@ def run_self_test() -> int:
         assert "child_beads_closed" in failing_test_fabric_gate["missing_checks"]
         assert "quality_gates" in failing_test_fabric_gate["missing_checks"]
         assert failing_test_fabric_gate["follow_up_required"] is True
+        predictive_ops_gate_issues = [
+            {
+                "id": "bd-63x3v.11",
+                "title": "Eighth-wave predictive swarm operations roadmap",
+                "status": "deferred",
+            },
+            {
+                "id": "bd-63x3v.11.7",
+                "title": "Add eighth-wave predictive operations closeout gate",
+                "status": "in_progress",
+                "assignee": "Codex",
+            },
+        ]
+        predictive_ops_gate_issues.extend(
+            {
+                "id": issue_id,
+                "status": "closed",
+                "close_reason": f"{issue_id} self-test evidence closed",
+            }
+            for issue_id in PREDICTIVE_OPERATIONS_CLOSEOUT_CHILD_BEADS
+        )
+        predictive_ops_gate_issues_path = (
+            workspace / "predictive-operations-final-gate-issues.jsonl"
+        )
+        predictive_ops_gate_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in predictive_ops_gate_issues) + "\n",
+            encoding="utf-8",
+        )
+        predictive_ops_final_gate_quality = [
+            {
+                "id": "py_compile",
+                "status": "pass",
+                "command": "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+            },
+            {
+                "id": "runpack_self_test",
+                "status": "pass",
+                "command": "python3 scripts/build_swarm_operator_runpack.py --self-test",
+            },
+            {
+                "id": "json_contracts",
+                "status": "pass",
+                "command": (
+                    "python3 -m json.tool "
+                    "docs/contracts/predictive-operations-closeout-gate-contract.json "
+                    ">/dev/null && python3 -m json.tool "
+                    "docs/evidence/predictive-operations-closeout-gate.json >/dev/null"
+                ),
+            },
+            {
+                "id": "git_diff_check",
+                "status": "pass",
+                "command": "git diff --check",
+            },
+            {
+                "id": "staged_ubs",
+                "status": "pass",
+                "command": "timeout 60s ubs --staged --only=rust .",
+            },
+            {
+                "id": "beads_ledger_reconcile",
+                "status": "pass",
+                "command": "./scripts/reconcile_beads_ledger.sh",
+            },
+        ]
+        predictive_ops_final_gate = build_predictive_operations_closeout_gate_summary(
+            generated_at=generated_at,
+            quality_gate_results=predictive_ops_final_gate_quality,
+            issue_export_path=predictive_ops_gate_issues_path,
+            git_refs={
+                "head": "predictiveopsfinalgatefixture",
+                "origin_main": "predictiveopsfinalgatefixture",
+                "origin_master": "predictiveopsfinalgatefixture",
+            },
+            commit_check_override=True,
+        )
+        assert (
+            predictive_ops_final_gate["schema"]
+            == PREDICTIVE_OPERATIONS_CLOSEOUT_GATE_SCHEMA
+        )
+        assert predictive_ops_final_gate["status"] == "pass"
+        assert (
+            predictive_ops_final_gate["decision"]
+            == "close_final_gate_and_parent_epic"
+        )
+        assert predictive_ops_final_gate["follow_up_required"] is False
+        assert not predictive_ops_final_gate["follow_up_beads"]
+        assert predictive_ops_final_gate["remaining_follow_ups"] == []
+        assert predictive_ops_final_gate["child_artifact_map"]
+        degraded_predictive_ops_issues = list(predictive_ops_gate_issues)
+        degraded_predictive_ops_issues[-1] = {
+            **degraded_predictive_ops_issues[-1],
+            "status": "open",
+            "close_reason": None,
+        }
+        degraded_predictive_ops_issues.append(
+            {
+                "id": "bd-63x3v.11.99",
+                "status": "open",
+                "title": "Untracked predictive ops follow-up",
+            }
+        )
+        degraded_predictive_ops_issues_path = (
+            workspace / "predictive-operations-open-child.jsonl"
+        )
+        degraded_predictive_ops_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in degraded_predictive_ops_issues)
+            + "\n",
+            encoding="utf-8",
+        )
+        failing_predictive_ops_gate = (
+            build_predictive_operations_closeout_gate_summary(
+                generated_at=generated_at,
+                quality_gate_results=predictive_ops_final_gate_quality[:-1],
+                issue_export_path=degraded_predictive_ops_issues_path,
+                git_refs={
+                    "head": "predictiveopsfinalgatefixture",
+                    "origin_main": "predictiveopsfinalgatefixture",
+                    "origin_master": "predictiveopsfinalgatefixture",
+                },
+                commit_check_override=True,
+            )
+        )
+        assert failing_predictive_ops_gate["status"] == "fail"
+        assert "child_beads_closed" in failing_predictive_ops_gate["missing_checks"]
+        assert (
+            "remaining_follow_ups_tracked"
+            in failing_predictive_ops_gate["missing_checks"]
+        )
+        assert "quality_gates" in failing_predictive_ops_gate["missing_checks"]
+        assert failing_predictive_ops_gate["follow_up_required"] is True
         backpressure_budget_contract = build_backpressure_budget_contract_summary(
             generated_at=generated_at,
         )
@@ -26132,6 +27965,21 @@ def parse_args() -> argparse.Namespace:
         help="print the final proof-carrying swarm test-fabric closeout gate JSON",
     )
     parser.add_argument(
+        "--run-predictive-ops-final-gate",
+        action="store_true",
+        help="build the final prompt-to-artifact predictive operations closeout gate",
+    )
+    parser.add_argument(
+        "--out-predictive-ops-final-gate-json",
+        type=Path,
+        help="write pi.swarm.predictive_operations.closeout_gate.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-predictive-ops-final-gate",
+        action="store_true",
+        help="print the final predictive operations closeout gate JSON",
+    )
+    parser.add_argument(
         "--run-backpressure-budget-contract",
         action="store_true",
         help="build the read-only provider/RPC/TUI backpressure budget contract",
@@ -26281,6 +28129,10 @@ def main() -> int:
         args.out_test_fabric_final_gate_json
         or args.print_test_fabric_final_gate
     )
+    predictive_ops_final_gate_options_used = (
+        args.out_predictive_ops_final_gate_json
+        or args.print_predictive_ops_final_gate
+    )
     backpressure_budget_contract_options_used = (
         args.out_backpressure_budget_contract_json
         or args.print_backpressure_budget_contract
@@ -26304,6 +28156,7 @@ def main() -> int:
         args.run_sixth_wave_final_gate,
         args.run_seventh_wave_final_gate,
         args.run_test_fabric_final_gate,
+        args.run_predictive_ops_final_gate,
     ]
     if sum(1 for used in final_gate_modes if used) > 1:
         print("ERROR: run only one final-gate mode at a time", file=sys.stderr)
@@ -26386,6 +28239,15 @@ def main() -> int:
         )
         return 2
     if (
+        predictive_ops_final_gate_options_used
+        and not args.run_predictive_ops_final_gate
+    ):
+        print(
+            "ERROR: predictive-ops final-gate options require --run-predictive-ops-final-gate",
+            file=sys.stderr,
+        )
+        return 2
+    if (
         backpressure_budget_contract_options_used
         and not args.run_backpressure_budget_contract
     ):
@@ -26419,6 +28281,7 @@ def main() -> int:
         or args.run_sixth_wave_final_gate
         or args.run_seventh_wave_final_gate
         or args.run_test_fabric_final_gate
+        or args.run_predictive_ops_final_gate
     ):
         print("ERROR: --quality-gate-result requires a final-gate run mode", file=sys.stderr)
         return 2
@@ -26505,6 +28368,18 @@ def main() -> int:
             if (
                 args.print_test_fabric_final_gate
                 or args.out_test_fabric_final_gate_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
+        if args.run_predictive_ops_final_gate:
+            summary = build_predictive_operations_closeout_gate_summary(
+                generated_at=args.generated_at or utc_now_iso(),
+                quality_gate_results=parse_quality_gate_results(args.quality_gate_results),
+            )
+            write_predictive_operations_closeout_gate_output(args, summary)
+            if (
+                args.print_predictive_ops_final_gate
+                or args.out_predictive_ops_final_gate_json is None
             ):
                 print(json_dumps(summary, pretty=True))
             return 0
@@ -26675,6 +28550,7 @@ def main() -> int:
         and not args.out_sixth_wave_final_gate_json
         and not args.out_seventh_wave_final_gate_json
         and not args.out_test_fabric_final_gate_json
+        and not args.out_predictive_ops_final_gate_json
         and not args.out_backpressure_budget_contract_json
         and not args.out_proof_reuse_gate_json
         and not args.print_autopilot_input_pack
@@ -26690,6 +28566,7 @@ def main() -> int:
         and not args.print_sixth_wave_final_gate
         and not args.print_seventh_wave_final_gate
         and not args.print_test_fabric_final_gate
+        and not args.print_predictive_ops_final_gate
         and not args.print_backpressure_budget_contract
         and not args.print_proof_reuse_gate
     ):

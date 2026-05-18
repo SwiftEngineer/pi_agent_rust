@@ -2080,6 +2080,18 @@ the current artifact is
 advisory closeout evidence only and does not replace Beads, git, RCH, Agent
 Mail, UBS, CI, claim-integrity gates, child evidence, or source artifacts.
 
+The predictive-operations closeout gate emits
+`pi.swarm.predictive_operations.closeout_gate.v1`. It maps the
+`bd-63x3v.11` child Beads to predictive telemetry fusion, RCH-aware validation
+scheduling, semantic compaction quality, extension hostcall cost attribution,
+operator-perceived latency, redundant-agent-work detection, source-boundary
+checks, pushed refs, staged UBS, and Beads ledger reconciliation. It is
+governed by
+`docs/contracts/predictive-operations-closeout-gate-contract.json`; the current
+artifact is `docs/evidence/predictive-operations-closeout-gate.json`. The gate
+is advisory closeout evidence only and does not replace Beads, git, RCH, Agent
+Mail, UBS, CI, claim-integrity gates, child evidence, or source artifacts.
+
 The operator-perceived latency trace emits
 `pi.operator.perceived_latency_trace.v1`. It joins deterministic provider,
 RPC, TUI, tool-update, and operator-visible fixture timelines so operators can
