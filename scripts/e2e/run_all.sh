@@ -6936,6 +6936,7 @@ required_fail_closed_conditions = [
     "missing_required_result_field",
     "scenario_without_sli_mapping",
     "sli_without_thresholds",
+    "responsiveness_workflow_missing_primary_latency_sli",
     "missing_or_stale_evidence",
     "missing_absolute_or_relative_values",
     "missing_workload_partition_tag",
@@ -6968,6 +6969,17 @@ allowed_evidence_class: list[str] = ["measured", "inferred"]
 allowed_confidence: list[str] = ["high", "medium", "low"]
 workflow_sli_mapping: list[dict] = []
 sli_threshold_ids: set[str] = set()
+workflow_to_sli_ids: dict[str, set[str]] = {}
+primary_sli_ids: set[str] = set()
+responsiveness_workflow_ids: set[str] = set()
+responsiveness_markers = (
+    "swarm",
+    "performance",
+    "responsiv",
+    "latency",
+    "smooth",
+    "fast",
+)
 
 if isinstance(perf_sli_matrix, dict):
     require_condition(
@@ -7103,6 +7115,27 @@ if isinstance(perf_sli_matrix, dict):
             if normalized:
                 required_scenario_metadata_fields = normalized
 
+    metric_hierarchy = perf_sli_matrix.get("metric_hierarchy")
+    if isinstance(metric_hierarchy, dict):
+        primary_raw = metric_hierarchy.get("primary")
+        if isinstance(primary_raw, list):
+            primary_sli_ids = {
+                str(value).strip()
+                for value in primary_raw
+                if str(value).strip()
+            }
+
+    scenario_sli_matrix = perf_sli_matrix.get("scenario_sli_matrix")
+    if isinstance(scenario_sli_matrix, list):
+        for row in scenario_sli_matrix:
+            if not isinstance(row, dict):
+                continue
+            workflow_id = str(row.get("scenario_id", "")).strip()
+            user_outcome = str(row.get("user_outcome", "")).strip()
+            searchable = f"{workflow_id}\n{user_outcome}".lower()
+            if workflow_id and any(marker in searchable for marker in responsiveness_markers):
+                responsiveness_workflow_ids.add(workflow_id)
+
     workflow_sli_mapping_payload = perf_sli_matrix.get("workflow_sli_mapping")
     if isinstance(workflow_sli_mapping_payload, list):
         workflow_sli_mapping = [
@@ -7125,12 +7158,16 @@ for mapping in workflow_sli_mapping:
     workflow_id = str(mapping.get("workflow_id", "")).strip()
     if workflow_id:
         mapped_workflow_ids.add(workflow_id)
+    workflow_sli_ids: set[str] = set()
     sli_ids = mapping.get("sli_ids")
     if isinstance(sli_ids, list):
         for sli_id in sli_ids:
             normalized = str(sli_id).strip()
             if normalized:
                 mapped_sli_ids.add(normalized)
+                workflow_sli_ids.add(normalized)
+    if workflow_id:
+        workflow_to_sli_ids[workflow_id] = workflow_sli_ids
 
 missing_scenario_mappings = sorted(
     scenario
@@ -7166,6 +7203,34 @@ require_condition(
     remediation=(
         "Define thresholds for referenced SLI IDs in "
         "docs/perf_sli_matrix.json sli_catalog."
+    ),
+)
+
+for workflow_id in required_scenarios:
+    if any(marker in workflow_id.lower() for marker in responsiveness_markers):
+        responsiveness_workflow_ids.add(workflow_id)
+
+responsiveness_missing_primary_latency = sorted(
+    workflow_id
+    for workflow_id in responsiveness_workflow_ids
+    if workflow_id in mapped_workflow_ids
+    and workflow_to_sli_ids.get(workflow_id, set()).isdisjoint(primary_sli_ids)
+)
+require_condition(
+    "claim_integrity.responsiveness_workflow_missing_primary_latency_sli",
+    path=perf_sli_matrix_path,
+    ok=bool(primary_sli_ids) and not responsiveness_missing_primary_latency,
+    ok_msg="responsiveness workflows retain primary user-visible latency SLI coverage",
+    fail_msg=(
+        "responsiveness workflows missing primary latency SLI coverage: "
+        f"{responsiveness_missing_primary_latency}"
+        if primary_sli_ids
+        else "metric_hierarchy.primary does not define primary latency SLI IDs"
+    ),
+    strict=True,
+    remediation=(
+        "Add at least one metric_hierarchy.primary SLI to every responsiveness "
+        "workflow_sli_mapping row in docs/perf_sli_matrix.json."
     ),
 )
 
