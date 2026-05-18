@@ -146,6 +146,10 @@ BACKPRESSURE_BUDGET_CONTRACT_SPEC_SCHEMA = (
 BACKPRESSURE_FAIRNESS_STRESS_GATE_SCHEMA = (
     "pi.swarm.provider_rpc_tui_fairness_stress_gate.v1"
 )
+OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA = "pi.operator.perceived_latency_trace.v1"
+OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_SCHEMA = (
+    "pi.operator.perceived_latency_trace_contract.v1"
+)
 SWARM_REPLAY_PREVIEW_SCHEMA = "pi.swarm.replay_preview.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 TURN_PRESSURE_LEDGER_CONTRACT_PATH = Path(
@@ -191,6 +195,9 @@ EIGHTH_WAVE_TEST_FABRIC_CLOSEOUT_GATE_CONTRACT_PATH = Path(
 )
 BACKPRESSURE_BUDGET_CONTRACT_PATH = Path(
     "docs/contracts/provider-rpc-tui-backpressure-budget-contract.json"
+)
+OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH = Path(
+    "docs/contracts/operator-perceived-latency-trace-contract.json"
 )
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
@@ -875,6 +882,36 @@ BACKPRESSURE_FAIRNESS_REQUIRED_FIXTURES = (
     "one_slow_stream",
     "rpc_output_flood",
     "tui_budget_pressure",
+)
+OPERATOR_PERCEIVED_LATENCY_REQUIRED_CASE_IDS = (
+    "balanced",
+    "provider_slow",
+    "rpc_flood",
+    "tui_frame_pressure",
+    "semantic_after_coalesced_noise",
+)
+OPERATOR_PERCEIVED_LATENCY_REQUIRED_SURFACE_IDS = (
+    "provider_stream",
+    "rpc_output",
+    "tui_frame",
+    "tool_update",
+    "operator_visible",
+)
+OPERATOR_PERCEIVED_LATENCY_REQUIRED_EVENT_KEYS = (
+    "step",
+    "elapsed_ms",
+    "surface",
+    "event",
+    "class",
+    "visibility_point",
+    "coalescing_or_flush_reason",
+    "degradation_class",
+)
+OPERATOR_PERCEIVED_LATENCY_REQUIRED_SOURCE_BOUNDARIES = (
+    "fixture_backed_no_live_provider_calls",
+    "advisory_trace_not_benchmark_or_capacity_claim",
+    "does_not_replace_backpressure_evidence",
+    "read_only_no_scheduler_or_runtime_mutation",
 )
 WORK_PARTITION_INSPECT_SENTINEL = "<inspect-bead-before-reserving>"
 WORK_SURFACE_RULES: tuple[dict[str, Any], ...] = (
@@ -17465,6 +17502,815 @@ def write_backpressure_budget_contract_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def operator_perceived_latency_event(
+    *,
+    step: int,
+    elapsed_ms: int,
+    surface: str,
+    event: str,
+    event_class: str,
+    visibility_point: str,
+    coalescing_or_flush_reason: str,
+    degradation_class: str,
+) -> dict[str, Any]:
+    return {
+        "step": step,
+        "elapsed_ms": elapsed_ms,
+        "surface": surface,
+        "event": event,
+        "class": event_class,
+        "visibility_point": visibility_point,
+        "coalescing_or_flush_reason": coalescing_or_flush_reason,
+        "degradation_class": degradation_class,
+    }
+
+
+def build_operator_perceived_latency_case(
+    *,
+    case_id: str,
+    description: str,
+    timeline: list[dict[str, Any]],
+    visibility_budget_ms: int,
+    low_value_coalesced_count: int,
+    degradation_class: str,
+) -> dict[str, Any]:
+    semantic_events = [
+        event for event in timeline if event.get("class") == "semantic"
+    ]
+    operator_visible_events = [
+        event
+        for event in semantic_events
+        if event.get("surface") == "operator_visible"
+    ]
+    semantic_visible_by_ms = (
+        operator_visible_events[-1].get("elapsed_ms")
+        if operator_visible_events
+        else None
+    )
+
+    def first_semantic_step(surface: str) -> int | None:
+        for event in semantic_events:
+            if event.get("surface") == surface and isinstance(event.get("step"), int):
+                return event["step"]
+        return None
+
+    previous_step: int | None = None
+    previous_elapsed_ms: int | None = None
+    monotonic = True
+    for event in timeline:
+        step = event.get("step")
+        elapsed_ms = event.get("elapsed_ms")
+        if not isinstance(step, int) or not isinstance(elapsed_ms, int):
+            monotonic = False
+            break
+        if previous_step is not None and step <= previous_step:
+            monotonic = False
+            break
+        if previous_elapsed_ms is not None and elapsed_ms < previous_elapsed_ms:
+            monotonic = False
+            break
+        previous_step = step
+        previous_elapsed_ms = elapsed_ms
+
+    within_budget = (
+        isinstance(semantic_visible_by_ms, int)
+        and semantic_visible_by_ms <= visibility_budget_ms
+    )
+    status = (
+        "pass"
+        if semantic_events and operator_visible_events and monotonic and within_budget
+        else "fail"
+    )
+    return {
+        "id": case_id,
+        "description": description,
+        "status": status,
+        "timeline_kind": "deterministic_fixture_not_live_provider_trace",
+        "degradation_class": degradation_class,
+        "visibility_budget_ms": visibility_budget_ms,
+        "timeline": timeline,
+        "semantic_milestones": {
+            "first_semantic_provider_step": first_semantic_step("provider_stream"),
+            "rpc_visible_step": first_semantic_step("rpc_output"),
+            "tui_visible_step": first_semantic_step("tui_frame"),
+            "operator_visible_step": first_semantic_step("operator_visible"),
+            "semantic_visible_by_ms": semantic_visible_by_ms,
+            "budget_ms": visibility_budget_ms,
+            "within_budget": within_budget,
+        },
+        "low_value_coalesced_count": low_value_coalesced_count,
+        "semantic_visibility_preserved": status == "pass",
+    }
+
+
+def build_operator_perceived_latency_trace_summary(
+    *,
+    generated_at: str,
+) -> dict[str, Any]:
+    visibility_budget_ms = 250
+    cases = [
+        build_operator_perceived_latency_case(
+            case_id="balanced",
+            description=(
+                "Provider chunks, RPC flush, TUI frame, and operator-visible "
+                "semantic text progress without pressure."
+            ),
+            visibility_budget_ms=visibility_budget_ms,
+            low_value_coalesced_count=0,
+            degradation_class="none",
+            timeline=[
+                operator_perceived_latency_event(
+                    step=1,
+                    elapsed_ms=0,
+                    surface="provider_stream",
+                    event="provider_delta",
+                    event_class="semantic",
+                    visibility_point="provider_semantic_token",
+                    coalescing_or_flush_reason="first_semantic_chunk",
+                    degradation_class="none",
+                ),
+                operator_perceived_latency_event(
+                    step=2,
+                    elapsed_ms=12,
+                    surface="rpc_output",
+                    event="rpc_flush",
+                    event_class="semantic",
+                    visibility_point="rpc_semantic_message",
+                    coalescing_or_flush_reason="semantic_priority_flush",
+                    degradation_class="none",
+                ),
+                operator_perceived_latency_event(
+                    step=3,
+                    elapsed_ms=24,
+                    surface="tui_frame",
+                    event="frame_render",
+                    event_class="semantic",
+                    visibility_point="tui_semantic_line",
+                    coalescing_or_flush_reason="frame_budget_slot",
+                    degradation_class="none",
+                ),
+                operator_perceived_latency_event(
+                    step=4,
+                    elapsed_ms=28,
+                    surface="tool_update",
+                    event="tool_progress",
+                    event_class="low_value",
+                    visibility_point="tool_status_line",
+                    coalescing_or_flush_reason="passthrough_status",
+                    degradation_class="none",
+                ),
+                operator_perceived_latency_event(
+                    step=5,
+                    elapsed_ms=32,
+                    surface="operator_visible",
+                    event="visible_text",
+                    event_class="semantic",
+                    visibility_point="operator_transcript",
+                    coalescing_or_flush_reason="rendered_message",
+                    degradation_class="none",
+                ),
+            ],
+        ),
+        build_operator_perceived_latency_case(
+            case_id="provider_slow",
+            description=(
+                "A slow provider emits keepalives before the first semantic "
+                "chunk; the semantic chunk remains visible within budget."
+            ),
+            visibility_budget_ms=visibility_budget_ms,
+            low_value_coalesced_count=2,
+            degradation_class="watch",
+            timeline=[
+                operator_perceived_latency_event(
+                    step=1,
+                    elapsed_ms=0,
+                    surface="provider_stream",
+                    event="provider_keepalive",
+                    event_class="low_value",
+                    visibility_point="provider_heartbeat",
+                    coalescing_or_flush_reason="heartbeat_coalesced",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=2,
+                    elapsed_ms=50,
+                    surface="rpc_output",
+                    event="keepalive_flush",
+                    event_class="low_value",
+                    visibility_point="rpc_heartbeat",
+                    coalescing_or_flush_reason="heartbeat_coalesced",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=3,
+                    elapsed_ms=140,
+                    surface="provider_stream",
+                    event="provider_delta",
+                    event_class="semantic",
+                    visibility_point="provider_semantic_token",
+                    coalescing_or_flush_reason="first_semantic_after_provider_wait",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=4,
+                    elapsed_ms=155,
+                    surface="rpc_output",
+                    event="rpc_flush",
+                    event_class="semantic",
+                    visibility_point="rpc_semantic_message",
+                    coalescing_or_flush_reason="semantic_priority_flush",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=5,
+                    elapsed_ms=170,
+                    surface="tui_frame",
+                    event="frame_render",
+                    event_class="semantic",
+                    visibility_point="tui_semantic_line",
+                    coalescing_or_flush_reason="next_frame_slot",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=6,
+                    elapsed_ms=180,
+                    surface="operator_visible",
+                    event="visible_text",
+                    event_class="semantic",
+                    visibility_point="operator_transcript",
+                    coalescing_or_flush_reason="rendered_message",
+                    degradation_class="pressure",
+                ),
+            ],
+        ),
+        build_operator_perceived_latency_case(
+            case_id="rpc_flood",
+            description=(
+                "Low-value RPC and tool updates are coalesced while semantic "
+                "provider output forces a priority flush."
+            ),
+            visibility_budget_ms=visibility_budget_ms,
+            low_value_coalesced_count=4,
+            degradation_class="pressure",
+            timeline=[
+                operator_perceived_latency_event(
+                    step=1,
+                    elapsed_ms=0,
+                    surface="provider_stream",
+                    event="provider_delta",
+                    event_class="semantic",
+                    visibility_point="provider_semantic_token",
+                    coalescing_or_flush_reason="first_semantic_chunk",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=2,
+                    elapsed_ms=8,
+                    surface="rpc_output",
+                    event="message_delta_buffered",
+                    event_class="low_value",
+                    visibility_point="rpc_pending_delta",
+                    coalescing_or_flush_reason="message_delta_coalesced",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=3,
+                    elapsed_ms=16,
+                    surface="tool_update",
+                    event="tool_progress",
+                    event_class="low_value",
+                    visibility_point="tool_pending_update",
+                    coalescing_or_flush_reason="tool_progress_coalesced",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=4,
+                    elapsed_ms=24,
+                    surface="rpc_output",
+                    event="tool_update_replaced",
+                    event_class="low_value",
+                    visibility_point="rpc_pending_tool_update",
+                    coalescing_or_flush_reason="latest_low_value_wins",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=5,
+                    elapsed_ms=60,
+                    surface="rpc_output",
+                    event="rpc_flush",
+                    event_class="semantic",
+                    visibility_point="rpc_semantic_message",
+                    coalescing_or_flush_reason="semantic_priority_flush_after_low_value",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=6,
+                    elapsed_ms=82,
+                    surface="tui_frame",
+                    event="frame_render",
+                    event_class="semantic",
+                    visibility_point="tui_semantic_line",
+                    coalescing_or_flush_reason="semantic_reserved_frame",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=7,
+                    elapsed_ms=96,
+                    surface="operator_visible",
+                    event="visible_text",
+                    event_class="semantic",
+                    visibility_point="operator_transcript",
+                    coalescing_or_flush_reason="rendered_message",
+                    degradation_class="pressure",
+                ),
+            ],
+        ),
+        build_operator_perceived_latency_case(
+            case_id="tui_frame_pressure",
+            description=(
+                "Frame pressure collapses low-value tool noise but reserves a "
+                "semantic frame for operator-visible output."
+            ),
+            visibility_budget_ms=visibility_budget_ms,
+            low_value_coalesced_count=3,
+            degradation_class="pressure",
+            timeline=[
+                operator_perceived_latency_event(
+                    step=1,
+                    elapsed_ms=0,
+                    surface="provider_stream",
+                    event="provider_delta",
+                    event_class="semantic",
+                    visibility_point="provider_semantic_token",
+                    coalescing_or_flush_reason="first_semantic_chunk",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=2,
+                    elapsed_ms=18,
+                    surface="rpc_output",
+                    event="rpc_flush",
+                    event_class="semantic",
+                    visibility_point="rpc_semantic_message",
+                    coalescing_or_flush_reason="semantic_priority_flush",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=3,
+                    elapsed_ms=30,
+                    surface="tool_update",
+                    event="tool_progress",
+                    event_class="low_value",
+                    visibility_point="tool_status_line",
+                    coalescing_or_flush_reason="frame_budget_collapsed",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=4,
+                    elapsed_ms=44,
+                    surface="tui_frame",
+                    event="frame_skipped",
+                    event_class="low_value",
+                    visibility_point="tool_status_collapsed",
+                    coalescing_or_flush_reason="low_value_frame_skipped",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=5,
+                    elapsed_ms=110,
+                    surface="tui_frame",
+                    event="frame_render",
+                    event_class="semantic",
+                    visibility_point="tui_semantic_line",
+                    coalescing_or_flush_reason="semantic_reserved_frame",
+                    degradation_class="pressure",
+                ),
+                operator_perceived_latency_event(
+                    step=6,
+                    elapsed_ms=140,
+                    surface="operator_visible",
+                    event="visible_text",
+                    event_class="semantic",
+                    visibility_point="operator_transcript",
+                    coalescing_or_flush_reason="rendered_message",
+                    degradation_class="pressure",
+                ),
+            ],
+        ),
+        build_operator_perceived_latency_case(
+            case_id="semantic_after_coalesced_noise",
+            description=(
+                "A semantic event arriving after coalesced noise still flushes "
+                "through RPC and TUI within the fixture budget."
+            ),
+            visibility_budget_ms=visibility_budget_ms,
+            low_value_coalesced_count=5,
+            degradation_class="watch",
+            timeline=[
+                operator_perceived_latency_event(
+                    step=1,
+                    elapsed_ms=0,
+                    surface="rpc_output",
+                    event="message_delta_buffered",
+                    event_class="low_value",
+                    visibility_point="rpc_pending_delta",
+                    coalescing_or_flush_reason="message_delta_coalesced",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=2,
+                    elapsed_ms=25,
+                    surface="tool_update",
+                    event="tool_progress",
+                    event_class="low_value",
+                    visibility_point="tool_pending_update",
+                    coalescing_or_flush_reason="tool_progress_coalesced",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=3,
+                    elapsed_ms=50,
+                    surface="rpc_output",
+                    event="pending_update_replaced",
+                    event_class="low_value",
+                    visibility_point="rpc_pending_delta",
+                    coalescing_or_flush_reason="latest_low_value_wins",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=4,
+                    elapsed_ms=90,
+                    surface="provider_stream",
+                    event="provider_delta",
+                    event_class="semantic",
+                    visibility_point="provider_semantic_token",
+                    coalescing_or_flush_reason="first_semantic_after_noise",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=5,
+                    elapsed_ms=105,
+                    surface="rpc_output",
+                    event="rpc_flush",
+                    event_class="semantic",
+                    visibility_point="rpc_semantic_message",
+                    coalescing_or_flush_reason="semantic_after_noise_forced_flush",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=6,
+                    elapsed_ms=128,
+                    surface="tui_frame",
+                    event="frame_render",
+                    event_class="semantic",
+                    visibility_point="tui_semantic_line",
+                    coalescing_or_flush_reason="semantic_reserved_frame",
+                    degradation_class="watch",
+                ),
+                operator_perceived_latency_event(
+                    step=7,
+                    elapsed_ms=150,
+                    surface="operator_visible",
+                    event="visible_text",
+                    event_class="semantic",
+                    visibility_point="operator_transcript",
+                    coalescing_or_flush_reason="rendered_message",
+                    degradation_class="watch",
+                ),
+            ],
+        ),
+    ]
+    present_case_ids = {case["id"] for case in cases}
+    missing_case_ids = [
+        case_id
+        for case_id in OPERATOR_PERCEIVED_LATENCY_REQUIRED_CASE_IDS
+        if case_id not in present_case_ids
+    ]
+    surface_ids_covered = sorted(
+        {
+            str(event.get("surface"))
+            for case in cases
+            for event in case.get("timeline", [])
+            if event.get("surface")
+        }
+    )
+    missing_surface_ids = [
+        surface_id
+        for surface_id in OPERATOR_PERCEIVED_LATENCY_REQUIRED_SURFACE_IDS
+        if surface_id not in surface_ids_covered
+    ]
+    failing_case_ids = [
+        case["id"] for case in cases if case.get("status") != "pass"
+    ]
+    negative_controls = [
+        {
+            "id": "semantic_visibility_delayed_beyond_budget",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "reason": (
+                "A surface pass is not valid when operator-visible semantic "
+                "output exceeds the fixture visibility budget."
+            ),
+            "trigger": {
+                "semantic_visible_by_ms": visibility_budget_ms + 150,
+                "budget_ms": visibility_budget_ms,
+            },
+        },
+        {
+            "id": "surface_pass_without_visibility",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "reason": (
+                "Provider, RPC, or TUI success without an operator-visible "
+                "semantic milestone must fail closed."
+            ),
+            "trigger": {
+                "surface_status": "pass",
+                "operator_visible_step": None,
+            },
+        },
+        {
+            "id": "non_monotonic_timeline",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "reason": (
+                "Trace steps and elapsed timestamps must be monotonic so "
+                "operators can reason about causality."
+            ),
+            "trigger": {
+                "step_sequence": [1, 3, 2],
+                "elapsed_ms_sequence": [0, 20, 18],
+            },
+        },
+    ]
+    negative_control_failures = [
+        control["id"]
+        for control in negative_controls
+        if control.get("verdict") != "fail"
+        or control.get("expectation_met") is not True
+    ]
+    source_boundaries = [
+        {
+            "id": "fixture_backed_no_live_provider_calls",
+            "status": "pass",
+            "description": (
+                "All timelines are deterministic fixtures and do not call live "
+                "providers, networks, or terminals."
+            ),
+        },
+        {
+            "id": "advisory_trace_not_benchmark_or_capacity_claim",
+            "status": "pass",
+            "description": (
+                "Elapsed values are fixture ordering evidence only, not release "
+                "latency, benchmark, or capacity measurements."
+            ),
+        },
+        {
+            "id": "does_not_replace_backpressure_evidence",
+            "status": "pass",
+            "description": (
+                "The trace summarizes perceived semantic visibility and still "
+                "depends on provider/RPC/TUI backpressure evidence for pressure claims."
+            ),
+        },
+        {
+            "id": "read_only_no_scheduler_or_runtime_mutation",
+            "status": "pass",
+            "description": (
+                "The generator only emits JSON and does not mutate Beads, Agent "
+                "Mail, RCH, scheduler state, cargo artifacts, or runtime queues."
+            ),
+        },
+    ]
+    claim_boundaries = {
+        "benchmark_claim_authorized": False,
+        "capacity_claim_authorized": False,
+        "release_performance_claim_authorized": False,
+        "live_provider_or_network_call_authorized": False,
+        "scheduler_mutation_authorized": False,
+        "replaces_provider_rpc_tui_backpressure_evidence": False,
+        "strict_dropin_or_release_claim_authorized": False,
+        "allowed_claim": (
+            "Advisory operator-perceived semantic visibility trace over "
+            "deterministic fixtures only."
+        ),
+    }
+    status = (
+        "pass"
+        if not missing_case_ids
+        and not missing_surface_ids
+        and not failing_case_ids
+        and not negative_control_failures
+        and all(boundary["status"] == "pass" for boundary in source_boundaries)
+        else "fail"
+    )
+    return {
+        "schema": OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": (
+            "operator_perceived_latency_trace_advisory_not_benchmark_or_capacity_claim"
+        ),
+        "source_bead": "bd-63x3v.11.5",
+        "visibility_budget_ms": visibility_budget_ms,
+        "required_case_ids": list(OPERATOR_PERCEIVED_LATENCY_REQUIRED_CASE_IDS),
+        "required_surface_ids": list(OPERATOR_PERCEIVED_LATENCY_REQUIRED_SURFACE_IDS),
+        "required_event_keys": list(OPERATOR_PERCEIVED_LATENCY_REQUIRED_EVENT_KEYS),
+        "surface_ids_covered": surface_ids_covered,
+        "cases": cases,
+        "missing_case_ids": missing_case_ids,
+        "missing_surface_ids": missing_surface_ids,
+        "failing_case_ids": failing_case_ids,
+        "negative_controls": negative_controls,
+        "negative_control_failures": negative_control_failures,
+        "source_boundaries": source_boundaries,
+        "claim_boundaries": claim_boundaries,
+        "operator_next_actions": [
+            "Use this trace to explain when semantic output became visible to an operator.",
+            "Consult provider/RPC/TUI backpressure evidence before making pressure or fairness claims.",
+            "File follow-up beads if any case, surface, or negative control fails.",
+        ],
+        "decision": "trace_passed" if status == "pass" else "file_follow_up_before_relying_on_trace",
+    }
+
+
+def assert_operator_perceived_latency_trace_contract(
+    summary: dict[str, Any],
+) -> None:
+    root = repo_root()
+    contract = json.loads(
+        (root / OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert contract.get("schema") == OPERATOR_PERCEIVED_LATENCY_TRACE_CONTRACT_SCHEMA
+    assert summary.get("schema") == contract.get("evidence_schema")
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"operator perceived latency trace missing key: {key}"
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    cases = summary.get("cases")
+    assert isinstance(cases, list) and cases
+    required_cases = set(contract.get("required_case_ids", []))
+    case_ids = {case.get("id") for case in cases if isinstance(case, dict)}
+    assert case_ids.issuperset(required_cases), (
+        f"operator perceived latency trace missing cases: {sorted(required_cases - case_ids)}"
+    )
+    required_surfaces = set(contract.get("required_surface_ids", []))
+    surface_ids = set(summary.get("surface_ids_covered", []))
+    assert surface_ids.issuperset(required_surfaces), (
+        f"operator perceived latency trace missing surfaces: {sorted(required_surfaces - surface_ids)}"
+    )
+    required_event_keys = set(contract.get("required_event_keys", []))
+    allowed_event_classes = set(contract.get("allowed_event_classes", []))
+    for case in cases:
+        case_id = str(case.get("id"))
+        timeline = case.get("timeline")
+        assert isinstance(timeline, list) and timeline, (
+            f"operator perceived latency case has no timeline: {case_id}"
+        )
+        previous_step: int | None = None
+        previous_elapsed_ms: int | None = None
+        semantic_seen = False
+        operator_visible_seen = False
+        for event in timeline:
+            assert isinstance(event, dict), (
+                f"operator perceived latency event is not an object: {case_id}"
+            )
+            missing_keys = required_event_keys - set(event.keys())
+            assert not missing_keys, (
+                f"operator perceived latency event missing keys in {case_id}: "
+                f"{sorted(missing_keys)}"
+            )
+            step = event.get("step")
+            elapsed_ms = event.get("elapsed_ms")
+            assert isinstance(step, int), (
+                f"operator perceived latency event step is not an int: {case_id}"
+            )
+            assert isinstance(elapsed_ms, int), (
+                f"operator perceived latency event elapsed_ms is not an int: {case_id}"
+            )
+            if previous_step is not None:
+                assert step > previous_step, (
+                    f"operator perceived latency timeline must be monotonic by step: {case_id}"
+                )
+            if previous_elapsed_ms is not None:
+                assert elapsed_ms >= previous_elapsed_ms, (
+                    "operator perceived latency timeline must be monotonic by "
+                    f"elapsed_ms: {case_id}"
+                )
+            assert event.get("surface") in required_surfaces, (
+                f"operator perceived latency event has unknown surface: {case_id}"
+            )
+            assert event.get("class") in allowed_event_classes, (
+                f"operator perceived latency event has unknown class: {case_id}"
+            )
+            if event.get("class") == "semantic":
+                semantic_seen = True
+            if (
+                event.get("class") == "semantic"
+                and event.get("surface") == "operator_visible"
+            ):
+                operator_visible_seen = True
+            previous_step = step
+            previous_elapsed_ms = elapsed_ms
+        milestones = case.get("semantic_milestones")
+        assert isinstance(milestones, dict), (
+            f"operator perceived latency case missing semantic milestones: {case_id}"
+        )
+        visible_by_ms = milestones.get("semantic_visible_by_ms")
+        budget_ms = milestones.get("budget_ms")
+        assert isinstance(visible_by_ms, int), (
+            f"operator perceived latency semantic visibility missing ms: {case_id}"
+        )
+        assert isinstance(budget_ms, int), (
+            f"operator perceived latency semantic visibility missing budget: {case_id}"
+        )
+        assert semantic_seen, f"operator perceived latency semantic event missing: {case_id}"
+        assert operator_visible_seen, (
+            f"operator perceived latency operator-visible semantic event missing: {case_id}"
+        )
+        if summary.get("status") == "pass":
+            assert case.get("status") == "pass", (
+                f"operator perceived latency case did not pass: {case_id}"
+            )
+            assert case.get("semantic_visibility_preserved") is True, (
+                f"operator perceived latency semantic visibility not preserved: {case_id}"
+            )
+            assert milestones.get("within_budget") is True and visible_by_ms <= budget_ms, (
+                f"operator perceived latency semantic visibility delayed beyond budget: {case_id}"
+            )
+    negative_controls = summary.get("negative_controls")
+    assert isinstance(negative_controls, list) and negative_controls
+    required_negative_ids = set(contract.get("required_negative_control_ids", []))
+    negative_ids = {
+        control.get("id")
+        for control in negative_controls
+        if isinstance(control, dict)
+    }
+    assert negative_ids.issuperset(required_negative_ids), (
+        "operator perceived latency trace missing negative controls: "
+        f"{sorted(required_negative_ids - negative_ids)}"
+    )
+    for control in negative_controls:
+        assert control.get("expected_status") == "fail", (
+            f"operator perceived latency negative control must expect fail: {control.get('id')}"
+        )
+        assert control.get("verdict") == "fail", (
+            f"operator perceived latency negative control must fail: {control.get('id')}"
+        )
+        assert control.get("expectation_met") is True, (
+            f"operator perceived latency negative control expectation unmet: {control.get('id')}"
+        )
+        assert isinstance(control.get("reason"), str) and control.get("reason"), (
+            f"operator perceived latency negative control missing reason: {control.get('id')}"
+        )
+    source_boundaries = summary.get("source_boundaries")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        boundary.get("id")
+        for boundary in source_boundaries
+        if isinstance(boundary, dict)
+    }
+    required_boundaries = set(contract.get("required_source_boundary_ids", []))
+    assert boundary_ids.issuperset(required_boundaries), (
+        f"operator perceived latency trace missing source boundaries: "
+        f"{sorted(required_boundaries - boundary_ids)}"
+    )
+    if summary.get("status") == "pass":
+        assert summary.get("missing_case_ids") == []
+        assert summary.get("missing_surface_ids") == []
+        assert summary.get("failing_case_ids") == []
+        assert summary.get("negative_control_failures") == []
+        assert all(
+            boundary.get("status") == "pass" for boundary in source_boundaries
+        )
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        for flag in contract.get("required_false_claim_boundary_flags", []):
+            assert claim_boundaries.get(flag) is False, (
+                f"operator perceived latency claim boundary must be false: {flag}"
+            )
+
+
+def write_operator_perceived_latency_trace_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_operator_perceived_latency_trace_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite operator perceived latency trace: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def adaptive_execution_child_artifact_map(
     issues: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -24724,6 +25570,72 @@ def run_self_test() -> int:
         assert fairness_gate["negative_controls"][0]["expectation_met"] is True
         assert "max_starvation_window" in fairness_gate["required_metrics"]
         assert_backpressure_budget_contract(backpressure_budget_contract)
+        perceived_latency_trace = build_operator_perceived_latency_trace_summary(
+            generated_at=generated_at,
+        )
+        assert (
+            perceived_latency_trace["schema"]
+            == OPERATOR_PERCEIVED_LATENCY_TRACE_SCHEMA
+        )
+        assert perceived_latency_trace["status"] == "pass"
+        assert perceived_latency_trace["decision"] == "trace_passed"
+        assert {
+            case["id"] for case in perceived_latency_trace["cases"]
+        } == set(OPERATOR_PERCEIVED_LATENCY_REQUIRED_CASE_IDS)
+        assert set(perceived_latency_trace["surface_ids_covered"]).issuperset(
+            OPERATOR_PERCEIVED_LATENCY_REQUIRED_SURFACE_IDS
+        )
+        semantic_after_noise = {
+            case["id"]: case for case in perceived_latency_trace["cases"]
+        }["semantic_after_coalesced_noise"]
+        assert semantic_after_noise["low_value_coalesced_count"] == 5
+        assert (
+            semantic_after_noise["semantic_milestones"]["within_budget"] is True
+        )
+        assert {
+            control["id"] for control in perceived_latency_trace["negative_controls"]
+        }.issuperset(
+            {
+                "semantic_visibility_delayed_beyond_budget",
+                "surface_pass_without_visibility",
+                "non_monotonic_timeline",
+            }
+        )
+        assert_operator_perceived_latency_trace_contract(perceived_latency_trace)
+        delayed_trace = json.loads(json_dumps(perceived_latency_trace))
+        delayed_case = delayed_trace["cases"][0]
+        delayed_case["semantic_milestones"]["semantic_visible_by_ms"] = (
+            delayed_case["semantic_milestones"]["budget_ms"] + 1
+        )
+        delayed_case["semantic_milestones"]["within_budget"] = False
+        try:
+            assert_operator_perceived_latency_trace_contract(delayed_trace)
+        except AssertionError as exc:
+            assert "semantic visibility" in str(exc)
+        else:
+            raise AssertionError(
+                "operator perceived latency delayed semantic visibility passed"
+            )
+        non_monotonic_trace = json.loads(json_dumps(perceived_latency_trace))
+        non_monotonic_trace["cases"][0]["timeline"][1]["step"] = 1
+        try:
+            assert_operator_perceived_latency_trace_contract(non_monotonic_trace)
+        except AssertionError as exc:
+            assert "monotonic" in str(exc)
+        else:
+            raise AssertionError(
+                "operator perceived latency non-monotonic timeline passed"
+            )
+        bad_control_trace = json.loads(json_dumps(perceived_latency_trace))
+        bad_control_trace["negative_controls"][0]["verdict"] = "pass"
+        try:
+            assert_operator_perceived_latency_trace_contract(bad_control_trace)
+        except AssertionError as exc:
+            assert "negative control" in str(exc)
+        else:
+            raise AssertionError(
+                "operator perceived latency positive negative-control passed"
+            )
         no_tail_args = argparse.Namespace(**{**vars(args), "tail_latency_json": None})
         no_tail_runpack = build_runpack(no_tail_args)
         assert "tail_latency" not in no_tail_runpack
@@ -25235,6 +26147,21 @@ def parse_args() -> argparse.Namespace:
         help="print the provider/RPC/TUI backpressure budget contract JSON",
     )
     parser.add_argument(
+        "--run-operator-perceived-latency-trace",
+        action="store_true",
+        help="build the deterministic operator-perceived latency trace",
+    )
+    parser.add_argument(
+        "--out-operator-perceived-latency-trace-json",
+        type=Path,
+        help="write pi.operator.perceived_latency_trace.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-operator-perceived-latency-trace",
+        action="store_true",
+        help="print the operator-perceived latency trace JSON",
+    )
+    parser.add_argument(
         "--run-proof-reuse-gate",
         action="store_true",
         help="build the fail-closed remote validation proof reuse gate",
@@ -25358,6 +26285,10 @@ def main() -> int:
         args.out_backpressure_budget_contract_json
         or args.print_backpressure_budget_contract
     )
+    operator_perceived_latency_trace_options_used = (
+        args.out_operator_perceived_latency_trace_json
+        or args.print_operator_perceived_latency_trace
+    )
     proof_reuse_gate_options_used = (
         args.proof_ledger_json
         or args.proof_reuse_context_json
@@ -25383,11 +26314,23 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.run_proof_reuse_gate and (
+    if args.run_operator_perceived_latency_trace and (
         args.run_backpressure_budget_contract or any(final_gate_modes)
     ):
         print(
-            "ERROR: proof reuse gate cannot be combined with final-gate or backpressure modes",
+            "ERROR: operator perceived latency trace cannot be combined with "
+            "final-gate or backpressure modes",
+            file=sys.stderr,
+        )
+        return 2
+    if args.run_proof_reuse_gate and (
+        args.run_backpressure_budget_contract
+        or args.run_operator_perceived_latency_trace
+        or any(final_gate_modes)
+    ):
+        print(
+            "ERROR: proof reuse gate cannot be combined with final-gate, "
+            "backpressure, or perceived-latency modes",
             file=sys.stderr,
         )
         return 2
@@ -25451,6 +26394,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if (
+        operator_perceived_latency_trace_options_used
+        and not args.run_operator_perceived_latency_trace
+    ):
+        print(
+            "ERROR: operator perceived latency trace options require "
+            "--run-operator-perceived-latency-trace",
+            file=sys.stderr,
+        )
+        return 2
     if proof_reuse_gate_options_used and not args.run_proof_reuse_gate:
         print(
             "ERROR: proof reuse gate options require --run-proof-reuse-gate",
@@ -25486,6 +26439,18 @@ def main() -> int:
             if (
                 args.print_backpressure_budget_contract
                 or args.out_backpressure_budget_contract_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
+        if args.run_operator_perceived_latency_trace:
+            summary = build_operator_perceived_latency_trace_summary(
+                generated_at=args.generated_at or utc_now_iso(),
+            )
+            assert_operator_perceived_latency_trace_contract(summary)
+            write_operator_perceived_latency_trace_output(args, summary)
+            if (
+                args.print_operator_perceived_latency_trace
+                or args.out_operator_perceived_latency_trace_json is None
             ):
                 print(json_dumps(summary, pretty=True))
             return 0

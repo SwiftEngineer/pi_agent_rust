@@ -2080,6 +2080,16 @@ the current artifact is
 advisory closeout evidence only and does not replace Beads, git, RCH, Agent
 Mail, UBS, CI, claim-integrity gates, child evidence, or source artifacts.
 
+The operator-perceived latency trace emits
+`pi.operator.perceived_latency_trace.v1`. It joins deterministic provider,
+RPC, TUI, tool-update, and operator-visible fixture timelines so operators can
+see when semantic output became visible while low-value updates were coalesced.
+It is governed by
+`docs/contracts/operator-perceived-latency-trace-contract.json`; the current
+fixture artifact is `docs/evidence/operator-perceived-latency-trace.json`.
+The trace is advisory only and does not authorize benchmark, capacity, release
+performance, strict drop-in, or backpressure-budget replacement claims.
+
 For the full launch, throttling, recovery, and handoff workflow for large
 multi-agent runs, see [docs/swarm-operations-runbook.md](docs/swarm-operations-runbook.md).
 
