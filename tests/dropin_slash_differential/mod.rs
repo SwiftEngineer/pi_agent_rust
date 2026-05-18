@@ -18,8 +18,10 @@ const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const PI_MONO_ROOT_RELATIVE: &str = "legacy_pi_mono_code/pi-mono";
 const PI_MONO_TSX_RELATIVE: &str = "node_modules/tsx/dist/cli.mjs";
 const PI_MONO_CLI_RELATIVE: &str = "packages/coding-agent/src/cli.ts";
-const RPC_TEST_PROVIDER: &str = "ollama";
-const RPC_TEST_MODEL: &str = "qwen2.5:0.5b";
+const RPC_TEST_PROVIDER: &str = "slash-differential-fixture";
+const RPC_TEST_MODEL: &str = "credential-free-fixture";
+const RPC_TEST_BASE_URL: &str = "http://127.0.0.1:9/v1";
+const RPC_TEST_API_KEY: &str = "not-used";
 
 /// A slash command test scenario.
 #[derive(Debug, Clone)]
@@ -555,6 +557,7 @@ fn run_rust_rpc_sequence(
     let sessions_dir = workspace.join("sessions");
     let package_dir = workspace.join("packages");
     let config_path = workspace.join("settings.json");
+    write_fixture_models_json(&agent_dir)?;
 
     let mut child = Command::new(&paths.rust_pi)
         .args([
@@ -596,6 +599,7 @@ fn run_pi_mono_rpc_sequence(
     let agent_dir = workspace.join("agent");
     std::fs::create_dir_all(&agent_dir)
         .map_err(|err| anyhow::anyhow!("create {}: {err}", agent_dir.display()))?;
+    write_fixture_models_json(&agent_dir)?;
 
     let mut child = Command::new("/usr/bin/node")
         .arg(&paths.pi_mono_tsx)
@@ -622,6 +626,39 @@ fn run_pi_mono_rpc_sequence(
         .map_err(|err| anyhow::anyhow!("spawn pi-mono RPC: {err}"))?;
 
     run_rpc_sequence("pi-mono", &mut child, commands)
+}
+
+fn write_fixture_models_json(agent_dir: &Path) -> anyhow::Result<()> {
+    let models_path = agent_dir.join("models.json");
+    let payload = json!({
+        "providers": {
+            RPC_TEST_PROVIDER: {
+                "baseUrl": RPC_TEST_BASE_URL,
+                "api": "openai-completions",
+                "apiKey": RPC_TEST_API_KEY,
+                "models": [
+                    {
+                        "id": RPC_TEST_MODEL,
+                        "name": "Credential-Free Slash Differential Fixture",
+                        "api": "openai-completions",
+                        "reasoning": false,
+                        "input": ["text"],
+                        "cost": {
+                            "input": 0,
+                            "output": 0,
+                            "cacheRead": 0,
+                            "cacheWrite": 0
+                        },
+                        "contextWindow": 4096,
+                        "maxTokens": 1024
+                    }
+                ]
+            }
+        }
+    });
+    let content = serde_json::to_string_pretty(&payload)?;
+    std::fs::write(&models_path, content)
+        .map_err(|err| anyhow::anyhow!("write {}: {err}", models_path.display()))
 }
 
 fn run_rpc_sequence(label: &str, child: &mut Child, commands: &[RpcStep]) -> anyhow::Result<Value> {
