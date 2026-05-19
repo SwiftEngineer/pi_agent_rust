@@ -22,7 +22,7 @@ capability-gated hostcall interface.
 | `node:events` | Full | `EventEmitter` class with `on`, `once`, `off`, `emit`, `removeListener`, `removeAllListeners`, `listenerCount`, `listeners`, `prependListener` |
 | `node:util` | Full | `inspect`, `promisify`, `callbackify`, `format`, `deprecate`, `inherits`, `debuglog`, `stripVTControlCharacters`, `types.*`, `TextEncoder`, `TextDecoder` |
 | `node:child_process` | Full | `spawn`, `spawnSync`, `execSync`, `exec`, `execFile`, `execFileSync`, `fork` (stub) |
-| `node:crypto` | Partial | `randomBytes`, `randomUUID`, `createHash` (SHA-256/SHA-384/SHA-512, SHA-1, MD5), `createHmac`, `timingSafeEqual`, `getHashes`, `pbkdf2`/`scrypt`, Ed25519 `sign`/`verify` |
+| `node:crypto` | Partial | `randomBytes`, `randomUUID`, `createHash` (SHA-256/SHA-384/SHA-512, SHA-1, MD5), `createHmac`, `timingSafeEqual`, `getHashes`, `pbkdf2`/`scrypt`, AES-128-GCM/AES-256-GCM `createCipheriv`/`createDecipheriv`, Ed25519 `sign`/`verify` |
 | `node:http` | Partial | `request`, `get`, `createServer` (stub), `STATUS_CODES`, `METHODS`, `IncomingMessage`, `ClientRequest` -- routes through `pi.http()` hostcall |
 | `node:url` | Partial | `URL` (globalThis), `URLSearchParams`, `parse`, `format`, `resolve`, `fileURLToPath`, `pathToFileURL` |
 | `node:stream` | Partial | `Readable`, `Writable`, `Transform`, `PassThrough`, `Duplex`, `pipeline`, `finished` |
@@ -73,7 +73,8 @@ routes `readFileSync` and `statSync` calls through the hostcall boundary
 | `getHashes()` | Real | Returns supported algorithm list |
 | `pbkdf2`/`scrypt` | Real | Key derivation via native hostcall |
 | `sign`/`verify` | Partial | Ed25519 with PKCS#8 private and SPKI public keys; RSA/ECDSA fail closed |
-| `createCipher`/`createDecipher` | Missing | Symmetric encryption not implemented |
+| `createCipheriv`/`createDecipheriv` | Partial | Buffered AES-128-GCM and AES-256-GCM with 12-byte IVs, 16-byte auth tags, optional AAD, and fail-closed unsupported algorithms |
+| `createCipher`/`createDecipher` | Missing | Deprecated password-derived cipher APIs are not implemented |
 
 ### `node:child_process` Detail
 

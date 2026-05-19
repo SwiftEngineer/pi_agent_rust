@@ -691,38 +691,130 @@ fn scrypt_sync_rejects_non_positive_rp() {
 }
 
 #[test]
-fn create_cipheriv_unimplemented_throws() {
+fn aes_128_gcm_matches_known_vector() {
     let result = eval_crypto(
         r#"(() => {
-        try {
-            createCipheriv("aes-256-gcm", randomBytes(32), randomBytes(16));
-            return "no-throw";
-        } catch (e) {
-            return "threw:" + e.message;
-        }
+        const key = new Uint8Array(16);
+        const iv = new Uint8Array(12);
+        const plaintext = new Uint8Array(16);
+        const cipher = createCipheriv("aes-128-gcm", key, iv);
+        const ciphertext = cipher.update(plaintext).toString("hex") + cipher.final("hex");
+        return ciphertext + "|" + cipher.getAuthTag().toString("hex");
     })()"#,
     );
-    assert!(
-        result.contains("createCipheriv is not implemented"),
-        "Expected createCipheriv to fail loudly, got: {result}"
+    assert_eq!(
+        result,
+        "0388dace60b6a392f328c2b971b2fe78|ab6e47d42cec13bdf53a67b21257bddf"
     );
 }
 
 #[test]
-fn create_decipheriv_unimplemented_throws() {
+fn aes_256_gcm_roundtrips_with_aad() {
     let result = eval_crypto(
         r#"(() => {
+        const key = new Uint8Array(32);
+        for (let i = 0; i < key.length; i++) key[i] = i;
+        const iv = new Uint8Array(12);
+        for (let i = 0; i < iv.length; i++) iv[i] = i + 1;
+        const cipher = createCipheriv("aes-256-gcm", key, iv);
+        cipher.setAAD("header");
+        const ciphertext = cipher.update("hello ", "utf8", "hex") + cipher.final("hex");
+        const tag = cipher.getAuthTag();
+
+        const decipher = createDecipheriv("aes-256-gcm", key, iv);
+        decipher.setAAD("header");
+        decipher.setAuthTag(tag);
+        return decipher.update(ciphertext, "hex").toString("utf8") + decipher.final("utf8");
+    })()"#,
+    );
+    assert_eq!(result, "hello ");
+}
+
+#[test]
+fn aes_gcm_rejects_bad_key_iv_tag_and_algorithm() {
+    let result = eval_crypto(
+        r#"(() => {
+        const errors = [];
+        try { createCipheriv("aes-256-gcm", new Uint8Array(16), new Uint8Array(12)); }
+        catch (e) { errors.push(e.message); }
+        try { createCipheriv("aes-256-gcm", new Uint8Array(32), new Uint8Array(16)); }
+        catch (e) { errors.push(e.message); }
+        try { createCipheriv("aes-192-gcm", new Uint8Array(24), new Uint8Array(12)); }
+        catch (e) { errors.push(e.message); }
         try {
-            createDecipheriv("aes-256-gcm", randomBytes(32), randomBytes(16));
-            return "no-throw";
+            const d = createDecipheriv("aes-128-gcm", new Uint8Array(16), new Uint8Array(12));
+            d.setAuthTag(new Uint8Array(8));
+        } catch (e) { errors.push(e.message); }
+        return errors.join("|");
+    })()"#,
+    );
+    assert!(
+        result.contains("aes-256-gcm key must be exactly 32 bytes"),
+        "missing bad key error: {result}"
+    );
+    assert!(
+        result.contains("AES-GCM IV must be exactly 12 bytes"),
+        "missing bad IV error: {result}"
+    );
+    assert!(
+        result.contains("unsupported cipher algorithm 'aes-192-gcm'"),
+        "missing unsupported algorithm error: {result}"
+    );
+    assert!(
+        result.contains("requires a 16-byte tag"),
+        "missing bad tag error: {result}"
+    );
+}
+
+#[test]
+fn aes_gcm_authentication_failure_throws() {
+    let result = eval_crypto(
+        r#"(() => {
+        const key = new Uint8Array(16);
+        const iv = new Uint8Array(12);
+        const cipher = createCipheriv("aes-128-gcm", key, iv);
+        const ciphertext = cipher.update("secret", "utf8", "hex") + cipher.final("hex");
+        const tag = cipher.getAuthTag();
+        tag[0] ^= 1;
+        const decipher = createDecipheriv("aes-128-gcm", key, iv);
+        decipher.setAuthTag(tag);
+        try {
+          decipher.update(ciphertext, "hex");
+          decipher.final("utf8");
+          return "no-throw";
         } catch (e) {
-            return "threw:" + e.message;
+          return "threw:" + e.message;
         }
     })()"#,
     );
     assert!(
-        result.contains("createDecipheriv is not implemented"),
-        "Expected createDecipheriv to fail loudly, got: {result}"
+        result.contains("AES-GCM authentication failed"),
+        "Expected auth failure, got: {result}"
+    );
+}
+
+#[test]
+fn aes_gcm_rejects_double_final_and_missing_auth_tag() {
+    let result = eval_crypto(
+        r#"(() => {
+        const key = new Uint8Array(16);
+        const iv = new Uint8Array(12);
+        const errors = [];
+        const cipher = createCipheriv("aes-128-gcm", key, iv);
+        cipher.final("hex");
+        try { cipher.final("hex"); } catch (e) { errors.push(e.message); }
+        const decipher = createDecipheriv("aes-128-gcm", key, iv);
+        try { decipher.final("utf8"); } catch (e) { errors.push(e.message); }
+        return errors.join("|");
+    })()"#,
+    );
+    assert!(
+        result.contains("Cipher.final() already called"),
+        "missing double-final error: {result}"
+    );
+    assert!(
+        result.contains("requires setAuthTag() first"),
+        "missing auth-tag-required error: {result}"
     );
 }
 

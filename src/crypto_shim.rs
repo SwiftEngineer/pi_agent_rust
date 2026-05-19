@@ -6,7 +6,10 @@
 //! JS module.
 
 use pbkdf2::pbkdf2_hmac;
-use ring::signature::{Ed25519KeyPair, UnparsedPublicKey};
+use ring::{
+    aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
+    signature::{Ed25519KeyPair, UnparsedPublicKey},
+};
 use rquickjs::prelude::Func;
 use scrypt::{Params as ScryptParams, scrypt};
 use sha2::{Digest, Sha256, Sha384};
@@ -31,6 +34,7 @@ pub fn register_crypto_hostcalls(global: &rquickjs::Object<'_>) -> rquickjs::Res
     register_timing_safe_equal_hostcall(global)?;
     register_pbkdf2_hostcall(global)?;
     register_scrypt_hostcall(global)?;
+    register_aes_gcm_hostcalls(global)?;
     register_ed25519_hostcalls(global)?;
     Ok(())
 }
@@ -415,6 +419,126 @@ fn register_scrypt_hostcall(global: &rquickjs::Object<'_>) -> rquickjs::Result<(
     )
 }
 
+fn register_aes_gcm_hostcalls(global: &rquickjs::Object<'_>) -> rquickjs::Result<()> {
+    global.set(
+        "__pi_crypto_aes_gcm_encrypt_native",
+        Func::from(
+            |algorithm: String,
+             key: rquickjs::TypedArray<'_, u8>,
+             iv: rquickjs::TypedArray<'_, u8>,
+             aad: rquickjs::TypedArray<'_, u8>,
+             plaintext: rquickjs::TypedArray<'_, u8>,
+             encoding: String|
+             -> rquickjs::Result<String> {
+                let key_bytes = key
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached key buffer"))?;
+                let iv_bytes = iv
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached IV buffer"))?;
+                let aad_bytes = aad
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached AAD buffer"))?;
+                let plaintext_bytes = plaintext.as_bytes().ok_or_else(|| {
+                    rquickjs::Error::new_from_js("buffer", "Detached plaintext buffer")
+                })?;
+                let cipher = aes_gcm_key(&algorithm, key_bytes)?;
+                let nonce = Nonce::try_assume_unique_for_key(iv_bytes).map_err(|_| {
+                    rquickjs::Error::new_from_js("buffer", "AES-GCM IV must be exactly 12 bytes")
+                })?;
+                let mut out = plaintext_bytes.to_vec();
+                let tag = cipher
+                    .seal_in_place_separate_tag(nonce, Aad::from(aad_bytes), &mut out)
+                    .map_err(|_| {
+                        rquickjs::Error::new_from_js("crypto", "AES-GCM encryption failed")
+                    })?;
+                out.extend_from_slice(tag.as_ref());
+                Ok(encode_output(&out, &encoding))
+            },
+        ),
+    )?;
+
+    global.set(
+        "__pi_crypto_aes_gcm_decrypt_native",
+        Func::from(
+            |algorithm: String,
+             key: rquickjs::TypedArray<'_, u8>,
+             iv: rquickjs::TypedArray<'_, u8>,
+             aad: rquickjs::TypedArray<'_, u8>,
+             ciphertext: rquickjs::TypedArray<'_, u8>,
+             auth_tag: rquickjs::TypedArray<'_, u8>,
+             encoding: String|
+             -> rquickjs::Result<String> {
+                let key_bytes = key
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached key buffer"))?;
+                let iv_bytes = iv
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached IV buffer"))?;
+                let aad_bytes = aad
+                    .as_bytes()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("buffer", "Detached AAD buffer"))?;
+                let ciphertext_bytes = ciphertext.as_bytes().ok_or_else(|| {
+                    rquickjs::Error::new_from_js("buffer", "Detached ciphertext buffer")
+                })?;
+                let tag_bytes = auth_tag.as_bytes().ok_or_else(|| {
+                    rquickjs::Error::new_from_js("buffer", "Detached auth tag buffer")
+                })?;
+                if tag_bytes.len() != 16 {
+                    return Err(rquickjs::Error::new_from_js(
+                        "buffer",
+                        "AES-GCM auth tag must be exactly 16 bytes",
+                    ));
+                }
+                let cipher = aes_gcm_key(&algorithm, key_bytes)?;
+                let nonce = Nonce::try_assume_unique_for_key(iv_bytes).map_err(|_| {
+                    rquickjs::Error::new_from_js("buffer", "AES-GCM IV must be exactly 12 bytes")
+                })?;
+                let mut in_out = ciphertext_bytes.to_vec();
+                in_out.extend_from_slice(tag_bytes);
+                let plaintext = cipher
+                    .open_in_place(nonce, Aad::from(aad_bytes), &mut in_out)
+                    .map_err(|_| {
+                        rquickjs::Error::new_from_js("crypto", "AES-GCM authentication failed")
+                    })?;
+                Ok(encode_output(plaintext, &encoding))
+            },
+        ),
+    )
+}
+
+fn aes_gcm_key(algorithm: &str, key_bytes: &[u8]) -> rquickjs::Result<LessSafeKey> {
+    let algorithm = match algorithm {
+        "aes-128-gcm" => {
+            if key_bytes.len() != 16 {
+                return Err(rquickjs::Error::new_from_js(
+                    "key",
+                    "aes-128-gcm key must be exactly 16 bytes",
+                ));
+            }
+            &AES_128_GCM
+        }
+        "aes-256-gcm" => {
+            if key_bytes.len() != 32 {
+                return Err(rquickjs::Error::new_from_js(
+                    "key",
+                    "aes-256-gcm key must be exactly 32 bytes",
+                ));
+            }
+            &AES_256_GCM
+        }
+        _ => {
+            return Err(rquickjs::Error::new_from_js(
+                "string",
+                "unsupported cipher algorithm",
+            ));
+        }
+    };
+    let unbound = UnboundKey::new(algorithm, key_bytes)
+        .map_err(|_| rquickjs::Error::new_from_js("key", "invalid AES-GCM key"))?;
+    Ok(LessSafeKey::new(unbound))
+}
+
 fn register_ed25519_hostcalls(global: &rquickjs::Object<'_>) -> rquickjs::Result<()> {
     // __pi_crypto_ed25519_sign_native(pkcs8_private_key, data, encoding) -> signature string
     global.set(
@@ -572,8 +696,14 @@ function hexToBuffer(hex) {
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
+  return bufferFromBytes(bytes);
+}
+
+function bufferFromBytes(input) {
+  const bytes = new Uint8Array(input.length);
+  bytes.set(input);
   bytes.toString = function(enc) {
-    if (enc === 'hex') return hex;
+    if (enc === 'hex') return bufToHex(this);
     if (enc === 'base64') {
       let binary = '';
       let chunk = [];
@@ -618,10 +748,38 @@ function combineChunks(chunks) {
   return combined;
 }
 
-function toUint8Array(input) {
+function toUint8Array(input, encoding) {
   if (input instanceof Uint8Array) return input;
-  if (typeof input === 'string') return new TextEncoder().encode(input);
+  if (typeof input === 'string') {
+    const enc = normalizeBufferEncoding(encoding);
+    if (enc === 'hex') {
+      if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
+        throw new Error('invalid hex input');
+      }
+      return hexToBuffer(input);
+    }
+    if (enc === 'base64') return base64ToBytes(input);
+    return new TextEncoder().encode(input);
+  }
   return new TextEncoder().encode(String(input ?? ''));
+}
+
+function normalizeBufferEncoding(encoding) {
+  if (encoding === undefined || encoding === null) return 'utf8';
+  const enc = String(encoding).toLowerCase();
+  if (enc === 'utf8' || enc === 'utf-8') return 'utf8';
+  if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') return enc;
+  if (enc === 'hex' || enc === 'base64') return enc;
+  throw new Error(`unsupported input encoding '${encoding}'`);
+}
+
+function encodeOutput(bytes, encoding) {
+  const out = bufferFromBytes(bytes);
+  if (encoding === undefined || encoding === null) return out;
+  if (encoding === 'hex') return out.toString('hex');
+  if (encoding === 'base64') return out.toString('base64');
+  if (encoding === 'utf8' || encoding === 'utf-8') return out.toString('utf8');
+  throw new Error(`unsupported output encoding '${encoding}'`);
 }
 
 function base64ToBytes(input) {
@@ -689,6 +847,30 @@ function normalizeDigestName(input) {
 
 function unsupportedCryptoApi(name) {
   throw new Error(`${name} is not implemented in the Pi node:crypto shim`);
+}
+
+function normalizeCipherAlgorithm(algorithm, apiName) {
+  if (algorithm === undefined || algorithm === null || String(algorithm).trim() === '') {
+    throw new Error(`${apiName}: algorithm is required`);
+  }
+  return String(algorithm).trim().toLowerCase();
+}
+
+function validateAesGcmParams(algorithm, key, iv, apiName) {
+  const algo = normalizeCipherAlgorithm(algorithm, apiName);
+  if (algo !== 'aes-128-gcm' && algo !== 'aes-256-gcm') {
+    throw new Error(`${apiName}: unsupported cipher algorithm '${algo}'`);
+  }
+  const keyBuf = toUint8Array(key);
+  const expectedKeyLen = algo === 'aes-128-gcm' ? 16 : 32;
+  if (keyBuf.length !== expectedKeyLen) {
+    throw new Error(`${apiName}: ${algo} key must be exactly ${expectedKeyLen} bytes`);
+  }
+  const ivBuf = toUint8Array(iv);
+  if (ivBuf.length !== 12) {
+    throw new Error(`${apiName}: AES-GCM IV must be exactly 12 bytes`);
+  }
+  return { algo, keyBuf, ivBuf };
 }
 
 export function randomUUID() {
@@ -855,11 +1037,92 @@ export function pbkdf2(password, salt, iterations, keylen, digest, callback) {
 }
 
 export function createCipheriv(algorithm, key, iv) {
-  unsupportedCryptoApi('createCipheriv');
+  const { algo, keyBuf, ivBuf } = validateAesGcmParams(algorithm, key, iv, 'createCipheriv');
+  const encryptNative = requireCryptoHostcall(
+    '__pi_crypto_aes_gcm_encrypt_native',
+    'createCipheriv',
+  );
+  const chunks = [];
+  let aad = new Uint8Array(0);
+  let finalized = false;
+  let authTag = null;
+  return {
+    setAAD(input) {
+      if (finalized) throw new Error('Cipher already finalized');
+      if (chunks.length > 0) throw new Error('Cipher.setAAD() must be called before update()');
+      aad = toUint8Array(input);
+      return this;
+    },
+    update(input, inputEncoding, outputEncoding) {
+      if (finalized) throw new Error('Cipher.final() already called');
+      chunks.push(toUint8Array(input, inputEncoding));
+      return encodeOutput(new Uint8Array(0), outputEncoding);
+    },
+    final(outputEncoding) {
+      if (finalized) throw new Error('Cipher.final() already called');
+      finalized = true;
+      const combinedHex = encryptNative(algo, keyBuf, ivBuf, aad, combineChunks(chunks), 'hex');
+      const combined = hexToBuffer(combinedHex);
+      authTag = bufferFromBytes(combined.slice(combined.length - 16));
+      const ciphertext = combined.slice(0, combined.length - 16);
+      return encodeOutput(ciphertext, outputEncoding);
+    },
+    getAuthTag() {
+      if (!finalized || authTag === null) {
+        throw new Error('Cipher.getAuthTag() requires final() first');
+      }
+      return bufferFromBytes(authTag);
+    },
+  };
 }
 
 export function createDecipheriv(algorithm, key, iv) {
-  unsupportedCryptoApi('createDecipheriv');
+  const { algo, keyBuf, ivBuf } = validateAesGcmParams(algorithm, key, iv, 'createDecipheriv');
+  const decryptNative = requireCryptoHostcall(
+    '__pi_crypto_aes_gcm_decrypt_native',
+    'createDecipheriv',
+  );
+  const chunks = [];
+  let aad = new Uint8Array(0);
+  let authTag = null;
+  let finalized = false;
+  return {
+    setAAD(input) {
+      if (finalized) throw new Error('Decipher already finalized');
+      if (chunks.length > 0) throw new Error('Decipher.setAAD() must be called before update()');
+      aad = toUint8Array(input);
+      return this;
+    },
+    setAuthTag(tag) {
+      if (finalized) throw new Error('Decipher already finalized');
+      const tagBuf = toUint8Array(tag);
+      if (tagBuf.length !== 16) {
+        throw new Error('Decipher.setAuthTag() requires a 16-byte tag');
+      }
+      authTag = tagBuf;
+      return this;
+    },
+    update(input, inputEncoding, outputEncoding) {
+      if (finalized) throw new Error('Decipher.final() already called');
+      chunks.push(toUint8Array(input, inputEncoding));
+      return encodeOutput(new Uint8Array(0), outputEncoding);
+    },
+    final(outputEncoding) {
+      if (finalized) throw new Error('Decipher.final() already called');
+      if (authTag === null) throw new Error('Decipher.final() requires setAuthTag() first');
+      finalized = true;
+      const plaintextHex = decryptNative(
+        algo,
+        keyBuf,
+        ivBuf,
+        aad,
+        combineChunks(chunks),
+        authTag,
+        'hex',
+      );
+      return encodeOutput(hexToBuffer(plaintextHex), outputEncoding);
+    },
+  };
 }
 
 export function scryptSync(password, salt, keylen, options) {
