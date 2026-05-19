@@ -20856,6 +20856,22 @@ if (typeof globalThis.Buffer === 'undefined') {
             if (offset > length) return length;
             return offset;
         }
+        static _normalizeLastSearchOffset(length, byteOffset, emptyNeedle) {
+            if (byteOffset == null) return emptyNeedle ? length : length - 1;
+            const number = Number(byteOffset);
+            if (Number.isNaN(number)) return emptyNeedle ? length : length - 1;
+            if (number === Infinity) return emptyNeedle ? length : length - 1;
+            if (number === -Infinity) return emptyNeedle ? 0 : -1;
+            let offset = Math.trunc(number);
+            if (offset < 0) offset = length + offset;
+            if (emptyNeedle) {
+                if (offset < 0) return 0;
+                if (offset > length) return length;
+                return offset;
+            }
+            if (offset >= length) return length - 1;
+            return offset;
+        }
         static from(input, encoding, length) {
             if (typeof input === 'string') {
                 const enc = __pi_buffer_normalize_encoding(encoding);
@@ -21037,6 +21053,40 @@ if (typeof globalThis.Buffer === 'undefined') {
                     if (this[i + j] !== needle[j]) continue outer;
                 }
                 return i;
+            }
+            return -1;
+        }
+        lastIndexOf(value, byteOffset, encoding) {
+            let searchEncoding = encoding;
+            let rawOffset = byteOffset;
+            if (typeof byteOffset === 'string') {
+                searchEncoding = byteOffset;
+                rawOffset = undefined;
+            }
+            if (typeof value === 'number') {
+                const offset = Buffer._normalizeLastSearchOffset(this.length, rawOffset, false);
+                for (let i = offset; i >= 0; i--) {
+                    if (this[i] === (value & 0xff)) return i;
+                }
+                return -1;
+            }
+            const needle = typeof value === 'string' ? Buffer.from(value, searchEncoding) : value;
+            if (needle instanceof Uint8Array) {
+                if (needle.length === 0) return Buffer._normalizeLastSearchOffset(this.length, rawOffset, true);
+                const offset = Math.min(
+                    Buffer._normalizeLastSearchOffset(this.length, rawOffset, false),
+                    this.length - needle.length
+                );
+                for (let i = offset; i >= 0; i--) {
+                    let found = true;
+                    for (let j = 0; j < needle.length; j++) {
+                        if (this[i + j] !== needle[j]) {
+                            found = false;
+                            break;
+                        }
+                    }
+                    if (found) return i;
+                }
             }
             return -1;
         }

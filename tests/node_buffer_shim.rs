@@ -2,8 +2,8 @@
 //!
 //! Tests verify that `Buffer` follows Node.js semantics: `from`/`alloc`/`concat`
 //! factory methods, encoding/decoding (utf8, base64, hex, latin1), `isBuffer`,
-//! `byteLength`, `write`, `copy`, `compare`, `equals`, `indexOf`, `includes`,
-//! `fill`, `toJSON`, `slice`, and integer read/write methods.
+//! `byteLength`, `write`, `copy`, `compare`, `equals`, `indexOf`, `lastIndexOf`,
+//! `includes`, `fill`, `toJSON`, `slice`, and integer read/write methods.
 
 mod common;
 
@@ -465,6 +465,33 @@ fn includes_negative_offset_matches_node() {
     assert_eq!(result, "false,true");
 }
 
+#[test]
+fn last_index_of_vectors_match_node() {
+    let result = eval_buffer(
+        r#"(() => {
+        const b = Buffer.from("abcabc");
+        const hello = Buffer.from("hello");
+        const cases = [
+            ["str_default", () => b.lastIndexOf("bc")],
+            ["str_offset3", () => b.lastIndexOf("bc", 3)],
+            ["str_neg1", () => b.lastIndexOf("bc", -1)],
+            ["num", () => b.lastIndexOf(0x61)],
+            ["num_offset2", () => b.lastIndexOf(0x61, 2)],
+            ["hex", () => hello.lastIndexOf("6c6c", "hex")],
+            ["empty_default", () => b.lastIndexOf("")],
+            ["empty_offset2", () => b.lastIndexOf("", 2)],
+            ["uint8", () => b.lastIndexOf(new Uint8Array([98, 99]))],
+            ["missing", () => b.lastIndexOf("zz")],
+        ];
+        return cases.map(([label, run]) => label + ":" + run()).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "str_default:4|str_offset3:1|str_neg1:4|num:3|num_offset2:0|hex:2|empty_default:6|empty_offset2:2|uint8:4|missing:-1"
+    );
+}
+
 // ─── buf.fill ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -650,6 +677,33 @@ fn global_buffer_search_semantics_match_node() {
     })()"#,
     );
     assert_eq!(result, "-1,2,false");
+}
+
+#[test]
+fn global_buffer_last_index_of_vectors_match_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const b = Buffer.from("abcabc");
+        const hello = Buffer.from("hello");
+        const cases = [
+            ["str_default", () => b.lastIndexOf("bc")],
+            ["str_offset3", () => b.lastIndexOf("bc", 3)],
+            ["str_neg1", () => b.lastIndexOf("bc", -1)],
+            ["num", () => b.lastIndexOf(0x61)],
+            ["num_offset2", () => b.lastIndexOf(0x61, 2)],
+            ["hex", () => hello.lastIndexOf("6c6c", "hex")],
+            ["empty_default", () => b.lastIndexOf("")],
+            ["empty_offset2", () => b.lastIndexOf("", 2)],
+            ["uint8", () => b.lastIndexOf(new Uint8Array([98, 99]))],
+            ["missing", () => b.lastIndexOf("zz")],
+        ];
+        return cases.map(([label, run]) => label + ":" + run()).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "str_default:4|str_offset3:1|str_neg1:4|num:3|num_offset2:0|hex:2|empty_default:6|empty_offset2:2|uint8:4|missing:-1"
+    );
 }
 
 #[test]

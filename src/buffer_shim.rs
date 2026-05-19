@@ -4,7 +4,7 @@
 //! encoding/decoding (utf8, base64, hex, ascii, latin1), static factory methods
 //! (`from`, `alloc`, `concat`, `isBuffer`, `byteLength`), and instance methods
 //! (`toString`, `write`, `slice`, `copy`, `compare`, `equals`, `indexOf`,
-//! `includes`, `fill`, `toJSON`).
+//! `lastIndexOf`, `includes`, `fill`, `toJSON`).
 
 /// The JS source for the `node:buffer` virtual module.
 pub const NODE_BUFFER_JS: &str = r#"
@@ -168,6 +168,23 @@ function normalizeSearchOffset(length, byteOffset) {
   const offset = Math.trunc(number);
   if (offset < 0) return Math.max(length + offset, 0);
   if (offset > length) return length;
+  return offset;
+}
+
+function normalizeLastSearchOffset(length, byteOffset, emptyNeedle) {
+  if (byteOffset == null) return emptyNeedle ? length : length - 1;
+  const number = Number(byteOffset);
+  if (Number.isNaN(number)) return emptyNeedle ? length : length - 1;
+  if (number === Infinity) return emptyNeedle ? length : length - 1;
+  if (number === -Infinity) return emptyNeedle ? 0 : -1;
+  let offset = Math.trunc(number);
+  if (offset < 0) offset = length + offset;
+  if (emptyNeedle) {
+    if (offset < 0) return 0;
+    if (offset > length) return length;
+    return offset;
+  }
+  if (offset >= length) return length - 1;
   return offset;
 }
 
@@ -341,6 +358,43 @@ class Buffer extends Uint8Array {
           if (this[i + j] !== value[j]) continue outer;
         }
         return i;
+      }
+    }
+    return -1;
+  }
+
+  lastIndexOf(value, byteOffset, encoding) {
+    let searchEncoding = encoding;
+    let rawOffset = byteOffset;
+    if (typeof byteOffset === 'string') {
+      searchEncoding = byteOffset;
+      rawOffset = undefined;
+    }
+    if (typeof value === 'number') {
+      const offset = normalizeLastSearchOffset(this.length, rawOffset, false);
+      for (let i = offset; i >= 0; i--) {
+        if (this[i] === (value & 0xFF)) return i;
+      }
+      return -1;
+    }
+    if (typeof value === 'string') {
+      value = Buffer.from(value, searchEncoding);
+    }
+    if (value instanceof Uint8Array) {
+      if (value.length === 0) return normalizeLastSearchOffset(this.length, rawOffset, true);
+      const offset = Math.min(
+        normalizeLastSearchOffset(this.length, rawOffset, false),
+        this.length - value.length
+      );
+      for (let i = offset; i >= 0; i--) {
+        let found = true;
+        for (let j = 0; j < value.length; j++) {
+          if (this[i + j] !== value[j]) {
+            found = false;
+            break;
+          }
+        }
+        if (found) return i;
       }
     }
     return -1;
