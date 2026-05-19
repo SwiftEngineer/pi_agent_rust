@@ -20775,7 +20775,7 @@ if (typeof globalThis.Buffer === 'undefined') {
         const enc = String(encoding).toLowerCase();
         if (enc === 'utf8' || enc === 'utf-8') return 'utf8';
         if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') return enc;
-        if (enc === 'base64' || enc === 'hex') return enc;
+        if (enc === 'base64' || enc === 'base64url' || enc === 'hex') return enc;
         if (enc === 'ucs2' || enc === 'ucs-2' || enc === 'utf16le' || enc === 'utf-16le') return 'utf16le';
         if (allowUnknownUtf8) return 'utf8';
         throw new TypeError('Unknown encoding: ' + encoding);
@@ -20855,6 +20855,16 @@ if (typeof globalThis.Buffer === 'undefined') {
             }
         }
         return Math.max(0, Math.floor((len * 3) / 4) - padding);
+    }
+    function __pi_buffer_base64url_to_base64(input) {
+        let base64 = String(input).replace(/-/g, '+').replace(/_/g, '/');
+        const rem = base64.length % 4;
+        if (rem === 2) base64 += '==';
+        if (rem === 3) base64 += '=';
+        return base64;
+    }
+    function __pi_buffer_base64_to_base64url(input) {
+        return String(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
     }
     class Buffer extends Uint8Array {
         static _normalizeSearchOffset(length, byteOffset) {
@@ -21039,8 +21049,9 @@ if (typeof globalThis.Buffer === 'undefined') {
         static from(input, encoding, length) {
             if (typeof input === 'string') {
                 const enc = __pi_buffer_normalize_encoding(encoding);
-                if (enc === 'base64') {
-                    const bin = __pi_base64_decode_native(input);
+                if (enc === 'base64' || enc === 'base64url') {
+                    const base64 = enc === 'base64url' ? __pi_buffer_base64url_to_base64(input) : input;
+                    const bin = __pi_base64_decode_native(base64);
                     const out = new Buffer(bin.length);
                     for (let i = 0; i < bin.length; i++) {
                         out[i] = bin.charCodeAt(i) & 0xff;
@@ -21100,7 +21111,7 @@ if (typeof globalThis.Buffer === 'undefined') {
         static allocUnsafeSlow(size) { return Buffer.allocUnsafe(size); }
         static isBuffer(obj) { return obj instanceof Buffer; }
         static isEncoding(enc) {
-            return ['utf8','utf-8','ascii','latin1','binary','base64','hex','ucs2','ucs-2','utf16le','utf-16le'].includes(String(enc).toLowerCase());
+            return ['utf8','utf-8','ascii','latin1','binary','base64','base64url','hex','ucs2','ucs-2','utf16le','utf-16le'].includes(String(enc).toLowerCase());
         }
         static byteLength(str, encoding) {
             if (typeof str !== 'string') {
@@ -21109,7 +21120,7 @@ if (typeof globalThis.Buffer === 'undefined') {
                 throw new TypeError('The string argument must be a string, Buffer, or ArrayBuffer');
             }
             const enc = __pi_buffer_normalize_encoding(encoding, true);
-            if (enc === 'base64') return __pi_buffer_base64_byte_length(str);
+            if (enc === 'base64' || enc === 'base64url') return __pi_buffer_base64_byte_length(str);
             if (enc === 'hex') return str.length >> 1;
             if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') return str.length;
             if (enc === 'utf16le') return str.length * 2;
@@ -21154,9 +21165,11 @@ if (typeof globalThis.Buffer === 'undefined') {
             const e = Buffer._toStringBound(end, this.length, this.length);
             const view = this.subarray(s, e);
             const enc = __pi_buffer_normalize_encoding(encoding);
-            if (enc === 'base64') {
+            if (enc === 'base64' || enc === 'base64url') {
+                let encoded;
                 if (typeof globalThis.__pi_base64_encode_bytes_native === 'function') {
-                    return __pi_base64_encode_bytes_native(view);
+                    encoded = __pi_base64_encode_bytes_native(view);
+                    return enc === 'base64url' ? __pi_buffer_base64_to_base64url(encoded) : encoded;
                 }
                 let binaryChunks = [];
                 let chunk = [];
@@ -21170,7 +21183,8 @@ if (typeof globalThis.Buffer === 'undefined') {
                 if (chunk.length > 0) {
                     binaryChunks.push(String.fromCharCode.apply(null, chunk));
                 }
-                return __pi_base64_encode_native(binaryChunks.join(''));
+                encoded = __pi_base64_encode_native(binaryChunks.join(''));
+                return enc === 'base64url' ? __pi_buffer_base64_to_base64url(encoded) : encoded;
             }
             if (enc === 'hex') {
                 const hexArr = new Array(view.length);
@@ -21184,6 +21198,13 @@ if (typeof globalThis.Buffer === 'undefined') {
             if (enc === 'utf16le') return __pi_buffer_utf16le_to_string(view);
             return new TextDecoder().decode(view);
         }
+        utf8Slice(start, end) { return this.toString('utf8', start, end); }
+        asciiSlice(start, end) { return this.toString('ascii', start, end); }
+        latin1Slice(start, end) { return this.toString('latin1', start, end); }
+        hexSlice(start, end) { return this.toString('hex', start, end); }
+        base64Slice(start, end) { return this.toString('base64', start, end); }
+        base64urlSlice(start, end) { return this.toString('base64url', start, end); }
+        ucs2Slice(start, end) { return this.toString('ucs2', start, end); }
         toJSON() {
             return { type: 'Buffer', data: Array.from(this) };
         }
@@ -21337,6 +21358,13 @@ if (typeof globalThis.Buffer === 'undefined') {
             this.set(bytes.subarray(0, copyLen), o);
             return copyLen;
         }
+        utf8Write(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'utf8'); }
+        asciiWrite(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'ascii'); }
+        latin1Write(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'latin1'); }
+        hexWrite(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'hex'); }
+        base64Write(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'base64'); }
+        base64urlWrite(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'base64url'); }
+        ucs2Write(string, offset, length) { return this.write(string, offset == null ? undefined : offset, length, 'ucs2'); }
         fill(value, offset, end, encoding) {
             let s = 0;
             let e = this.length;

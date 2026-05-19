@@ -2151,6 +2151,48 @@ fn global_buffer_unknown_encoding_strict_entrypoints_match_node() {
 }
 
 #[test]
+fn global_buffer_encoding_specific_slice_write_vectors_match_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = [
+            ["types", () => ["utf8Slice", "asciiSlice", "latin1Slice", "hexSlice", "base64Slice", "base64urlSlice", "ucs2Slice", "utf8Write", "asciiWrite", "latin1Write", "hexWrite", "base64Write", "base64urlWrite", "ucs2Write"].map((name) => name + ":" + typeof Buffer.prototype[name]).join(",")],
+            ["is_base64url", () => Buffer.isEncoding("base64url")],
+            ["from_base64url", () => Buffer.from("aGVsbG8_", "base64url").toString("hex")],
+            ["to_base64url", () => Buffer.from("hello?").toString("base64url")],
+            ["byte_length_base64url", () => Buffer.byteLength("aGVsbG8_", "base64url")],
+            ["utf8Slice", () => Buffer.from("hi").utf8Slice(0, 2)],
+            ["asciiSlice", () => Buffer.from([0xc1, 0x42]).asciiSlice(0, 2)],
+            ["latin1Slice", () => Buffer.from([0xc1, 0x42]).latin1Slice(0, 2)],
+            ["hexSlice", () => Buffer.from([0, 15, 16, 255]).hexSlice(0, 4)],
+            ["base64Slice", () => Buffer.from("hello").base64Slice(0, 5)],
+            ["base64urlSlice", () => Buffer.from("hello?").base64urlSlice(0, 6)],
+            ["ucs2Slice", () => Buffer.from([0x41, 0, 0x42, 0]).ucs2Slice(0, 4)],
+            ["utf8Write", () => { const b = Buffer.alloc(8); return b.utf8Write("hi", 1, 3) + ":" + b.toString("hex"); }],
+            ["asciiWrite", () => { const b = Buffer.alloc(4); return b.asciiWrite(String.fromCharCode(0x100) + "B", 0, 4) + ":" + b.toString("hex"); }],
+            ["latin1Write", () => { const b = Buffer.alloc(4); return b.latin1Write(String.fromCharCode(0xc1) + "B", 0, 4) + ":" + b.toString("hex"); }],
+            ["hexWrite", () => { const b = Buffer.alloc(4); return b.hexWrite("000f10ff", 0, 4) + ":" + b.toString("hex"); }],
+            ["base64Write", () => { const b = Buffer.alloc(8); return b.base64Write("aGVsbG8=", 0, 8) + ":" + b.toString("hex"); }],
+            ["base64urlWrite", () => { const b = Buffer.alloc(8); return b.base64urlWrite("aGVsbG8_", 0, 8) + ":" + b.toString("hex"); }],
+            ["ucs2Write", () => { const b = Buffer.alloc(8); return b.ucs2Write("AB", 0, 8) + ":" + b.toString("hex"); }],
+            ["slice_null_start", () => Buffer.from("hello").utf8Slice(null, 4)],
+            ["write_null_offset", () => { const b = Buffer.alloc(4); return b.utf8Write("hi", null, 2) + ":" + b.toString("hex"); }],
+        ];
+        return cases.map(([label, run]) => {
+            try {
+                return label + ":" + run();
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "types:utf8Slice:function,asciiSlice:function,latin1Slice:function,hexSlice:function,base64Slice:function,base64urlSlice:function,ucs2Slice:function,utf8Write:function,asciiWrite:function,latin1Write:function,hexWrite:function,base64Write:function,base64urlWrite:function,ucs2Write:function|is_base64url:true|from_base64url:68656c6c6f3f|to_base64url:aGVsbG8_|byte_length_base64url:6|utf8Slice:hi|asciiSlice:AB|latin1Slice:\u{c1}B|hexSlice:000f10ff|base64Slice:aGVsbG8=|base64urlSlice:aGVsbG8_|ucs2Slice:AB|utf8Write:2:0068690000000000|asciiWrite:2:00420000|latin1Write:2:c1420000|hexWrite:4:000f10ff|base64Write:5:68656c6c6f000000|base64urlWrite:6:68656c6c6f3f0000|ucs2Write:4:4100420000000000|slice_null_start:hell|write_null_offset:2:68690000"
+    );
+}
+
+#[test]
 fn global_buffer_to_string_range_vectors_match_node() {
     let result = eval_global_buffer(
         r#"(() => {
