@@ -17,6 +17,7 @@ import argparse
 import fnmatch
 import json
 import os
+import stat as stat_module
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -26,8 +27,24 @@ from tempfile import TemporaryDirectory
 from typing import Any, Iterable
 
 SCHEMA = "pi.scratch_cleanup_plan.v1"
-DEFAULT_ROOTS = ("/tmp", "/data/tmp/pi_agent_rust_cargo")
+OWNER_MARKER_SCHEMA = "pi.scratch_target_owner.v1"
+DEFAULT_CARGO_ROOT = "/data/tmp/pi_agent_rust_cargo"
+DEFAULT_ROOTS = ("/tmp", DEFAULT_CARGO_ROOT)
 DEFAULT_PATTERNS = ("franken*", "pi_agent_rust*", "pi-agent-rust*")
+OWNER_MARKER_FILES = (".pi-agent-target.json", ".pi_agent_rust_target_owner.json")
+OWNER_MARKER_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class OwnerMarker:
+    status: str
+    agent_name: str
+    marker_path: str
+    schema: str
+    expires_at: str
+    project_key: str
+    purpose: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -42,11 +59,25 @@ class EntryPlan:
     age_seconds: int
     owner_hint: str
     group: str
+    owner_marker_status: str
+    owner_marker_agent: str
+    owner_marker_path: str
+    owner_marker_schema: str
+    owner_marker_expires_at: str
+    cleanup_safety: str
     review_action: str
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso_epoch(value: str) -> float | None:
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        return None
 
 
 def is_allowed_root(path: Path, allowed_roots: Iterable[Path]) -> bool:
@@ -62,6 +93,19 @@ def is_allowed_root(path: Path, allowed_roots: Iterable[Path]) -> bool:
         if resolved == allowed_resolved or allowed_resolved in resolved.parents:
             return True
     return False
+
+
+def is_default_cargo_root(root: Path) -> bool:
+    try:
+        return root.resolve(strict=False) == Path(DEFAULT_CARGO_ROOT).resolve(strict=False)
+    except OSError:
+        return False
+
+
+def patterns_for_root(root: Path, patterns: tuple[str, ...]) -> tuple[str, ...]:
+    if patterns == DEFAULT_PATTERNS and is_default_cargo_root(root):
+        return ("*",)
+    return patterns
 
 
 def entry_kind(path: Path) -> str:
@@ -111,6 +155,140 @@ def matched_pattern(name: str, patterns: Iterable[str]) -> str | None:
     return None
 
 
+def empty_owner_marker(status: str, reason: str) -> OwnerMarker:
+    return OwnerMarker(
+        status=status,
+        agent_name="unknown",
+        marker_path="",
+        schema="",
+        expires_at="",
+        project_key="",
+        purpose="",
+        reason=reason,
+    )
+
+
+def parse_owner_marker(marker_path: Path, now_epoch: float) -> OwnerMarker:
+    try:
+        marker_stat = marker_path.lstat()
+    except OSError as exc:
+        return empty_owner_marker("malformed", f"marker stat failed: {exc}")
+    if not stat_module.S_ISREG(marker_stat.st_mode):
+        return empty_owner_marker("malformed", "marker is not a regular file")
+    if marker_stat.st_size > OWNER_MARKER_MAX_BYTES:
+        return empty_owner_marker("malformed", "marker exceeds max size")
+
+    try:
+        with marker_path.open("rb") as handle:
+            raw = handle.read(OWNER_MARKER_MAX_BYTES + 1)
+    except OSError as exc:
+        return empty_owner_marker("malformed", f"marker read failed: {exc}")
+    if len(raw) > OWNER_MARKER_MAX_BYTES:
+        return empty_owner_marker("malformed", "marker exceeds max size")
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return empty_owner_marker("malformed", f"marker json failed: {exc}")
+    if not isinstance(payload, dict):
+        return empty_owner_marker("malformed", "marker payload is not an object")
+
+    schema = payload.get("schema")
+    if schema != OWNER_MARKER_SCHEMA:
+        return empty_owner_marker("malformed", "marker schema mismatch")
+
+    active = payload.get("active", True)
+    if not isinstance(active, bool):
+        return empty_owner_marker("malformed", "marker active field is not boolean")
+
+    expires_at = payload.get("expires_at", "")
+    expires_epoch = None
+    if expires_at:
+        if not isinstance(expires_at, str):
+            return empty_owner_marker("malformed", "marker expires_at field is not string")
+        expires_epoch = parse_iso_epoch(expires_at)
+        if expires_epoch is None:
+            return empty_owner_marker("malformed", "marker expires_at field is invalid")
+
+    agent_name = payload.get("agent_name", "unknown")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        agent_name = "unknown"
+    project_key = payload.get("project_key", "")
+    if not isinstance(project_key, str):
+        project_key = ""
+    purpose = payload.get("purpose", "")
+    if not isinstance(purpose, str):
+        purpose = ""
+
+    if not active:
+        status = "inactive"
+        reason = "marker active field is false"
+    elif expires_epoch is not None and expires_epoch <= now_epoch:
+        status = "expired"
+        reason = "marker expires_at is in the past"
+    else:
+        status = "active"
+        reason = "marker is active"
+
+    return OwnerMarker(
+        status=status,
+        agent_name=agent_name,
+        marker_path=str(marker_path),
+        schema=OWNER_MARKER_SCHEMA,
+        expires_at=expires_at,
+        project_key=project_key,
+        purpose=purpose,
+        reason=reason,
+    )
+
+
+def read_owner_marker(path: Path, kind: str, now_epoch: float) -> OwnerMarker:
+    if kind != "directory":
+        return empty_owner_marker("not_applicable", "entry is not a directory")
+    for marker_name in OWNER_MARKER_FILES:
+        marker_path = path / marker_name
+        try:
+            if marker_path.exists() or marker_path.is_symlink():
+                marker = parse_owner_marker(marker_path, now_epoch)
+                if marker.marker_path:
+                    return marker
+                return OwnerMarker(
+                    status=marker.status,
+                    agent_name=marker.agent_name,
+                    marker_path=str(marker_path),
+                    schema=marker.schema,
+                    expires_at=marker.expires_at,
+                    project_key=marker.project_key,
+                    purpose=marker.purpose,
+                    reason=marker.reason,
+                )
+        except OSError as exc:
+            return empty_owner_marker("malformed", f"marker lookup failed: {exc}")
+    return empty_owner_marker("missing", "no owner marker present")
+
+
+def cleanup_safety_for_marker(marker: OwnerMarker) -> str:
+    if marker.status == "active":
+        return "blocked_active_owner_marker"
+    if marker.status in {"missing", "not_applicable"}:
+        return "unknown_owner_fail_closed"
+    if marker.status == "malformed":
+        return "unknown_owner_malformed_marker_fail_closed"
+    if marker.status in {"expired", "inactive"}:
+        return "expired_or_inactive_marker_manual_review"
+    return "unknown_owner_fail_closed"
+
+
+def review_action_for_marker(marker: OwnerMarker) -> str:
+    if marker.status == "active":
+        return "do_not_delete_active_owner_marker"
+    if marker.status == "malformed":
+        return "manual_review_malformed_owner_marker"
+    if marker.status in {"expired", "inactive"}:
+        return "manual_review_expired_owner_marker"
+    return "manual_review_unknown_owner"
+
+
 def scan_root(
     root: Path,
     patterns: tuple[str, ...],
@@ -130,6 +308,7 @@ def scan_root(
     if not root.is_dir():
         warnings.append(f"root is not a directory: {root}")
         return entries, warnings
+    effective_patterns = patterns_for_root(root, patterns)
 
     try:
         with os.scandir(root) as iterator:
@@ -139,7 +318,7 @@ def scan_root(
         return entries, warnings
 
     for dir_entry in sorted(dir_entries, key=lambda item: item.name):
-        pattern = matched_pattern(dir_entry.name, patterns)
+        pattern = matched_pattern(dir_entry.name, effective_patterns)
         if pattern is None:
             continue
         path = Path(dir_entry.path)
@@ -152,6 +331,7 @@ def scan_root(
         if age_seconds < min_age_seconds:
             continue
         kind = entry_kind(path)
+        marker = read_owner_marker(path, kind, now_epoch)
         entries.append(
             EntryPlan(
                 path=str(path),
@@ -164,7 +344,13 @@ def scan_root(
                 age_seconds=age_seconds,
                 owner_hint=owner_hint(root, path),
                 group=classify_group(dir_entry.name),
-                review_action="manual_approval_required",
+                owner_marker_status=marker.status,
+                owner_marker_agent=marker.agent_name,
+                owner_marker_path=marker.marker_path,
+                owner_marker_schema=marker.schema,
+                owner_marker_expires_at=marker.expires_at,
+                cleanup_safety=cleanup_safety_for_marker(marker),
+                review_action=review_action_for_marker(marker),
             )
         )
     return entries, warnings
@@ -195,11 +381,30 @@ def build_plan(
     group_counts = Counter(entry.group for entry in entries)
     owner_counts = Counter(entry.owner_hint for entry in entries)
     kind_counts = Counter(entry.kind for entry in entries)
+    marker_counts = Counter(entry.owner_marker_status for entry in entries)
+    safety_counts = Counter(entry.cleanup_safety for entry in entries)
 
     limited_entries = entries[:entry_limit] if entry_limit >= 0 else entries
     omitted = max(0, len(entries) - len(limited_entries))
     return {
         "schema": SCHEMA,
+        "owner_marker_contract": {
+            "schema": OWNER_MARKER_SCHEMA,
+            "marker_files": list(OWNER_MARKER_FILES),
+            "required_fields": ["schema"],
+            "optional_fields": [
+                "agent_name",
+                "project_key",
+                "purpose",
+                "created_at",
+                "expires_at",
+                "active",
+            ],
+            "active_rule": "active is not false and expires_at is absent or in the future",
+            "default_cargo_root_pattern": (
+                f"{DEFAULT_CARGO_ROOT} uses '*' when the CLI patterns are left at defaults"
+            ),
+        },
         "generated_at": utc_now_iso(),
         "destructive_actions_executed": False,
         "delete_apply_mode_available": False,
@@ -216,12 +421,15 @@ def build_plan(
             "by_group": dict(sorted(group_counts.items())),
             "by_owner_hint": dict(sorted(owner_counts.items())),
             "by_kind": dict(sorted(kind_counts.items())),
+            "by_owner_marker_status": dict(sorted(marker_counts.items())),
+            "by_cleanup_safety": dict(sorted(safety_counts.items())),
         },
         "entries": [asdict(entry) for entry in limited_entries],
         "warnings": warnings,
         "operator_note": (
             "This is a read-only inventory. Do not remove any listed path without "
-            "a separate explicit approval that names the exact cleanup command and risk."
+            "a separate explicit approval that names the exact cleanup command and risk. "
+            "Missing, malformed, expired, or non-directory owner markers are not safe-to-delete proof."
         ),
     }
 
@@ -236,10 +444,17 @@ def render_text(plan: dict[str, Any]) -> str:
         f"listed entries: {totals['listed_entries']}",
         f"omitted entries: {totals['omitted_entries']}",
         f"shallow bytes: {totals['shallow_bytes']}",
+        f"owner marker schema: {plan['owner_marker_contract']['schema']}",
         "by group:",
     ]
     for group, count in totals["by_group"].items():
         lines.append(f"  {group}: {count}")
+    lines.append("by owner marker status:")
+    for status, count in totals["by_owner_marker_status"].items():
+        lines.append(f"  {status}: {count}")
+    lines.append("by cleanup safety:")
+    for safety, count in totals["by_cleanup_safety"].items():
+        lines.append(f"  {safety}: {count}")
     if plan["warnings"]:
         lines.append("warnings:")
         for warning in plan["warnings"]:
@@ -248,7 +463,8 @@ def render_text(plan: dict[str, Any]) -> str:
     for entry in plan["entries"]:
         lines.append(
             f"  - {entry['path']} [{entry['kind']}, group={entry['group']}, "
-            f"owner={entry['owner_hint']}, age_seconds={entry['age_seconds']}]"
+            f"owner={entry['owner_hint']}, marker={entry['owner_marker_status']}, "
+            f"safety={entry['cleanup_safety']}, age_seconds={entry['age_seconds']}]"
         )
     lines.append(plan["operator_note"])
     return "\n".join(lines)
@@ -257,6 +473,13 @@ def render_text(plan: dict[str, Any]) -> str:
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read-only scratch cleanup inventory planner.",
+        epilog=(
+            "Owner marker contract: directories may contain .pi-agent-target.json "
+            f"with schema={OWNER_MARKER_SCHEMA}, optional agent_name/project_key/"
+            "purpose/created_at/expires_at, and optional active=false. Active "
+            "future markers block cleanup advice; missing or malformed markers "
+            "remain unknown ownership."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -290,7 +513,52 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def run_self_test() -> int:
     with TemporaryDirectory(prefix="pi-scratch-cleanup-plan-") as tmp:
         root = Path(tmp)
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        future = datetime.fromtimestamp(now_epoch + 3600, timezone.utc)
+        past = datetime.fromtimestamp(now_epoch - 3600, timezone.utc)
+
         (root / "franken_engine_alpha").mkdir()
+        (root / "franken_engine_active").mkdir()
+        (root / "franken_engine_active" / ".pi-agent-target.json").write_text(
+            json.dumps(
+                {
+                    "schema": OWNER_MARKER_SCHEMA,
+                    "agent_name": "VioletBear",
+                    "project_key": "/data/projects/pi_agent_rust",
+                    "purpose": "cargo target cache",
+                    "created_at": utc_now_iso(),
+                    "expires_at": future.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "franken_engine_expired").mkdir()
+        (root / "franken_engine_expired" / ".pi-agent-target.json").write_text(
+            json.dumps(
+                {
+                    "schema": OWNER_MARKER_SCHEMA,
+                    "agent_name": "GreenLake",
+                    "expires_at": past.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "franken_engine_inactive").mkdir()
+        (root / "franken_engine_inactive" / ".pi-agent-target.json").write_text(
+            json.dumps(
+                {
+                    "schema": OWNER_MARKER_SCHEMA,
+                    "agent_name": "BlueLake",
+                    "active": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "franken_engine_malformed").mkdir()
+        (root / "franken_engine_malformed" / ".pi-agent-target.json").write_text(
+            "{not-json",
+            encoding="utf-8",
+        )
         (root / "franken_node_beta").write_text("beta", encoding="utf-8")
         (root / "pi_agent_rust_gamma").mkdir()
         (root / "ignore_me").write_text("ignored", encoding="utf-8")
@@ -308,12 +576,29 @@ def run_self_test() -> int:
         assert plan["destructive_actions_executed"] is False
         assert plan["delete_apply_mode_available"] is False
         assert plan["approval_required_for_cleanup"] is True
-        assert plan["totals"]["matched_entries"] == 4
-        assert plan["totals"]["by_group"]["franken_engine"] == 2
+        assert plan["owner_marker_contract"]["schema"] == OWNER_MARKER_SCHEMA
+        assert patterns_for_root(Path(DEFAULT_CARGO_ROOT), DEFAULT_PATTERNS) == ("*",)
+        assert patterns_for_root(Path("/tmp"), DEFAULT_PATTERNS) == DEFAULT_PATTERNS
+        assert plan["totals"]["matched_entries"] == 8
+        assert plan["totals"]["by_group"]["franken_engine"] == 6
         assert plan["totals"]["by_group"]["franken_node"] == 1
         assert plan["totals"]["by_group"]["pi_agent_rust"] == 1
+        assert plan["totals"]["by_owner_marker_status"]["active"] == 1
+        assert plan["totals"]["by_owner_marker_status"]["expired"] == 1
+        assert plan["totals"]["by_owner_marker_status"]["inactive"] == 1
+        assert plan["totals"]["by_owner_marker_status"]["malformed"] == 1
+        assert plan["totals"]["by_owner_marker_status"]["missing"] == 2
+        assert plan["totals"]["by_owner_marker_status"]["not_applicable"] == 2
         assert any(entry["kind"] == "symlink" for entry in plan["entries"])
         assert all(Path(entry["path"]).exists() for entry in plan["entries"])
+        by_name = {Path(entry["path"]).name: entry for entry in plan["entries"]}
+        assert by_name["franken_engine_active"]["owner_marker_agent"] == "VioletBear"
+        assert by_name["franken_engine_active"]["review_action"] == "do_not_delete_active_owner_marker"
+        assert by_name["franken_engine_expired"]["cleanup_safety"] == "expired_or_inactive_marker_manual_review"
+        assert by_name["franken_engine_inactive"]["owner_marker_status"] == "inactive"
+        assert by_name["franken_engine_malformed"]["review_action"] == "manual_review_malformed_owner_marker"
+        assert by_name["franken_engine_alpha"]["cleanup_safety"] == "unknown_owner_fail_closed"
+        assert by_name["franken_node_beta"]["owner_marker_status"] == "not_applicable"
 
         limited = build_plan(
             roots=[root],
@@ -323,7 +608,7 @@ def run_self_test() -> int:
             entry_limit=1,
         )
         assert limited["totals"]["listed_entries"] == 1
-        assert limited["totals"]["omitted_entries"] == 2
+        assert limited["totals"]["omitted_entries"] == 6
 
         refused = build_plan(
             roots=[Path("/not-allowed-fixture")],
