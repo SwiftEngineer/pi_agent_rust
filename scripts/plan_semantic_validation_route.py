@@ -39,6 +39,7 @@ REQUIRED_TOP_LEVEL_KEYS = (
     "proof_obligations",
     "proof_memory_assessment",
     "cache_heat",
+    "coalescing_advice",
     "coordination_admission",
     "would_run_order",
     "deferred_or_blocked",
@@ -582,33 +583,139 @@ def assess_proof_memory(
     }
 
 
-def build_cache_heat(obligations: dict[str, Any]) -> dict[str, Any]:
+def group_cache_intensity(group: dict[str, Any]) -> str:
+    group_id = str(group["group_id"])
+    if group_id in {"all_targets_check", "clippy"}:
+        return "high"
+    if group.get("requires_rch"):
+        return "medium"
+    return "low"
+
+
+def group_cache_key(group: dict[str, Any]) -> str:
+    if group.get("requires_rch"):
+        command_class = str(group.get("command_class") or group["group_id"])
+        return f"cargo-target:{RCH_ENV['CARGO_TARGET_DIR']}:{command_class}"
+    return f"local-script:{group['group_id']}"
+
+
+def route_heat_level(groups: list[dict[str, Any]]) -> str:
+    heavy_count = sum(1 for group in groups if group.get("requires_rch"))
+    if heavy_count >= 3:
+        return "high"
+    if heavy_count:
+        return "medium"
+    return "low"
+
+
+def build_cache_heat(
+    obligations: dict[str, Any],
+    *,
+    classification: dict[str, Any],
+    proof_memory: dict[str, Any],
+) -> dict[str, Any]:
     groups = obligations["groups"]
     heat: list[dict[str, Any]] = []
+    heavy_groups = [str(group["group_id"]) for group in groups if group.get("requires_rch")]
     for group in groups:
         group_id = str(group["group_id"])
         requires_rch = bool(group.get("requires_rch"))
-        if group_id in {"all_targets_check", "clippy"}:
-            intensity = "high"
-        elif requires_rch:
-            intensity = "medium"
-        else:
-            intensity = "low"
+        intensity = group_cache_intensity(group)
         advice = "run_before_heavy_rust" if not requires_rch else "coalesce_with_same_target_dir"
+        shares_with = [
+            other
+            for other in heavy_groups
+            if other != group_id and requires_rch
+        ]
+        reusable_after: list[str] = []
+        if group_id == "all_targets_check":
+            reusable_after.append("focused_tests")
         if group_id == "clippy":
             advice = "run_after_check_or_focused_tests_to_reuse_target_cache"
+            reusable_after.extend(["focused_tests", "all_targets_check"])
+        if group_id == "e2e_conformance":
+            reusable_after.append("focused_tests")
         heat.append(
             {
                 "group_id": group_id,
                 "cache_intensity": intensity,
+                "cache_key": group_cache_key(group),
                 "cache_reuse": group.get("cache_reuse"),
+                "requires_rch": requires_rch,
+                "command_count": len(group.get("exact_commands") or []),
+                "shares_target_cache_with": shares_with,
+                "reusable_after_groups": sorted(set(reusable_after), key=group_rank),
                 "advice": advice,
             }
         )
+    proof_hint = "proof_memory_not_reusable_for_current_route"
+    if proof_memory.get("route_decision") == "reuse_available":
+        proof_hint = "proof_memory_reusable_only_for_exact_matching_context"
     return {
         "status": "ready",
+        "route_heat_level": route_heat_level(groups),
+        "changed_bucket_counts": classification["bucket_counts"],
+        "shared_rch_env": RCH_ENV if heavy_groups else {},
+        "heavy_group_ids": heavy_groups,
         "items": heat,
+        "proof_memory_cache_hint": {
+            "decision": proof_memory.get("route_decision"),
+            "hint": proof_hint,
+            "invalidation_reasons": proof_memory.get("invalidation_reasons") or [],
+            "authority_boundary": "Cache hints may influence ordering only; proof-memory reuse remains governed by proof_memory_assessment.",
+        },
         "coalescing_summary": "Run cheap scripts first; when heavy validation is admitted, keep RCH target/tmp env stable and coalesce Rust groups by touched surface.",
+    }
+
+
+def build_coalescing_advice(
+    obligations: dict[str, Any],
+    *,
+    classification: dict[str, Any],
+    proof_memory: dict[str, Any],
+) -> dict[str, Any]:
+    groups = sorted(obligations["groups"], key=lambda item: group_rank(str(item["group_id"])))
+    ordering: list[dict[str, Any]] = []
+    for group in groups:
+        group_id = str(group["group_id"])
+        requires_rch = bool(group.get("requires_rch"))
+        if group_id == "fast_script_checks":
+            rationale = "Run first; cheap checks catch metadata and ledger drift before any Rust cache work."
+        elif group_id == "evidence_regeneration":
+            rationale = "Run after fast scripts when docs/evidence changed; does not warm Rust target cache."
+        elif group_id == "focused_tests":
+            rationale = "Run before broad Rust gates to warm the relevant target cache and isolate route failures."
+        elif group_id == "e2e_conformance":
+            rationale = "Run after focused tests when conformance/E2E obligations are required; reuse the same RCH target env."
+        elif group_id == "all_targets_check":
+            rationale = "Run before clippy so clippy can reuse compiler artifacts where the worker cache keeps them."
+        elif group_id == "clippy":
+            rationale = "Run last among broad Rust gates; it benefits most from check/focused-test cache warmth."
+        else:
+            rationale = "Run in dependency-rank order from the route planner."
+        ordering.append(
+            {
+                "rank": len(ordering) + 1,
+                "group_id": group_id,
+                "requires_rch": requires_rch,
+                "cache_key": group_cache_key(group),
+                "rationale": rationale,
+            }
+        )
+    docs_only = set(classification["bucket_counts"]) == {"scripts_docs_evidence"}
+    return {
+        "status": "ready",
+        "profile_id": classification["profile_id"],
+        "docs_only_or_scripts_only": docs_only,
+        "recommended_order": ordering,
+        "shared_rch_env": RCH_ENV if any(item["requires_rch"] for item in ordering) else {},
+        "proof_memory_guidance": {
+            "route_decision": proof_memory.get("route_decision"),
+            "reuse_authority": "Do not treat cache-warm hints as validation proof reuse authority.",
+            "cache_hint": "Stale or mismatched proof-memory records may still suggest which command families share target cache, but they require fresh validation before closeout.",
+        },
+        "local_fallback_policy": "Heavy cargo validation remains RCH-only and must not fail open into local cargo.",
+        "advisory_only": True,
     }
 
 
@@ -853,7 +960,16 @@ def build_route_plan(
     command_groups = command_groups_from_scheduler(scheduler)
     obligations = build_proof_obligations(classification, command_groups)
     proof_assessment = assess_proof_memory(proof_memory, changed_paths)
-    cache_heat = build_cache_heat(obligations)
+    cache_heat = build_cache_heat(
+        obligations,
+        classification=classification,
+        proof_memory=proof_assessment,
+    )
+    coalescing_advice = build_coalescing_advice(
+        obligations,
+        classification=classification,
+        proof_memory=proof_assessment,
+    )
     coordination = build_coordination_admission(
         agent_mail_health=agent_mail_health,
         beads_summary=beads_summary,
@@ -889,6 +1005,7 @@ def build_route_plan(
         "proof_obligations": obligations,
         "proof_memory_assessment": proof_assessment,
         "cache_heat": cache_heat,
+        "coalescing_advice": coalescing_advice,
         "coordination_admission": coordination,
         "would_run_order": would_run,
         "deferred_or_blocked": deferred,
@@ -963,6 +1080,16 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(),
             "expect_status": {"ready", "degraded"},
             "expect_bucket": "scripts_docs_evidence",
+            "expect_heat": "low",
+        },
+        {
+            "id": "scripts_only",
+            "paths": ["scripts/build_swarm_operator_runpack.py"],
+            "scheduler": fixture_scheduler(),
+            "proof": fixture_proof_memory(),
+            "expect_status": {"ready", "degraded"},
+            "expect_bucket": "scripts_docs_evidence",
+            "expect_heat": "low",
         },
         {
             "id": "provider_rust",
@@ -971,6 +1098,7 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(),
             "expect_status": {"ready"},
             "expect_bucket": "provider",
+            "expect_heat": "high",
         },
         {
             "id": "mixed_python_rust",
@@ -979,6 +1107,7 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(),
             "expect_status": {"degraded"},
             "expect_bucket": "scripts_docs_evidence",
+            "expect_heat": "high",
         },
         {
             "id": "unknown_path",
@@ -987,6 +1116,7 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(),
             "expect_status": {"blocked"},
             "expect_bucket": "unknown",
+            "expect_heat": "medium",
         },
         {
             "id": "stale_proof",
@@ -995,6 +1125,7 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(reusable=False),
             "expect_status": {"degraded"},
             "expect_bucket": "provider",
+            "expect_heat": "high",
         },
         {
             "id": "rch_unavailable",
@@ -1003,6 +1134,7 @@ def run_self_test() -> dict[str, Any]:
             "proof": fixture_proof_memory(),
             "expect_status": {"degraded"},
             "expect_bucket": "provider",
+            "expect_heat": "high",
         },
     ]
     results: list[dict[str, Any]] = []
@@ -1039,6 +1171,21 @@ def run_self_test() -> dict[str, Any]:
                 )
                 else "fail",
                 "message": "RCH-required commands use rch exec --",
+            },
+            {
+                "id": "cache_heat_expected",
+                "status": "pass"
+                if plan["cache_heat"]["route_heat_level"] == case["expect_heat"]
+                else "fail",
+                "message": f"route_heat_level={plan['cache_heat']['route_heat_level']}",
+            },
+            {
+                "id": "coalescing_advice_present",
+                "status": "pass"
+                if plan["coalescing_advice"]["recommended_order"]
+                and plan["coalescing_advice"]["advisory_only"] is True
+                else "fail",
+                "message": "coalescing advice has ordered advisory guidance",
             },
         ]
         results.append(
