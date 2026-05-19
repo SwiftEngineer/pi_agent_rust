@@ -950,6 +950,32 @@ fn global_buffer_byte_swap_vectors_match_node() {
 }
 
 #[test]
+fn global_buffer_signed_integer_vectors_match_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const b = Buffer.alloc(12);
+        const parts = [];
+        parts.push("writeInt8:" + b.writeInt8(-1, 0));
+        parts.push("writeInt16LE:" + b.writeInt16LE(-2, 1));
+        parts.push("writeInt16BE:" + b.writeInt16BE(-3, 3));
+        parts.push("writeInt32LE:" + b.writeInt32LE(-4, 5));
+        parts.push("writeInt32BE:" + b.writeInt32BE(-5, 8));
+        parts.push("hex:" + b.toString("hex"));
+        parts.push("readInt8:" + b.readInt8(0));
+        parts.push("readInt16LE:" + b.readInt16LE(1));
+        parts.push("readInt16BE:" + b.readInt16BE(3));
+        parts.push("readInt32LE:" + b.readInt32LE(5));
+        parts.push("readInt32BE:" + b.readInt32BE(8));
+        return parts.join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "writeInt8:1|writeInt16LE:3|writeInt16BE:5|writeInt32LE:9|writeInt32BE:12|hex:fffefffffdfcfffffffffffb|readInt8:-1|readInt16LE:-2|readInt16BE:-3|readInt32LE:-4|readInt32BE:-5"
+    );
+}
+
+#[test]
 fn global_buffer_unknown_encoding_strict_entrypoints_match_node() {
     let result = eval_global_buffer(
         r#"(() => {
