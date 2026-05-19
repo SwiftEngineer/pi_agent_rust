@@ -1762,6 +1762,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
+        tool_approval: None,
     };
 
     let tools = options.tool_factory.as_ref().map_or_else(
@@ -2120,6 +2121,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_approval: None,
             },
         );
 
@@ -2232,6 +2234,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_approval: None,
             },
         );
 

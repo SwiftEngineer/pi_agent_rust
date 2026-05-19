@@ -59,6 +59,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -80,6 +81,8 @@ pub const TURN_LATENCY_BREAKDOWN_SCHEMA_V1: &str = "pi.agent.turn_latency_breakd
 /// Schema identifier for deterministic tool-effect batch plan evidence.
 pub const TOOL_EFFECT_BATCH_PLAN_SCHEMA_V1: &str = "pi.agent.tool_effect_batch_plan.v1";
 const TOOL_CANCELLATION_SCHEMA_V1: &str = "pi.tool.cancellation.v1";
+const TOOL_APPROVAL_DENIED_SCHEMA_V1: &str = "pi.tool.approval_denied.v1";
+const TOOL_APPROVAL_STATUS_SCHEMA_V1: &str = "pi.tool.approval_status.v1";
 const SEMANTIC_CONTEXT_PROMPT_SCHEMA_V1: &str = "pi.semantic_context_prompt.v1";
 const SEMANTIC_CONTEXT_PROVENANCE_SCHEMA_V1: &str = "pi.semantic_context_provenance.v1";
 const SEMANTIC_CONTEXT_CUSTOM_TYPE: &str = "semantic_context_bundle";
@@ -621,7 +624,7 @@ pub fn iteration_handoff_steering_text(current: usize, max: usize) -> String {
 }
 
 /// Configuration for the agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentConfig {
     /// System prompt to use for all requests.
     pub system_prompt: Option<String>,
@@ -637,7 +640,50 @@ pub struct AgentConfig {
 
     /// Fail closed when extension tool hooks error or time out.
     pub fail_closed_hooks: bool,
+
+    /// Optional approval gate invoked before a tool executes.
+    pub tool_approval: Option<ToolApprovalHandler>,
 }
+
+impl fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("system_prompt", &self.system_prompt)
+            .field("max_tool_iterations", &self.max_tool_iterations)
+            .field("stream_options", &self.stream_options)
+            .field("block_images", &self.block_images)
+            .field("fail_closed_hooks", &self.fail_closed_hooks)
+            .field("tool_approval", &self.tool_approval.is_some())
+            .finish()
+    }
+}
+
+/// Details for a pending tool approval request.
+#[derive(Debug, Clone)]
+pub struct ToolApprovalRequest {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+}
+
+/// Decision returned by a tool approval handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolApprovalDecision {
+    Allow,
+    Deny { reason: String },
+}
+
+impl ToolApprovalDecision {
+    #[must_use]
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self::Deny {
+            reason: reason.into(),
+        }
+    }
+}
+
+pub type ToolApprovalHandler =
+    Arc<dyn Fn(ToolApprovalRequest) -> BoxFuture<'static, ToolApprovalDecision> + Send + Sync>;
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -647,6 +693,7 @@ impl Default for AgentConfig {
             stream_options: StreamOptions::default(),
             block_images: false,
             fail_closed_hooks: false,
+            tool_approval: None,
         }
     }
 }
@@ -2865,7 +2912,13 @@ impl Agent {
     ) -> (ToolOutput, bool) {
         let extensions = self.extensions.clone();
 
-        let (mut output, is_error) = if let Some(extensions) = &extensions {
+        let approval_denied_output = self
+            .request_tool_approval(&tool_call, Arc::clone(&on_event))
+            .await;
+
+        let (mut output, is_error) = if let Some(output) = approval_denied_output {
+            (output, true)
+        } else if let Some(extensions) = &extensions {
             let hook_started_at = Instant::now();
             let hook_outcome = Self::dispatch_tool_call_hook(
                 extensions,
@@ -2901,6 +2954,44 @@ impl Agent {
         }
 
         (output, is_error)
+    }
+
+    async fn request_tool_approval(
+        &self,
+        tool_call: &ToolCall,
+        on_event: AgentEventHandler,
+    ) -> Option<ToolOutput> {
+        let Some(approval) = &self.config.tool_approval else {
+            return None;
+        };
+
+        let request = ToolApprovalRequest {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            arguments: tool_call.arguments.clone(),
+        };
+
+        match approval(request).await {
+            ToolApprovalDecision::Allow => {
+                on_event(AgentEvent::ToolExecutionUpdate {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    args: tool_call.arguments.clone(),
+                    partial_result: ToolOutput {
+                        content: Vec::new(),
+                        details: Some(json!({
+                            "schema": TOOL_APPROVAL_STATUS_SCHEMA_V1,
+                            "status": "approved",
+                        })),
+                        is_error: false,
+                    },
+                });
+                None
+            }
+            ToolApprovalDecision::Deny { reason } => {
+                Some(Self::tool_approval_denied_output(&reason))
+            }
+        }
     }
 
     async fn execute_tool_owned(
@@ -3032,6 +3123,27 @@ impl Agent {
         ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new(message))],
             details: None,
+            is_error: true,
+        }
+    }
+
+    fn tool_approval_denied_output(reason: &str) -> ToolOutput {
+        let reason = reason.trim();
+        let reason = if reason.is_empty() {
+            "tool approval denied"
+        } else {
+            reason
+        };
+
+        ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(format!(
+                "Tool execution denied: {reason}"
+            )))],
+            details: Some(json!({
+                "schema": TOOL_APPROVAL_DENIED_SCHEMA_V1,
+                "status": "denied",
+                "reason": reason,
+            })),
             is_error: true,
         }
     }
@@ -5821,6 +5933,133 @@ mod extensions_integration_tests {
             assert!(!is_error);
             assert!(!output.is_error);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn tool_approval_allow_executes_tool() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let approval_calls = Arc::new(AtomicUsize::new(0));
+            let approval_counter = Arc::clone(&approval_calls);
+            let agent = Agent::new(
+                provider,
+                tools,
+                AgentConfig {
+                    tool_approval: Some(Arc::new(move |request| {
+                        assert_eq!(request.tool_call_id, "call-1");
+                        assert_eq!(request.tool_name, "count_tool");
+                        approval_counter.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { ToolApprovalDecision::Allow })
+                    })),
+                    ..AgentConfig::default()
+                },
+            );
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let agent_session =
+                AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "count_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let events_for_handler = Arc::clone(&events);
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(move |event| {
+                if let Ok(mut guard) = events_for_handler.lock() {
+                    guard.push(event);
+                }
+            });
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(tool_call, on_event, test_turn_latency())
+                .await;
+
+            assert!(!is_error);
+            assert!(!output.is_error);
+            assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let saw_approval_update = events.lock().is_ok_and(|guard| {
+                guard.iter().any(|event| {
+                    matches!(
+                        event,
+                        AgentEvent::ToolExecutionUpdate {
+                            partial_result,
+                            ..
+                        } if partial_result.details.as_ref().is_some_and(|details| {
+                            details["schema"] == TOOL_APPROVAL_STATUS_SCHEMA_V1
+                                && details["status"] == "approved"
+                        })
+                    )
+                })
+            });
+            assert!(saw_approval_update);
+        });
+    }
+
+    #[test]
+    fn tool_approval_deny_blocks_tool_execution() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(
+                provider,
+                tools,
+                AgentConfig {
+                    tool_approval: Some(Arc::new(|request| {
+                        assert_eq!(request.tool_name, "count_tool");
+                        Box::pin(async { ToolApprovalDecision::deny("denied by approval test") })
+                    })),
+                    ..AgentConfig::default()
+                },
+            );
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let agent_session =
+                AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+            let tool_call = ToolCall {
+                id: "call-1".to_string(),
+                name: "count_tool".to_string(),
+                arguments: json!({}),
+                thought_signature: None,
+            };
+
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(tool_call, on_event, test_turn_latency())
+                .await;
+
+            assert!(is_error);
+            assert!(output.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                output.details.as_ref().unwrap()["schema"],
+                TOOL_APPROVAL_DENIED_SCHEMA_V1
+            );
+            assert!(
+                matches!(output.content.as_slice(), [ContentBlock::Text(text)] if text
+                    .text
+                    .contains("denied by approval test"))
+            );
         });
     }
 
@@ -10897,6 +11136,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: true,
                 fail_closed_hooks: false,
+                tool_approval: None,
             },
         );
         agent.add_message(Message::User(UserMessage {
@@ -10929,6 +11169,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_approval: None,
             },
         );
         agent.add_message(Message::User(UserMessage {
@@ -11122,6 +11363,7 @@ mod tests {
                 stream_options,
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_approval: None,
             },
         );
 

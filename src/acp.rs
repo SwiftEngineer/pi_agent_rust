@@ -25,7 +25,10 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::significant_drop_tightening)]
 
-use crate::agent::{AbortHandle, AbortSignal, AgentEvent, AgentSession};
+use crate::agent::{
+    AbortHandle, AbortSignal, AgentEvent, AgentSession, ToolApprovalDecision, ToolApprovalHandler,
+    ToolApprovalRequest,
+};
 use crate::agent_cx::AgentCx;
 use crate::auth::AuthStorage;
 use crate::compaction::ResolvedCompactionSettings;
@@ -38,15 +41,19 @@ use crate::provider_metadata::provider_ids_match;
 use crate::providers;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
+use asupersync::channel::oneshot;
 use asupersync::runtime::RuntimeHandle;
 use asupersync::sync::Mutex;
+use asupersync::time::{timeout, wall_now};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 // ============================================================================
 // JSON-RPC 2.0 types
@@ -139,6 +146,11 @@ fn json_rpc_notification(method: &str, params: Value) -> String {
 // ============================================================================
 
 type AcpSessionsMap = Arc<Mutex<HashMap<String, Arc<Mutex<AcpSessionState>>>>>;
+type PendingPermissionMap = Arc<StdMutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+const ACP_PERMISSION_ALLOW_ONCE: &str = "allow-once";
+const ACP_PERMISSION_REJECT_ONCE: &str = "reject-once";
+const ACP_PERMISSION_TIMEOUT_MS: u64 = 120_000;
 
 // Note: AcpServerCapabilities and AcpServerInfo are constructed inline
 // via json!() in handle_initialize for simplicity.
@@ -162,10 +174,6 @@ struct AcpMode {
     description: String,
 }
 
-// Permission callback support is not yet implemented; tool_approval
-// capability is advertised as false until the ACP spec stabilises the
-// request_permission flow.
-
 // ============================================================================
 // ACP Session state
 // ============================================================================
@@ -188,6 +196,80 @@ pub struct AcpOptions {
     pub available_models: Vec<ModelEntry>,
     pub auth: AuthStorage,
     pub runtime_handle: RuntimeHandle,
+}
+
+#[derive(Clone)]
+struct AcpPermissionClient {
+    out_tx: std::sync::mpsc::SyncSender<String>,
+    pending: PendingPermissionMap,
+    request_counter: Arc<AtomicU64>,
+    timeout: Duration,
+    cx: AgentCx,
+}
+
+struct PendingPermissionGuard {
+    pending: PendingPermissionMap,
+    key: String,
+}
+
+impl Drop for PendingPermissionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.pending.lock() {
+            guard.remove(&self.key);
+        }
+    }
+}
+
+impl AcpPermissionClient {
+    fn handler_for_session(&self, session_id: String) -> ToolApprovalHandler {
+        let client = self.clone();
+        Arc::new(move |request: ToolApprovalRequest| {
+            let client = client.clone();
+            let session_id = session_id.clone();
+            Box::pin(async move { client.request_permission(&session_id, request).await })
+        })
+    }
+
+    async fn request_permission(
+        &self,
+        session_id: &str,
+        request: ToolApprovalRequest,
+    ) -> ToolApprovalDecision {
+        let request_id = Value::String(format!(
+            "pi-tool-permission-{}",
+            self.request_counter.fetch_add(1, Ordering::SeqCst)
+        ));
+        let request_key = json_rpc_id_key(&request_id);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+
+        if let Ok(mut guard) = self.pending.lock() {
+            guard.insert(request_key.clone(), reply_tx);
+        } else {
+            return ToolApprovalDecision::deny("permission request registry unavailable");
+        }
+        let _pending_guard = PendingPermissionGuard {
+            pending: Arc::clone(&self.pending),
+            key: request_key,
+        };
+
+        let request_line = json_rpc_permission_request(&request_id, session_id, &request);
+        if self.out_tx.send(request_line).is_err() {
+            return ToolApprovalDecision::deny("permission request client disconnected");
+        }
+
+        let response = timeout(
+            wall_now(),
+            self.timeout,
+            Box::pin(reply_rx.recv(self.cx.cx())),
+        )
+        .await;
+
+        match response {
+            Ok(Ok(value)) => permission_response_to_decision(&value),
+            Ok(Err(_)) => ToolApprovalDecision::deny("permission response channel closed"),
+            Err(_) => ToolApprovalDecision::deny("permission request timed out"),
+        }
+    }
 }
 
 /// Run the ACP server over stdio.
@@ -258,19 +340,38 @@ async fn run(
     let cx = AgentCx::for_current_or_request();
     let sessions: AcpSessionsMap = Arc::new(Mutex::new(HashMap::new()));
     let prompt_counter = Arc::new(AtomicU64::new(0));
+    let permission_counter = Arc::new(AtomicU64::new(0));
+    let pending_permissions: PendingPermissionMap = Arc::new(StdMutex::new(HashMap::new()));
     let active_prompts: Arc<Mutex<HashMap<String, AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let initialized = Arc::new(AtomicBool::new(false));
 
     while let Ok(line) = in_rx.recv(&cx).await {
-        // Parse the JSON-RPC request.
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(req) => req,
+        let raw_message: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
             Err(err) => {
                 let _ = out_tx.send(json_rpc_error(
                     Value::Null,
                     PARSE_ERROR,
                     format!("Parse error: {err}"),
+                ));
+                continue;
+            }
+        };
+
+        if raw_message.get("method").is_none() {
+            let _ = route_permission_response(&raw_message, &pending_permissions, &cx);
+            continue;
+        }
+
+        // Parse the JSON-RPC request.
+        let request: JsonRpcRequest = match serde_json::from_value(raw_message) {
+            Ok(req) => req,
+            Err(err) => {
+                let _ = out_tx.send(json_rpc_error(
+                    Value::Null,
+                    INVALID_REQUEST,
+                    format!("Invalid request: {err}"),
                 ));
                 continue;
             }
@@ -321,7 +422,15 @@ async fn run(
                     continue;
                 }
 
-                match handle_session_new(&request.params, &options) {
+                let permission_client = AcpPermissionClient {
+                    out_tx: out_tx.clone(),
+                    pending: Arc::clone(&pending_permissions),
+                    request_counter: Arc::clone(&permission_counter),
+                    timeout: acp_permission_timeout(),
+                    cx: cx.clone(),
+                };
+
+                match handle_session_new(&request.params, &options, Some(&permission_client)) {
                     Ok((session_id, state)) => {
                         let models: Vec<AcpModel> = options
                             .available_models
@@ -732,6 +841,104 @@ async fn run(
 }
 
 // ============================================================================
+// Permission request routing
+// ============================================================================
+
+const fn acp_permission_timeout() -> Duration {
+    Duration::from_millis(ACP_PERMISSION_TIMEOUT_MS)
+}
+
+fn json_rpc_id_key(id: &Value) -> String {
+    serde_json::to_string(id).unwrap_or_else(|_| id.to_string())
+}
+
+fn route_permission_response(
+    message: &Value,
+    pending: &PendingPermissionMap,
+    cx: &AgentCx,
+) -> bool {
+    if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return false;
+    }
+
+    let Some(id) = message.get("id") else {
+        return false;
+    };
+    let key = json_rpc_id_key(id);
+    let response = message
+        .get("result")
+        .cloned()
+        .or_else(|| message.get("error").map(|error| json!({ "error": error })))
+        .unwrap_or(Value::Null);
+
+    let sender = pending.lock().ok().and_then(|mut guard| guard.remove(&key));
+
+    sender.is_some_and(|sender| {
+        let _ = sender.send(cx.cx(), response);
+        true
+    })
+}
+
+fn json_rpc_permission_request(
+    request_id: &Value,
+    session_id: &str,
+    request: &ToolApprovalRequest,
+) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": session_id,
+            "toolCall": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": request.tool_call_id,
+                "title": request.tool_name,
+                "kind": classify_tool_kind(&request.tool_name),
+                "status": "pending",
+                "rawInput": request.arguments,
+            },
+            "options": [
+                {
+                    "optionId": ACP_PERMISSION_ALLOW_ONCE,
+                    "name": "Allow once",
+                    "kind": "allow_once",
+                },
+                {
+                    "optionId": ACP_PERMISSION_REJECT_ONCE,
+                    "name": "Reject",
+                    "kind": "reject_once",
+                },
+            ],
+        },
+    }))
+    .expect("serialize json-rpc permission request")
+}
+
+fn permission_response_to_decision(response: &Value) -> ToolApprovalDecision {
+    if response.get("error").is_some() {
+        return ToolApprovalDecision::deny("permission request failed");
+    }
+
+    let Some(outcome) = response.get("outcome") else {
+        return ToolApprovalDecision::deny("permission response missing outcome");
+    };
+    match outcome.get("outcome").and_then(Value::as_str) {
+        Some("selected") => match outcome.get("optionId").and_then(Value::as_str) {
+            Some(ACP_PERMISSION_ALLOW_ONCE) => ToolApprovalDecision::Allow,
+            Some(ACP_PERMISSION_REJECT_ONCE) => {
+                ToolApprovalDecision::deny("permission rejected by client")
+            }
+            Some(_) => ToolApprovalDecision::deny("permission response selected unknown option"),
+            None => ToolApprovalDecision::deny("permission response selected without optionId"),
+        },
+        Some("cancelled") => ToolApprovalDecision::deny("permission request cancelled"),
+        Some(_) => ToolApprovalDecision::deny("permission response has unknown outcome"),
+        None => ToolApprovalDecision::deny("permission response outcome malformed"),
+    }
+}
+
+// ============================================================================
 // Path validation
 // ============================================================================
 
@@ -837,6 +1044,12 @@ fn handle_initialize() -> Value {
                 "image": false,
             },
             "sessionCapabilities": {},
+            "_meta": {
+                "pi.dev": {
+                    "toolApproval": true,
+                    "requestPermission": true,
+                },
+            },
         },
         "authMethods": [],
     })
@@ -937,7 +1150,11 @@ fn build_acp_system_prompt(cwd: &std::path::Path, enabled_tools: &[&str]) -> Str
     prompt
 }
 
-fn handle_session_new(params: &Value, options: &AcpOptions) -> Result<(String, AcpSessionState)> {
+fn handle_session_new(
+    params: &Value,
+    options: &AcpOptions,
+    permission_client: Option<&AcpPermissionClient>,
+) -> Result<(String, AcpSessionState)> {
     let cwd = params.get("cwd").and_then(Value::as_str).map_or_else(
         || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         PathBuf::from,
@@ -986,6 +1203,8 @@ fn handle_session_new(params: &Value, options: &AcpOptions) -> Result<(String, A
         stream_options,
         block_images: options.config.image_block_images(),
         fail_closed_hooks: options.config.fail_closed_hooks(),
+        tool_approval: permission_client
+            .map(|client| client.handler_for_session(session_id.clone())),
     };
 
     let agent = crate::agent::Agent::new(provider, tools, agent_config);
@@ -1167,9 +1386,38 @@ fn build_acp_event_handler(
                 "toolCallId": tool_call_id,
                 "title": tool_name,
                 "kind": classify_tool_kind(tool_name),
-                "status": "in_progress",
+                "status": "pending",
                 "rawInput": args,
             })),
+
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name: _,
+                args: _,
+                partial_result,
+            } => {
+                let content_text = partial_result
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut update = json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id,
+                    "status": "in_progress",
+                });
+                if !content_text.is_empty() {
+                    update["content"] = json!([{
+                        "type": "content",
+                        "content": { "type": "text", "text": content_text },
+                    }]);
+                }
+                Some(update)
+            }
 
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
@@ -1258,6 +1506,7 @@ fn classify_tool_kind(tool_name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::provider::{InputType, Model, ModelCost};
+    use asupersync::runtime::RuntimeBuilder;
     use std::collections::HashMap;
 
     fn test_model_entry(provider: &str, id: &str) -> ModelEntry {
@@ -1286,6 +1535,10 @@ mod tests {
             compat: None,
             oauth_config: None,
         }
+    }
+
+    fn pending_permissions_empty(pending: &PendingPermissionMap) -> bool {
+        pending.lock().is_ok_and(|guard| guard.is_empty())
     }
 
     #[test]
@@ -1357,6 +1610,16 @@ mod tests {
             false
         );
         assert_eq!(result["agentCapabilities"]["mcpCapabilities"]["sse"], false);
+        // Tool approval is exposed as implementation metadata; the standard
+        // permission request itself is an Agent -> Client JSON-RPC call.
+        assert_eq!(
+            result["agentCapabilities"]["_meta"]["pi.dev"]["toolApproval"],
+            true
+        );
+        assert_eq!(
+            result["agentCapabilities"]["_meta"]["pi.dev"]["requestPermission"],
+            true
+        );
         // authMethods is required even when empty.
         assert!(result["authMethods"].is_array());
         assert_eq!(result["authMethods"].as_array().unwrap().len(), 0);
@@ -1546,5 +1809,203 @@ mod tests {
         assert_eq!(classify_tool_kind("think"), "think");
         // Unrecognised tool names fall through to the documented default.
         assert_eq!(classify_tool_kind("playwright_screenshot"), "other");
+    }
+
+    #[test]
+    fn permission_response_approves_allow_once() {
+        let decision = permission_response_to_decision(&json!({
+            "outcome": {
+                "outcome": "selected",
+                "optionId": ACP_PERMISSION_ALLOW_ONCE,
+            },
+        }));
+
+        assert_eq!(decision, ToolApprovalDecision::Allow);
+    }
+
+    #[test]
+    fn permission_response_denies_reject_once_and_cancelled() {
+        let rejected = permission_response_to_decision(&json!({
+            "outcome": {
+                "outcome": "selected",
+                "optionId": ACP_PERMISSION_REJECT_ONCE,
+            },
+        }));
+        let cancelled = permission_response_to_decision(&json!({
+            "outcome": {
+                "outcome": "cancelled",
+            },
+        }));
+
+        assert!(matches!(
+            rejected,
+            ToolApprovalDecision::Deny { ref reason }
+                if reason.contains("rejected")
+        ));
+        assert!(matches!(
+            cancelled,
+            ToolApprovalDecision::Deny { ref reason }
+                if reason.contains("cancelled")
+        ));
+    }
+
+    #[test]
+    fn permission_response_malformed_is_denied() {
+        let cases = [
+            json!({}),
+            json!({ "outcome": { "outcome": "selected" } }),
+            json!({ "outcome": { "outcome": "selected", "optionId": "unknown" } }),
+            json!({ "outcome": { "outcome": "weird" } }),
+            json!({ "error": { "code": -32601, "message": "Method not found" } }),
+        ];
+
+        for case in cases {
+            assert!(
+                matches!(
+                    permission_response_to_decision(&case),
+                    ToolApprovalDecision::Deny { .. }
+                ),
+                "case should deny: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_request_emits_json_rpc_and_accepts_routed_response() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(8);
+            let pending = Arc::new(StdMutex::new(HashMap::new()));
+            let cx = AgentCx::for_testing();
+            let client = AcpPermissionClient {
+                out_tx,
+                pending: Arc::clone(&pending),
+                request_counter: Arc::new(AtomicU64::new(0)),
+                timeout: Duration::from_secs(1),
+                cx: cx.clone(),
+            };
+            let request = ToolApprovalRequest {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "bash".to_string(),
+                arguments: json!({ "command": "echo ok" }),
+            };
+
+            let responder = async {
+                let outbound = out_rx.recv().expect("permission request");
+                let parsed: Value = serde_json::from_str(&outbound).expect("valid request json");
+                assert_eq!(parsed["jsonrpc"], "2.0");
+                assert_eq!(parsed["method"], "session/request_permission");
+                assert_eq!(parsed["params"]["sessionId"], "sess-1");
+                assert_eq!(
+                    parsed["params"]["toolCall"]["sessionUpdate"],
+                    "tool_call_update"
+                );
+                assert_eq!(parsed["params"]["toolCall"]["toolCallId"], "call-1");
+                assert_eq!(parsed["params"]["toolCall"]["kind"], "execute");
+                assert_eq!(parsed["params"]["toolCall"]["status"], "pending");
+                assert_eq!(
+                    parsed["params"]["options"][0]["optionId"],
+                    ACP_PERMISSION_ALLOW_ONCE
+                );
+
+                assert!(route_permission_response(
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": parsed["id"].clone(),
+                        "result": {
+                            "outcome": {
+                                "outcome": "selected",
+                                "optionId": ACP_PERMISSION_ALLOW_ONCE,
+                            },
+                        },
+                    }),
+                    &pending,
+                    &cx,
+                ));
+            };
+
+            let (decision, ()) =
+                futures::join!(client.request_permission("sess-1", request), responder);
+            assert_eq!(decision, ToolApprovalDecision::Allow);
+            assert!(pending_permissions_empty(&pending));
+        });
+    }
+
+    #[test]
+    fn permission_request_times_out_fail_closed() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let (out_tx, _out_rx) = std::sync::mpsc::sync_channel::<String>(8);
+            let pending = Arc::new(StdMutex::new(HashMap::new()));
+            let client = AcpPermissionClient {
+                out_tx,
+                pending: Arc::clone(&pending),
+                request_counter: Arc::new(AtomicU64::new(0)),
+                timeout: Duration::from_millis(1),
+                cx: AgentCx::for_testing(),
+            };
+
+            let decision = client
+                .request_permission(
+                    "sess-1",
+                    ToolApprovalRequest {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: "edit".to_string(),
+                        arguments: json!({}),
+                    },
+                )
+                .await;
+
+            assert!(matches!(
+                decision,
+                ToolApprovalDecision::Deny { ref reason }
+                    if reason.contains("timed out")
+            ));
+            assert!(pending_permissions_empty(&pending));
+        });
+    }
+
+    #[test]
+    fn permission_request_client_disconnect_fail_closed() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(8);
+            drop(out_rx);
+            let pending = Arc::new(StdMutex::new(HashMap::new()));
+            let client = AcpPermissionClient {
+                out_tx,
+                pending: Arc::clone(&pending),
+                request_counter: Arc::new(AtomicU64::new(0)),
+                timeout: Duration::from_secs(1),
+                cx: AgentCx::for_testing(),
+            };
+
+            let decision = client
+                .request_permission(
+                    "sess-1",
+                    ToolApprovalRequest {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: "write".to_string(),
+                        arguments: json!({}),
+                    },
+                )
+                .await;
+
+            assert!(matches!(
+                decision,
+                ToolApprovalDecision::Deny { ref reason }
+                    if reason.contains("disconnected")
+            ));
+            assert!(pending_permissions_empty(&pending));
+        });
     }
 }

@@ -700,6 +700,7 @@ fn run_scenario(
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_approval: None,
         };
         let agent = Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -986,6 +987,7 @@ fn context_intelligence_no_mock_harness() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_approval: None,
         },
     );
     let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
