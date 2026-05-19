@@ -20939,6 +20939,11 @@ if (typeof globalThis.Buffer === 'undefined') {
             }
             return size;
         }
+        static _arrayBufferLength(length) {
+            const n = Number(length);
+            if (Number.isNaN(n) || n <= 0) return 0;
+            return Math.trunc(n);
+        }
         static from(input, encoding, length) {
             if (typeof input === 'string') {
                 const enc = __pi_buffer_normalize_encoding(encoding);
@@ -20966,7 +20971,7 @@ if (typeof globalThis.Buffer === 'undefined') {
             }
             if (input instanceof ArrayBuffer) {
                 const offset = encoding || 0;
-                const len = length !== undefined ? length : input.byteLength - offset;
+                const len = length !== undefined ? Buffer._arrayBufferLength(length) : input.byteLength - offset;
                 return new Buffer(input, offset, len);
             }
             if (ArrayBuffer.isView && ArrayBuffer.isView(input)) {

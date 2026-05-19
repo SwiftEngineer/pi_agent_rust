@@ -989,6 +989,42 @@ fn global_buffer_arraybuffer_offset_length_match_node_vectors() {
 }
 
 #[test]
+fn global_buffer_arraybuffer_length_coercion_matches_node_vectors() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const ab = new ArrayBuffer(4);
+        new Uint8Array(ab).set([1, 2, 3, 4]);
+        const cases = [
+            ["undefined", undefined],
+            ["two", 2],
+            ["fraction", 2.9],
+            ["string_two", "2"],
+            ["negative", -1],
+            ["string_negative", "-1"],
+            ["negative_infinity", -Infinity],
+            ["nan", NaN],
+            ["bad_string", "bad"],
+            ["null", null],
+            ["infinity", Infinity],
+            ["oversize", 99],
+        ];
+        return cases.map(([label, length]) => {
+            try {
+                const out = length === undefined ? Buffer.from(ab, 1) : Buffer.from(ab, 1, length);
+                return label + ":" + out.toString("hex");
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "undefined:020304|two:0203|fraction:0203|string_two:0203|negative:|string_negative:|negative_infinity:|nan:|bad_string:|null:|infinity:RangeError|oversize:RangeError"
+    );
+}
+
+#[test]
 fn global_buffer_arraybuffer_backing_view_matches_node() {
     let result = eval_global_buffer(
         r#"(() => {
