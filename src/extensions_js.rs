@@ -20953,12 +20953,17 @@ if (typeof globalThis.Buffer === 'undefined') {
                 for (let i = 0; i < input.length; i++) out[i] = input[i] & 0xff;
                 return out;
             }
+            if (input && typeof input === 'object' && input.type === 'Buffer' && Array.isArray(input.data)) {
+                const out = new Buffer(input.data.length);
+                for (let i = 0; i < input.data.length; i++) out[i] = input.data[i] & 0xff;
+                return out;
+            }
             if (input && typeof input === 'object' && typeof input.length === 'number') {
                 const out = new Buffer(input.length);
                 for (let i = 0; i < input.length; i++) out[i] = input[i] & 0xff;
                 return out;
             }
-            throw new Error('Buffer.from: unsupported input');
+            throw new TypeError('Buffer.from: unsupported input');
         }
         static alloc(size, fill, encoding) {
             const buf = new Buffer(size);

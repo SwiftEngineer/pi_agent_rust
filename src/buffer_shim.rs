@@ -214,6 +214,11 @@ class Buffer extends Uint8Array {
       buf.set(input);
       return buf;
     }
+    if (input && typeof input === 'object' && input.type === 'Buffer' && Array.isArray(input.data)) {
+      const buf = new Buffer(input.data.length);
+      for (let i = 0; i < input.data.length; i++) buf[i] = input.data[i] & 0xFF;
+      return buf;
+    }
     if (input && typeof input === 'object' && typeof input.length === 'number') {
       const buf = new Buffer(input.length);
       for (let i = 0; i < input.length; i++) buf[i] = input[i] & 0xFF;

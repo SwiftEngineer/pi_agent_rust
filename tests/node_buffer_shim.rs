@@ -245,6 +245,32 @@ fn from_array() {
     assert_eq!(result, "hello");
 }
 
+#[test]
+fn from_json_object_inputs_match_node_vectors() {
+    let result = eval_buffer(
+        r#"(() => {
+        const cases = [
+            ["valid", { type: "Buffer", data: [1, 2, 255] }],
+            ["empty", { type: "Buffer", data: [] }],
+            ["mask", { type: "Buffer", data: [257, -1] }],
+            ["missing_data", { type: "Buffer" }],
+            ["missing_type", { data: [1] }],
+        ];
+        return cases.map(([label, value]) => {
+            try {
+                return label + ":" + Buffer.from(value).toString("hex");
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "valid:0102ff|empty:|mask:01ff|missing_data:TypeError|missing_type:TypeError"
+    );
+}
+
 // ─── Buffer.alloc ──────────────────────────────────────────────────────────
 
 #[test]
@@ -967,6 +993,32 @@ fn global_buffer_array_like_inputs_match_node_vectors() {
     })()"#,
     );
     assert_eq!(result, "plain:4142|mask:01ff|empty:");
+}
+
+#[test]
+fn global_buffer_json_object_inputs_match_node_vectors() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = [
+            ["valid", { type: "Buffer", data: [1, 2, 255] }],
+            ["empty", { type: "Buffer", data: [] }],
+            ["mask", { type: "Buffer", data: [257, -1] }],
+            ["missing_data", { type: "Buffer" }],
+            ["missing_type", { data: [1] }],
+        ];
+        return cases.map(([label, value]) => {
+            try {
+                return label + ":" + Buffer.from(value).toString("hex");
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "valid:0102ff|empty:|mask:01ff|missing_data:TypeError|missing_type:TypeError"
+    );
 }
 
 #[test]
