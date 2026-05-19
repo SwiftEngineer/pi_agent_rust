@@ -164,6 +164,24 @@ fn from_hex_decode() {
     assert_eq!(result, "hello");
 }
 
+#[test]
+fn from_hex_truncates_at_invalid_or_incomplete_pair_like_node() {
+    let result = eval_buffer(
+        r#"(() => {
+        const cases = ["1ag123", "1a7", "zz", "61 62", "61xz62", "0"];
+        return cases.map((input) => [
+            input,
+            Buffer.from(input, "hex").toString("hex"),
+            Buffer.byteLength(input, "hex"),
+        ].join(":")).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "1ag123:1a:3|1a7:1a:1|zz::1|61 62:61:2|61xz62:61:3|0::0"
+    );
+}
+
 // ─── Buffer.from + toString: latin1 ────────────────────────────────────────
 
 #[test]
@@ -632,6 +650,24 @@ fn global_buffer_search_semantics_match_node() {
     })()"#,
     );
     assert_eq!(result, "-1,2,false");
+}
+
+#[test]
+fn global_buffer_hex_truncates_at_invalid_or_incomplete_pair_like_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = ["1ag123", "1a7", "zz", "61 62", "61xz62", "0"];
+        return cases.map((input) => [
+            input,
+            Buffer.from(input, "hex").toString("hex"),
+            Buffer.byteLength(input, "hex"),
+        ].join(":")).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "1ag123:1a:3|1a7:1a:1|zz::1|61 62:61:2|61xz62:61:3|0::0"
+    );
 }
 
 #[test]

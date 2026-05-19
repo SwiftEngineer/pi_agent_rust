@@ -20780,6 +20780,24 @@ if (typeof globalThis.Buffer === 'undefined') {
         if (allowUnknownUtf8) return 'utf8';
         throw new TypeError('Unknown encoding: ' + encoding);
     }
+    function __pi_buffer_hex_nibble(code) {
+        if (code >= 48 && code <= 57) return code - 48;
+        if (code >= 65 && code <= 70) return code - 55;
+        if (code >= 97 && code <= 102) return code - 87;
+        return -1;
+    }
+    function __pi_buffer_from_hex_string(input) {
+        let bytes = [];
+        for (let i = 0; i + 1 < input.length; i += 2) {
+            const high = __pi_buffer_hex_nibble(input.charCodeAt(i));
+            const low = __pi_buffer_hex_nibble(input.charCodeAt(i + 1));
+            if (high < 0 || low < 0) break;
+            bytes.push((high << 4) | low);
+        }
+        const out = new Buffer(bytes.length);
+        out.set(bytes);
+        return out;
+    }
     function __pi_buffer_from_one_byte_string(input) {
         const out = new Buffer(input.length);
         for (let i = 0; i < input.length; i++) {
@@ -20850,12 +20868,7 @@ if (typeof globalThis.Buffer === 'undefined') {
                     return out;
                 }
                 if (enc === 'hex') {
-                    const hex = input.replace(/[^0-9a-fA-F]/g, '');
-                    const out = new Buffer(hex.length >> 1);
-                    for (let i = 0; i < out.length; i++) {
-                        out[i] = parseInt(hex.substr(i * 2, 2), 16);
-                    }
-                    return out;
+                    return __pi_buffer_from_hex_string(input);
                 }
                 if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') {
                     return __pi_buffer_from_one_byte_string(input);

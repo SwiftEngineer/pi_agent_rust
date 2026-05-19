@@ -26,13 +26,22 @@ function hexEncode(bytes) {
   return out;
 }
 
+function hexNibble(code) {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (code >= 65 && code <= 70) return code - 55;
+  if (code >= 97 && code <= 102) return code - 87;
+  return -1;
+}
+
 function hexDecode(str) {
-  const len = str.length >>> 1;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = parseInt(str.slice(i * 2, i * 2 + 2), 16);
+  const bytes = [];
+  for (let i = 0; i + 1 < str.length; i += 2) {
+    const high = hexNibble(str.charCodeAt(i));
+    const low = hexNibble(str.charCodeAt(i + 1));
+    if (high < 0 || low < 0) break;
+    bytes.push((high << 4) | low);
   }
-  return bytes;
+  return Uint8Array.from(bytes);
 }
 
 function base64Encode(bytes) {
@@ -227,6 +236,7 @@ class Buffer extends Uint8Array {
       if (string instanceof ArrayBuffer) return string.byteLength;
       throw new TypeError('The "string" argument must be a string, Buffer, or ArrayBuffer');
     }
+    if (normalizeEncoding(encoding, true) === 'hex') return string.length >>> 1;
     return encodeString(string, encoding, true).length;
   }
 
