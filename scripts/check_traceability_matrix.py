@@ -10,15 +10,24 @@ Stale-mapping detection (added by bd-k5q5.7.12):
 - Every suite_classification entry must exist on disk (no phantom entries).
 - Every test path in the matrix must be classified.
 - Classified test files not traced to any requirement produce warnings.
+
+Usage:
+  python3 scripts/check_traceability_matrix.py
+  python3 scripts/check_traceability_matrix.py --self-test
 """
 
 from __future__ import annotations
 
+import argparse
+from contextlib import contextmanager, redirect_stdout
 import glob
+from io import StringIO
 import json
+import sys
+from tempfile import TemporaryDirectory
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MATRIX_PATH = REPO_ROOT / "docs" / "traceability_matrix.json"
@@ -601,10 +610,238 @@ def validate_high_value_artifact_inventory(
     return stats
 
 
+def set_repo_paths(repo_root: Path) -> None:
+    global REPO_ROOT, MATRIX_PATH, E2E_SCENARIO_MATRIX_PATH
+    global ARTIFACT_INVENTORY_PATH, SUITE_TOML_PATH
+
+    REPO_ROOT = repo_root
+    MATRIX_PATH = REPO_ROOT / "docs" / "traceability_matrix.json"
+    E2E_SCENARIO_MATRIX_PATH = REPO_ROOT / "docs" / "e2e_scenario_matrix.json"
+    ARTIFACT_INVENTORY_PATH = (
+        REPO_ROOT / "docs" / "evidence" / "high-value-suite-artifact-inventory.json"
+    )
+    SUITE_TOML_PATH = REPO_ROOT / "tests" / "suite_classification.toml"
+
+
+@contextmanager
+def fixture_repo_root(repo_root: Path) -> Iterator[None]:
+    old_paths = (
+        REPO_ROOT,
+        MATRIX_PATH,
+        E2E_SCENARIO_MATRIX_PATH,
+        ARTIFACT_INVENTORY_PATH,
+        SUITE_TOML_PATH,
+    )
+    set_repo_paths(repo_root)
+    try:
+        yield
+    finally:
+        (
+            globals()["REPO_ROOT"],
+            globals()["MATRIX_PATH"],
+            globals()["E2E_SCENARIO_MATRIX_PATH"],
+            globals()["ARTIFACT_INVENTORY_PATH"],
+            globals()["SUITE_TOML_PATH"],
+        ) = old_paths
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def fixture_traceability_matrix() -> dict[str, Any]:
+    return {
+        "schema_version": "fixture.v1",
+        "program_issue_id": "bd-fixture",
+        "program_title": "Fixture traceability program",
+        "updated_at": "2026-05-19T00:00:00Z",
+        "ci_policy": {
+            "required_categories": ["unit_tests", "e2e_scripts", "evidence_logs"],
+            "min_classified_trace_coverage_pct": 100,
+        },
+        "requirements": [
+            {
+                "id": "REQ-FIXTURE-1",
+                "title": "Fixture requirement",
+                "acceptance_criteria": "The fixture guard validates all required policy surfaces.",
+                "unit_tests": [{"path": "tests/unit_one.rs"}],
+                "e2e_scripts": [{"path": "tests/e2e_one.rs"}],
+                "evidence_logs": [
+                    {"path": "docs/evidence/high-value-suite-artifact-inventory.json"},
+                ],
+            },
+        ],
+    }
+
+
+def fixture_e2e_matrix() -> dict[str, Any]:
+    expected_artifacts = list(REQUIRED_E2E_SUITE_ARTIFACTS + REQUIRED_E2E_RUN_ARTIFACTS)
+    return {
+        "schema": "pi.e2e.scenario_matrix.v2",
+        "bead_id": "bd-fixture",
+        "updated_at": "2026-05-19T00:00:00Z",
+        "ci_policy": {
+            "consumed_by": [
+                "scripts/check_traceability_matrix.py",
+                "tests/ci_full_suite_gate.rs",
+            ],
+            "required_suite_artifacts": list(REQUIRED_E2E_SUITE_ARTIFACTS),
+            "required_run_artifacts": list(REQUIRED_E2E_RUN_ARTIFACTS),
+            "min_e2e_suite_matrix_coverage_pct": 100,
+        },
+        "rows": [
+            {
+                "workflow_id": "fixture-e2e",
+                "workflow_class": "fixture",
+                "workflow_title": "Fixture E2E",
+                "status": "covered",
+                "owner": "fixture",
+                "provider_families": ["fixture"],
+                "expected_artifacts": expected_artifacts,
+                "replay_command": "cargo test --test e2e_one",
+                "suite_ids": ["e2e_one"],
+                "test_paths": ["tests/e2e_one.rs"],
+            },
+        ],
+    }
+
+
+def fixture_artifact_inventory() -> dict[str, Any]:
+    selected_suites = []
+    for area in sorted(REQUIRED_ARTIFACT_INVENTORY_AREAS):
+        selected_suites.append(
+            {
+                "id": f"{area}-fixture",
+                "coverage_area": area,
+                "suite_ids": ["e2e_one"],
+                "test_paths": ["tests/e2e_one.rs"],
+                "schema_tags": [f"pi.fixture.{area}.v1"],
+                "tmpdir_policy": "uses disposable fixture directories",
+                "deterministic_replay_command": "cargo test --test e2e_one",
+                "artifact_refs": [
+                    {
+                        "path": f"target/fixture/{area}.jsonl",
+                        "kind": "jsonl",
+                        "generated_by_ci": True,
+                    },
+                ],
+            }
+        )
+    return {
+        "schema": ARTIFACT_INVENTORY_SCHEMA,
+        "generated_at": "2026-05-19T00:00:00Z",
+        "selected_suites": selected_suites,
+    }
+
+
+def write_fixture_repo(repo_root: Path) -> None:
+    (repo_root / "tests").mkdir(parents=True, exist_ok=True)
+    (repo_root / "tests" / "unit_one.rs").write_text("// fixture unit test\n", encoding="utf-8")
+    (repo_root / "tests" / "e2e_one.rs").write_text("// fixture e2e test\n", encoding="utf-8")
+    (repo_root / "tests" / "suite_classification.toml").write_text(
+        "[suite.unit]\nfiles = [\"unit_one\"]\n\n[suite.e2e]\nfiles = [\"e2e_one\"]\n",
+        encoding="utf-8",
+    )
+    write_json(repo_root / "docs" / "traceability_matrix.json", fixture_traceability_matrix())
+    write_json(repo_root / "docs" / "e2e_scenario_matrix.json", fixture_e2e_matrix())
+    write_json(
+        repo_root / "docs" / "evidence" / "high-value-suite-artifact-inventory.json",
+        fixture_artifact_inventory(),
+    )
+
+
+def run_fixture_check(repo_root: Path) -> tuple[int, str]:
+    output = StringIO()
+    with fixture_repo_root(repo_root), redirect_stdout(output):
+        code = run_check()
+    return code, output.getvalue()
+
+
+def assert_self_test(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def read_fixture_json(repo_root: Path, relative_path: str) -> dict[str, Any]:
+    with (repo_root / relative_path).open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise AssertionError(f"{relative_path} fixture root must be an object")
+    return data
+
+
+def run_self_test_case(name: str, mutate: Callable[[Path], None], expected: str) -> None:
+    with TemporaryDirectory(prefix=f"traceability-{name}-") as tmp:
+        repo_root = Path(tmp)
+        write_fixture_repo(repo_root)
+        mutate(repo_root)
+        code, output = run_fixture_check(repo_root)
+    assert_self_test(code == 1, f"{name} should fail")
+    assert_self_test(expected in output, f"{name} output should include {expected!r}")
+
+
+def run_self_test() -> int:
+    with TemporaryDirectory(prefix="traceability-pass-") as tmp:
+        repo_root = Path(tmp)
+        write_fixture_repo(repo_root)
+        code, output = run_fixture_check(repo_root)
+    assert_self_test(code == 0, "valid fixture should pass")
+    assert_self_test("TRACEABILITY CHECK PASSED" in output, "pass output should report success")
+
+    def remove_required_category(repo_root: Path) -> None:
+        matrix = read_fixture_json(repo_root, "docs/traceability_matrix.json")
+        matrix["requirements"][0].pop("evidence_logs")
+        write_json(repo_root / "docs" / "traceability_matrix.json", matrix)
+
+    run_self_test_case("required-category", remove_required_category, "evidence_logs")
+
+    def point_to_missing_path(repo_root: Path) -> None:
+        matrix = read_fixture_json(repo_root, "docs/traceability_matrix.json")
+        matrix["requirements"][0]["unit_tests"][0]["path"] = "tests/missing.rs"
+        write_json(repo_root / "docs" / "traceability_matrix.json", matrix)
+
+    run_self_test_case("missing-path", point_to_missing_path, "missing file/glob")
+
+    def add_unclassified_test(repo_root: Path) -> None:
+        (repo_root / "tests" / "orphan.rs").write_text("// fixture orphan\n", encoding="utf-8")
+
+    run_self_test_case("suite-drift", add_unclassified_test, "missing from suite_classification")
+
+    def add_uncovered_e2e_suite(repo_root: Path) -> None:
+        (repo_root / "tests" / "e2e_two.rs").write_text("// fixture e2e\n", encoding="utf-8")
+        (repo_root / "tests" / "suite_classification.toml").write_text(
+            "[suite.unit]\nfiles = [\"unit_one\"]\n\n"
+            "[suite.e2e]\nfiles = [\"e2e_one\", \"e2e_two\"]\n",
+            encoding="utf-8",
+        )
+        matrix = read_fixture_json(repo_root, "docs/traceability_matrix.json")
+        matrix["requirements"][0]["e2e_scripts"].append({"path": "tests/e2e_two.rs"})
+        write_json(repo_root / "docs" / "traceability_matrix.json", matrix)
+
+    run_self_test_case("e2e-coverage", add_uncovered_e2e_suite, "missing classified [suite.e2e]")
+
+    def remove_inventory_area(repo_root: Path) -> None:
+        inventory = read_fixture_json(
+            repo_root,
+            "docs/evidence/high-value-suite-artifact-inventory.json",
+        )
+        inventory["selected_suites"] = inventory["selected_suites"][1:]
+        write_json(
+            repo_root / "docs" / "evidence" / "high-value-suite-artifact-inventory.json",
+            inventory,
+        )
+
+    run_self_test_case("artifact-inventory", remove_inventory_area, "missing coverage areas")
+
+    print("Traceability matrix self-test passed.")
+    return 0
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
-def main() -> int:
+def run_check() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -750,6 +987,28 @@ def main() -> int:
             print(f"  - {w}")
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Validate docs/traceability_matrix.json and related CI evidence policy.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run deterministic fixture-backed checks without mutating repository artifacts",
+    )
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        try:
+            return run_self_test()
+        except AssertionError as exc:
+            print("Traceability matrix self-test failed:", file=sys.stderr)
+            print(f"- {exc}", file=sys.stderr)
+            return 1
+
+    return run_check()
 
 
 if __name__ == "__main__":
