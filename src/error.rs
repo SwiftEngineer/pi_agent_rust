@@ -829,6 +829,22 @@ fn io_hints(err: &std::io::Error) -> ErrorHints {
                 ("details", details),
             ],
         ),
+        std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable => {
+            build_hints(
+                "Network/host unreachable while connecting.",
+                vec![
+                    "Confirm the endpoint is reachable (e.g. `curl -v <url>`).".to_string(),
+                    "Check VPN, proxy, and firewall settings.".to_string(),
+                    "If curl works but Pi does not, this is a client connect-path issue \
+                     (IPv6/IPv4 reachability or DNS) — please report it."
+                        .to_string(),
+                ],
+                vec![
+                    ("error_kind", format!("{:?}", err.kind())),
+                    ("details", details),
+                ],
+            )
+        }
         _ => build_hints(
             "I/O error occurred.",
             vec![
