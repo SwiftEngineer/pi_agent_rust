@@ -840,6 +840,106 @@ impl PiApp {
         if let Ok(mut shared_entry) = self.model_entry_shared.lock() {
             shared_entry.api_key.clone_from(&resolved_key_opt);
         }
+
+        // #81: when the active model no longer has resolvable
+        // credentials (e.g. the user just `/logout`ed its provider, or
+        // `/login`ed a different provider entirely), try to migrate
+        // the active model so the next user message doesn't fail with
+        // an auth error against the old provider. Preference order:
+        //   1. A model from the just-changed provider (if it now has
+        //      credentials — i.e. the user logged INTO that provider).
+        //   2. Any model whose provider has stored credentials.
+        // If no authenticated model is available we leave the active
+        // model alone — the user will see the auth error and can run
+        // `/login <provider>` to fix it.
+        let model_still_authenticated = self
+            .model_entry
+            .api_key
+            .as_deref()
+            .map_or(false, |k| !k.is_empty())
+            || !model_requires_configured_credential(&self.model_entry);
+        if !model_still_authenticated {
+            self.auto_switch_to_authenticated_model(&auth, &changed_canonical);
+        }
+    }
+
+    /// Try to switch the active model to one that can actually
+    /// authenticate now. Called from sync_active_provider_credentials
+    /// when the current model lost its credentials. Best-effort: if
+    /// any step fails we just leave the model where it is and let the
+    /// regular auth-error flow surface the issue to the user.
+    fn auto_switch_to_authenticated_model(
+        &mut self,
+        auth: &crate::auth::AuthStorage,
+        preferred_provider: &str,
+    ) {
+        let preferred_canonical = normalize_auth_provider_input(preferred_provider);
+
+        // Helper closure: given a candidate, return Some(resolved_key)
+        // if it can authenticate now.
+        let resolved_key_for = |entry: &ModelEntry| -> Option<String> {
+            let resolved = auth.resolve_api_key(&entry.model.provider, None);
+            normalize_api_key_opt(resolved).or_else(|| normalize_api_key_opt(entry.api_key.clone()))
+        };
+
+        // First: try a model from the just-changed provider.
+        let preferred_match = self
+            .available_models
+            .iter()
+            .find(|entry| {
+                normalize_auth_provider_input(&entry.model.provider) == preferred_canonical
+                    && resolved_key_for(entry).is_some()
+            })
+            .cloned();
+
+        // Fallback: any model whose provider has stored credentials.
+        let any_authenticated = preferred_match.or_else(|| {
+            self.available_models
+                .iter()
+                .find(|entry| resolved_key_for(entry).is_some())
+                .cloned()
+        });
+
+        let Some(next) = any_authenticated else {
+            self.status_message = Some(format!(
+                "Active model {}/{} is no longer authenticated. Run /login <provider> to restore access.",
+                self.model_entry.model.provider, self.model_entry.model.id
+            ));
+            return;
+        };
+
+        if model_entry_matches(&next, &self.model_entry) {
+            return; // nothing to do
+        }
+
+        let resolved_key_opt = resolved_key_for(&next);
+        let provider_impl =
+            match crate::providers::create_provider(&next, self.extensions.as_ref()) {
+                Ok(p) => p,
+                Err(err) => {
+                    self.status_message = Some(format!("Auto-switch failed: {err}"));
+                    return;
+                }
+            };
+
+        let previous_id = format!(
+            "{}/{}",
+            self.model_entry.model.provider, self.model_entry.model.id
+        );
+        if let Err(message) =
+            self.switch_active_model(&next, provider_impl, resolved_key_opt.as_deref(), "auth-sync")
+        {
+            self.status_message = Some(format!(
+                "Auto-switch from {} aborted: {message}. Use /model <provider/model> to pick one manually.",
+                previous_id
+            ));
+            return;
+        }
+
+        let next_id = format!("{}/{}", next.model.provider, next.model.id);
+        self.status_message = Some(format!(
+            "Active model auto-switched from {previous_id} to {next_id} because {previous_id} can no longer authenticate."
+        ));
     }
 
     pub(super) fn switch_active_model(
