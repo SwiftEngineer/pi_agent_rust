@@ -41,6 +41,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "pi"
 path = "src/main.rs"
+# The `pi` binary is the interactive terminal front-end; it requires the full
+# TUI stack (crossterm + charmed_rust). `tui` is in the default feature set, so
+# `cargo build` still produces `pi` with no extra flags. A `--no-default-features`
+# build correctly skips the binary while the library still compiles for SDK
+# consumers that do not want the terminal stack.
+required-features = ["tui"]
 
 # RETIRABLE binary (pending RULE 1 approval)
 # Legacy capture functionality - 91KB, last modified 2026-03-12
@@ -169,18 +175,27 @@ json5 = "1.3.1"
 anyhow = "1.0.102"
 thiserror = "2"
 
-# Terminal output (rich_rust for beautiful TUI)
+# Terminal output (rich_rust for beautiful TUI).
+# rich_rust is shared by non-TUI code paths (plain styled stdout/markdown
+# rendering in src/tui.rs and elsewhere), so it stays unconditional.
 rich_rust = { version = "0.2.0", features = ["markdown"] }
-crossterm = "0.29"
+# crossterm is the low-level terminal driver used exclusively by the
+# interactive front-end, so it is gated behind the `tui` feature.
+crossterm = { version = "0.29", optional = true }
 enable-ansi-support = "0.2"
 
-# Interactive TUI (charmed_rust - bubbletea/lipgloss/bubbles/glamour)
-bubbletea = { package = "charmed-bubbletea", version = "0.2.0" }
-lipgloss = { package = "charmed-lipgloss", version = "0.2.0" }
-bubbles = { package = "charmed-bubbles", version = "0.2.0" }
-glamour = { package = "charmed-glamour", version = "0.2.0" }
-unicode-width = "0.2"
-textwrap = "0.16"
+# Interactive TUI (charmed_rust - bubbletea/lipgloss/bubbles/glamour).
+# These are used exclusively by the interactive terminal front-end and are
+# gated behind the `tui` feature so SDK/library consumers can build the lib
+# with `--no-default-features` without pulling in the terminal stack.
+bubbletea = { package = "charmed-bubbletea", version = "0.2.0", optional = true }
+lipgloss = { package = "charmed-lipgloss", version = "0.2.0", optional = true }
+bubbles = { package = "charmed-bubbles", version = "0.2.0", optional = true }
+glamour = { package = "charmed-glamour", version = "0.2.0", optional = true }
+# unicode-width / textwrap are TUI-layout helpers consumed only by the
+# interactive render code, so they are gated with the rest of the TUI stack.
+unicode-width = { version = "0.2", optional = true }
+textwrap = { version = "0.16", optional = true }
 arboard = { version = "3.6.1", optional = true }
 
 # Filesystem
@@ -304,7 +319,7 @@ rquickjs = { version = "0.11", features = ["futures", "loader", "bindgen"] }
 rquickjs = { version = "0.11", features = ["futures", "loader", "bindgen"] }
 
 [features]
-default = ["sqlite-sessions"]
+default = ["sqlite-sessions", "tui"]
 full = [
     "image-resize",
     "jemalloc",
@@ -312,7 +327,21 @@ full = [
     "wasm-host",
     "sqlite-sessions",
     "syntax-highlighting",
+    "tui",
     "rich_rust/full",
+]
+# Interactive terminal front-end (crossterm + charmed_rust stack). Enabled by
+# default so CLI users get an identical `pi` binary with no action required.
+# Disabling it (`--no-default-features`) lets SDK/library consumers compile the
+# `pi` library without the terminal UI dependencies.
+tui = [
+    "dep:crossterm",
+    "dep:bubbletea",
+    "dep:lipgloss",
+    "dep:bubbles",
+    "dep:glamour",
+    "dep:unicode-width",
+    "dep:textwrap",
 ]
 image-resize = ["image"]
 clipboard = ["dep:arboard"]

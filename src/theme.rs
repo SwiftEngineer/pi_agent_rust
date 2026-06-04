@@ -6,12 +6,20 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+#[cfg(feature = "tui")]
 use glamour::{Style as GlamourStyle, StyleConfig as GlamourStyleConfig};
+#[cfg(feature = "tui")]
 use lipgloss::Style as LipglossStyle;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// `TuiStyles` and the `tui_styles`/`glamour_style_config` helpers below build
+// concrete lipgloss/glamour render styles and are only needed by the
+// interactive front-end. The `Theme` data struct itself (colors, schema,
+// discovery) stays unconditional because non-TUI code (resource loading,
+// config) depends on it.
+#[cfg(feature = "tui")]
 #[derive(Debug, Clone)]
 pub struct TuiStyles {
     pub title: LipglossStyle,
@@ -159,6 +167,7 @@ impl Theme {
         luma >= 128.0
     }
 
+    #[cfg(feature = "tui")]
     #[must_use]
     pub fn tui_styles(&self) -> TuiStyles {
         let title = LipglossStyle::new()
@@ -195,6 +204,7 @@ impl Theme {
         }
     }
 
+    #[cfg(feature = "tui")]
     #[must_use]
     pub fn glamour_style_config(&self) -> GlamourStyleConfig {
         let mut config = if self.is_light() {
@@ -1048,6 +1058,7 @@ mod tests {
 
     // ── tui_styles and glamour_style_config smoke tests ─────────────
 
+    #[cfg(feature = "tui")]
     #[test]
     fn tui_styles_returns_valid_struct() {
         let styles = Theme::dark().tui_styles();
@@ -1058,6 +1069,7 @@ mod tests {
         let _ = format!("{:?}", styles.error_bold);
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn glamour_style_config_smoke() {
         let dark_config = Theme::dark().glamour_style_config();

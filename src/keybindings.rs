@@ -672,6 +672,12 @@ impl KeyBinding {
     ///
     /// Returns `None` for paste events or multi-character input that
     /// cannot map to a single key binding.
+    ///
+    /// Only available with the `tui` feature: it bridges the interactive
+    /// front-end's bubbletea key events into the binding catalog. The rest of
+    /// the keybinding catalog (pure serde data + string parsing) stays
+    /// available to library consumers without the terminal stack.
+    #[cfg(feature = "tui")]
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn from_bubbletea_key(key: &bubbletea::KeyMsg) -> Option<Self> {
@@ -2255,175 +2261,188 @@ mod tests {
     // ============================================================================
     // KeyMsg → KeyBinding Conversion (bd-gze)
     // ============================================================================
+    //
+    // These cover `KeyBinding::from_bubbletea_key`, which only exists with the
+    // `tui` feature, so the whole block is gated to keep the lib-only
+    // (`--no-default-features`) build clean.
+    #[cfg(feature = "tui")]
+    mod bubbletea_conversion {
+        use super::*;
 
-    #[test]
-    fn test_from_bubbletea_key_ctrl_keys() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_ctrl_keys() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        // Test Ctrl+C
-        let key = KeyMsg::from_type(KeyType::CtrlC);
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "c");
-        assert!(binding.modifiers.ctrl);
-        assert!(!binding.modifiers.alt);
+            // Test Ctrl+C
+            let key = KeyMsg::from_type(KeyType::CtrlC);
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "c");
+            assert!(binding.modifiers.ctrl);
+            assert!(!binding.modifiers.alt);
 
-        // Test Ctrl+P
-        let key = KeyMsg::from_type(KeyType::CtrlP);
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "p");
-        assert!(binding.modifiers.ctrl);
-    }
+            // Test Ctrl+P
+            let key = KeyMsg::from_type(KeyType::CtrlP);
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "p");
+            assert!(binding.modifiers.ctrl);
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_special_keys() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_special_keys() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        // Enter
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Enter)).unwrap();
-        assert_eq!(binding.key, "enter");
-        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+            // Enter
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Enter)).unwrap();
+            assert_eq!(binding.key, "enter");
+            assert_eq!(binding.modifiers, KeyModifiers::NONE);
 
-        // Escape
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Esc)).unwrap();
-        assert_eq!(binding.key, "escape");
+            // Escape
+            let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Esc)).unwrap();
+            assert_eq!(binding.key, "escape");
 
-        // Tab
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Tab)).unwrap();
-        assert_eq!(binding.key, "tab");
+            // Tab
+            let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Tab)).unwrap();
+            assert_eq!(binding.key, "tab");
 
-        // Backspace
-        let binding =
-            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Backspace)).unwrap();
-        assert_eq!(binding.key, "backspace");
-    }
+            // Backspace
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Backspace)).unwrap();
+            assert_eq!(binding.key, "backspace");
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_arrow_keys() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_arrow_keys() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        // Plain arrows
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Up)).unwrap();
-        assert_eq!(binding.key, "up");
-        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+            // Plain arrows
+            let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Up)).unwrap();
+            assert_eq!(binding.key, "up");
+            assert_eq!(binding.modifiers, KeyModifiers::NONE);
 
-        // Shift+arrows
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::ShiftUp)).unwrap();
-        assert_eq!(binding.key, "up");
-        assert!(binding.modifiers.shift);
+            // Shift+arrows
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::ShiftUp)).unwrap();
+            assert_eq!(binding.key, "up");
+            assert!(binding.modifiers.shift);
 
-        // Ctrl+arrows
-        let binding =
-            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlLeft)).unwrap();
-        assert_eq!(binding.key, "left");
-        assert!(binding.modifiers.ctrl);
+            // Ctrl+arrows
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlLeft)).unwrap();
+            assert_eq!(binding.key, "left");
+            assert!(binding.modifiers.ctrl);
 
-        // Ctrl+Shift+arrows
-        let binding =
-            KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlShiftDown)).unwrap();
-        assert_eq!(binding.key, "down");
-        assert!(binding.modifiers.ctrl);
-        assert!(binding.modifiers.shift);
-    }
+            // Ctrl+Shift+arrows
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::CtrlShiftDown)).unwrap();
+            assert_eq!(binding.key, "down");
+            assert!(binding.modifiers.ctrl);
+            assert!(binding.modifiers.shift);
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_with_alt() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_with_alt() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        // Alt+arrow
-        let key = KeyMsg::from_type(KeyType::Up).with_alt();
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "up");
-        assert!(binding.modifiers.alt);
-        assert!(!binding.modifiers.ctrl);
+            // Alt+arrow
+            let key = KeyMsg::from_type(KeyType::Up).with_alt();
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "up");
+            assert!(binding.modifiers.alt);
+            assert!(!binding.modifiers.ctrl);
 
-        // Alt+letter (via Runes)
-        let key = KeyMsg::from_char('f').with_alt();
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "f");
-        assert!(binding.modifiers.alt);
-    }
+            // Alt+letter (via Runes)
+            let key = KeyMsg::from_char('f').with_alt();
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "f");
+            assert!(binding.modifiers.alt);
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_runes() {
-        use bubbletea::KeyMsg;
+        #[test]
+        fn test_from_bubbletea_key_runes() {
+            use bubbletea::KeyMsg;
 
-        // Single character
-        let key = KeyMsg::from_char('a');
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "a");
-        assert_eq!(binding.modifiers, KeyModifiers::NONE);
+            // Single character
+            let key = KeyMsg::from_char('a');
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "a");
+            assert_eq!(binding.modifiers, KeyModifiers::NONE);
 
-        // Uppercase becomes lowercase
-        let key = KeyMsg::from_char('A');
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert_eq!(binding.key, "a");
-    }
+            // Uppercase becomes lowercase
+            let key = KeyMsg::from_char('A');
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert_eq!(binding.key, "a");
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_multi_char_returns_none() {
-        use bubbletea::KeyMsg;
+        #[test]
+        fn test_from_bubbletea_key_multi_char_returns_none() {
+            use bubbletea::KeyMsg;
 
-        // Multi-character input (e.g., IME) cannot be a keybinding
-        let key = KeyMsg::from_runes(vec!['a', 'b']);
-        assert!(KeyBinding::from_bubbletea_key(&key).is_none());
-    }
+            // Multi-character input (e.g., IME) cannot be a keybinding
+            let key = KeyMsg::from_runes(vec!['a', 'b']);
+            assert!(KeyBinding::from_bubbletea_key(&key).is_none());
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_paste_returns_none() {
-        use bubbletea::KeyMsg;
+        #[test]
+        fn test_from_bubbletea_key_paste_returns_none() {
+            use bubbletea::KeyMsg;
 
-        // Paste events should not be keybindings
-        let key = KeyMsg::from_char('a').with_paste();
-        assert!(KeyBinding::from_bubbletea_key(&key).is_none());
-    }
+            // Paste events should not be keybindings
+            let key = KeyMsg::from_char('a').with_paste();
+            assert!(KeyBinding::from_bubbletea_key(&key).is_none());
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_function_keys() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_function_keys() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F1)).unwrap();
-        assert_eq!(binding.key, "f1");
+            let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F1)).unwrap();
+            assert_eq!(binding.key, "f1");
 
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F12)).unwrap();
-        assert_eq!(binding.key, "f12");
-    }
+            let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::F12)).unwrap();
+            assert_eq!(binding.key, "f12");
+        }
 
-    #[test]
-    fn test_from_bubbletea_key_navigation() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_from_bubbletea_key_navigation() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Home)).unwrap();
-        assert_eq!(binding.key, "home");
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Home)).unwrap();
+            assert_eq!(binding.key, "home");
 
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::PgUp)).unwrap();
-        assert_eq!(binding.key, "pageup");
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::PgUp)).unwrap();
+            assert_eq!(binding.key, "pageup");
 
-        let binding = KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Delete)).unwrap();
-        assert_eq!(binding.key, "delete");
-    }
+            let binding =
+                KeyBinding::from_bubbletea_key(&KeyMsg::from_type(KeyType::Delete)).unwrap();
+            assert_eq!(binding.key, "delete");
+        }
 
-    #[test]
-    fn test_keybinding_lookup_via_conversion() {
-        use bubbletea::{KeyMsg, KeyType};
+        #[test]
+        fn test_keybinding_lookup_via_conversion() {
+            use bubbletea::{KeyMsg, KeyType};
 
-        let bindings = KeyBindings::new();
+            let bindings = KeyBindings::new();
 
-        // Ctrl+C should map to an action (Copy or Clear depending on context)
-        let key = KeyMsg::from_type(KeyType::CtrlC);
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        assert!(bindings.lookup(&binding).is_some());
+            // Ctrl+C should map to an action (Copy or Clear depending on context)
+            let key = KeyMsg::from_type(KeyType::CtrlC);
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            assert!(bindings.lookup(&binding).is_some());
 
-        // PageUp should map to PageUp action
-        let key = KeyMsg::from_type(KeyType::PgUp);
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        let action = bindings.lookup(&binding);
-        assert_eq!(action, Some(AppAction::PageUp));
+            // PageUp should map to PageUp action
+            let key = KeyMsg::from_type(KeyType::PgUp);
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            let action = bindings.lookup(&binding);
+            assert_eq!(action, Some(AppAction::PageUp));
 
-        // Enter should map to Submit
-        let key = KeyMsg::from_type(KeyType::Enter);
-        let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
-        let action = bindings.lookup(&binding);
-        assert_eq!(action, Some(AppAction::Submit));
+            // Enter should map to Submit
+            let key = KeyMsg::from_type(KeyType::Enter);
+            let binding = KeyBinding::from_bubbletea_key(&key).unwrap();
+            let action = bindings.lookup(&binding);
+            assert_eq!(action, Some(AppAction::Submit));
+        }
     }
 
     // ── Property tests ──────────────────────────────────────────────────

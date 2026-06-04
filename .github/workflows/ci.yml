@@ -2198,3 +2198,48 @@ jobs:
             ci-test-health-dashboard.json
             ci-test-health-trend.jsonl
           if-no-files-found: error
+
+  # SDK / library consumers (e.g. the pi-code-gui VSCode extension) embed the
+  # `pi` library without the interactive terminal front-end. The `tui` feature
+  # is in the default set, so `cargo build` is unchanged for CLI users, but the
+  # library must keep compiling without crossterm + the charmed_rust stack.
+  # This job locks that contract in so it can never silently regress.
+  library_no_default_features:
+    name: lib (--no-default-features, no TUI)
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+    defaults:
+      run:
+        working-directory: pi_agent_rust
+        shell: bash
+    steps:
+      - name: Checkout pi_agent_rust
+        uses: actions/checkout@v4
+        with:
+          path: pi_agent_rust
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pi_agent_rust -> target
+          prefix-key: library-no-default-features
+
+      - name: cargo check (lib, no default features, no TUI)
+        run: |
+          set -euxo pipefail
+          # Library-only build: SDK consumers must compile without the
+          # crossterm / charmed_rust terminal stack pulled in by `tui`.
+          # `--lib` (not `--all-targets`) is deliberate: the `pi` binary and the
+          # integration tests/benches require the `tui` feature, so they are
+          # expected to be skipped here — only the library contract is locked in.
+          cargo check --no-default-features --lib

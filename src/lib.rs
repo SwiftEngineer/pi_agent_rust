@@ -141,6 +141,7 @@ pub mod hostcall_trace_jit;
 pub mod http;
 #[doc(hidden)]
 pub mod http_shim;
+#[cfg(feature = "tui")]
 #[doc(hidden)]
 pub mod interactive;
 #[doc(hidden)]
@@ -189,6 +190,7 @@ pub mod session;
 pub mod session_index;
 #[doc(hidden)]
 pub mod session_metrics;
+#[cfg(feature = "tui")]
 #[doc(hidden)]
 pub mod session_picker;
 #[cfg(feature = "sqlite-sessions")]
