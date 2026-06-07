@@ -209,13 +209,43 @@ pub struct Client {
     vcr: Option<VcrRecorder>,
 }
 
+/// Process-global cache of the built TLS connector.
+///
+/// Building the connector pulls in the root trust store, which is the single
+/// most expensive part of constructing a [`Client`]. `Client::new()` is called
+/// from many hot paths (every provider constructor, the version check, etc.),
+/// so without caching each call rebuilt the trust store from scratch. We now
+/// build the connector once per process and clone it (`TlsConnector` is cheap
+/// to clone) on every subsequent call. See pi_agent_rust#101.
+///
+/// The `Err` variant carries the build error as a `String` so a transient or
+/// configuration failure is still observed identically on every call.
+static TLS_CONNECTOR: std::sync::OnceLock<std::result::Result<TlsConnector, String>> =
+    std::sync::OnceLock::new();
+
+/// Build (or fetch the cached) TLS connector backed by the bundled webpki
+/// root certificates.
+///
+/// Using webpki roots avoids hitting the OS trust store, which on macOS calls
+/// into Security.framework (`SecTrustSettingsCopyTrustSettings`) and can spend
+/// many seconds at high CPU parsing the system cert trust plist on startup.
+/// See pi_agent_rust#101.
+fn shared_tls_connector() -> std::result::Result<TlsConnector, String> {
+    TLS_CONNECTOR
+        .get_or_init(|| {
+            TlsConnectorBuilder::new()
+                .with_webpki_roots()
+                .alpn_protocols(vec![b"http/1.1".to_vec()])
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+}
+
 impl Client {
     #[must_use]
     pub fn new() -> Self {
-        let tls = TlsConnectorBuilder::new()
-            .with_native_roots()
-            .and_then(|builder| builder.alpn_protocols(vec![b"http/1.1".to_vec()]).build())
-            .map_err(|e| e.to_string());
+        let tls = shared_tls_connector();
 
         let user_agent = std::env::var(ANTIGRAVITY_VERSION_ENV).map_or_else(
             |_| DEFAULT_USER_AGENT.to_string(),
