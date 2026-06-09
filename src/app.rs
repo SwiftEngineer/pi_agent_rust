@@ -366,16 +366,19 @@ fn load_context_file_from_dir(dir: &Path) -> Option<ContextFile> {
 }
 
 fn format_current_datetime() -> String {
+    // Date only — deliberately no clock time. This string is part of the cached
+    // system-prompt prefix; a per-second timestamp would invalidate the
+    // provider's prompt/KV cache on every request (higher latency + cost). Date
+    // granularity keeps the prefix stable within a day while still giving the
+    // model the current date. (#103)
     let now = Local::now();
-    let date = format!(
+    format!(
         "{}, {} {}, {}",
         now.format("%A"),
         now.format("%B"),
         now.day(),
         now.year()
-    );
-    let time = format!("{} {}", now.format("%I:%M:%S %p"), now.format("%Z"));
-    format!("{date}, {time}")
+    )
 }
 
 #[allow(clippy::too_many_lines)]

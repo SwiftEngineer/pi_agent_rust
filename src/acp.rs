@@ -1141,9 +1141,10 @@ fn build_acp_system_prompt(cwd: &std::path::Path, enabled_tools: &[&str]) -> Str
         }
     }
 
-    let date_time = chrono::Utc::now()
-        .format("%Y-%m-%d %H:%M:%S UTC")
-        .to_string();
+    // Date only — no clock time. This is part of the cached system-prompt
+    // prefix; a per-second timestamp would bust the provider's prompt/KV cache
+    // on every request. (#103)
+    let date_time = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let _ = write!(prompt, "\nCurrent date and time: {date_time}");
     let _ = write!(prompt, "\nCurrent working directory: {}", cwd.display());
 
