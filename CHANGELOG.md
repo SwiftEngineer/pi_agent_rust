@@ -12,6 +12,27 @@ Repository: <https://github.com/Dicklesworthstone/pi_agent_rust>
 
 ---
 
+## [Unreleased]
+
+### Features
+
+- **`/mcp` slash command** — reports MCP (Model Context Protocol) server
+  status in the interactive TUI instead of returning "Unknown command". Lists
+  any MCP servers an installed extension has registered and clarifies that Pi
+  does not read standalone MCP config files (`.agents/mcp.json`,
+  `.pi/mcp.json`, `~/.pi/agent/mcp.json`). Fixes
+  [#112](https://github.com/Dicklesworthstone/pi_agent_rust/issues/112).
+
+### Bug Fixes
+
+- **Windows `WSAENOTCONN` retry now also fires for TLS errors surfaced through
+  non-`Io` variants** — `is_retryable_not_connected_tls` walks the `TlsError`
+  source chain in addition to matching the direct `Io` variant, so a "socket
+  not connected" (os error 10057) reported via the TLS library is still
+  detected and retried with a fresh connection. Hardens
+  [#111](https://github.com/Dicklesworthstone/pi_agent_rust/issues/111) /
+  [#106](https://github.com/Dicklesworthstone/pi_agent_rust/issues/106).
+
 ## [v0.1.20] — 2026-06-13 — Tag-only
 
 ### Bug Fixes

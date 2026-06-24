@@ -791,6 +791,10 @@ const fn builtin_slash_commands() -> &'static [BuiltinSlashCommand] {
             name: "share",
             description: "Export to a temp HTML file and show path",
         },
+        BuiltinSlashCommand {
+            name: "mcp",
+            description: "Show MCP server status (Model Context Protocol)",
+        },
     ]
 }
 

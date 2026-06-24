@@ -107,6 +107,7 @@ fn slash_command_parse_all_canonical_commands() {
         ("/compact", SlashCommand::Compact),
         ("/reload", SlashCommand::Reload),
         ("/share", SlashCommand::Share),
+        ("/mcp", SlashCommand::Mcp),
     ];
     for (input, expected) in commands {
         let result = SlashCommand::parse(input);

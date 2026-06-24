@@ -762,8 +762,32 @@ fn is_retryable_not_connected(err: &std::io::Error) -> bool {
 
 /// Whether a TLS connect error is caused by a retryable "socket not
 /// connected" I/O error (see [`is_retryable_not_connected`]).
+///
+/// The common shape is `TlsError::Io(io::Error)`, but a layered Winsock
+/// provider can surface the WSAENOTCONN through the TLS library itself (e.g.
+/// `TlsError::Rustls` / `TlsError::Handshake`), where the originating
+/// `io::Error` is only reachable via the [`std::error::Error::source`] chain.
+/// We therefore check the direct `Io` variant *and* walk the source chain so
+/// the fresh-socket retry fires regardless of which variant the connector
+/// chose to report (pi_agent_rust#111 / #106).
 fn is_retryable_not_connected_tls(err: &TlsError) -> bool {
-    matches!(err, TlsError::Io(io_err) if is_retryable_not_connected(io_err))
+    if let TlsError::Io(io_err) = err {
+        if is_retryable_not_connected(io_err) {
+            return true;
+        }
+    }
+    // Walk the generic source chain; any link that is (or wraps) a
+    // "socket not connected" io::Error makes the connect retryable.
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if is_retryable_not_connected(io_err) {
+                return true;
+            }
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// A failed connect attempt: the user-facing error plus whether it is a
@@ -1531,6 +1555,19 @@ mod tests {
     fn not_retryable_tls_handshake_failure() {
         let err = TlsError::Handshake("handshake failure".to_string());
         assert!(!is_retryable_not_connected_tls(&err));
+    }
+
+    #[test]
+    fn retryable_tls_io_source_chain_wsaenotconn() {
+        // A layered Winsock provider can wrap the originating WSAENOTCONN
+        // io::Error inside another io::Error reported as `TlsError::Io`; the
+        // raw os error is only reachable via the get_ref/source chain
+        // (pi_agent_rust#111). The classifier must still treat it as
+        // retryable.
+        let inner = std::io::Error::from_raw_os_error(WSAENOTCONN);
+        let wrapped = std::io::Error::new(std::io::ErrorKind::Other, inner);
+        let err = TlsError::Io(wrapped);
+        assert!(is_retryable_not_connected_tls(&err));
     }
 
     #[test]
