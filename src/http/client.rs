@@ -1565,7 +1565,7 @@ mod tests {
         // (pi_agent_rust#111). The classifier must still treat it as
         // retryable.
         let inner = std::io::Error::from_raw_os_error(WSAENOTCONN);
-        let wrapped = std::io::Error::new(std::io::ErrorKind::Other, inner);
+        let wrapped = std::io::Error::other(inner);
         let err = TlsError::Io(wrapped);
         assert!(is_retryable_not_connected_tls(&err));
     }

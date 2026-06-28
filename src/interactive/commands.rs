@@ -2932,14 +2932,14 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
         let servers = self
             .extensions
             .as_ref()
-            .map(|m| m.extension_mcp_servers())
+            .map(crate::extensions::ExtensionManager::extension_mcp_servers)
             .unwrap_or_default();
 
         let mut content = String::from("MCP servers (Model Context Protocol)\n");
         if servers.is_empty() {
             content.push_str("\n  No MCP servers are currently registered.\n");
         } else {
-            content.push_str(&format!("\n  {} registered:\n", servers.len()));
+            let _ = writeln!(content, "\n  {} registered:", servers.len());
             for server in &servers {
                 let name = server
                     .get("name")
@@ -2956,7 +2956,7 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                             .map(str::to_string)
                     })
                     .unwrap_or_else(|| "<no url/command>".to_string());
-                content.push_str(&format!("    • {name} — {target}\n"));
+                let _ = writeln!(content, "    • {name} — {target}");
             }
         }
 
