@@ -18903,7 +18903,18 @@ impl JsExtensionRuntimeHandle {
         };
 
         thread::spawn(move || {
+            // The extension runtime must be backed by a reactor so its timer
+            // driver and async I/O are actually driven. Without it, async waits
+            // used by hostcall dispatch (e.g. the exec/http poll loops'
+            // `extension_wait_sleep().await`, and the async HTTP connector) never
+            // make progress on this worker thread, so any awaited hostcall from
+            // inside a tool's `execute()` hangs until it is cancelled. Mirror the
+            // main runtime, which attaches a reactor via `with_reactor`.
             let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(
+                    asupersync::runtime::reactor::create_reactor()
+                        .expect("extension runtime reactor"),
+                )
                 .build()
                 .expect("extension runtime build");
             runtime.block_on(async move {
