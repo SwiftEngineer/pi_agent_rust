@@ -1641,6 +1641,16 @@ const fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+/// Fast extension-pump cadence used while background JS work is still pending
+/// (outstanding timers / detached `pi.exec` children / un-awaited
+/// continuations). Keeps latency low for autonomous delivery.
+const PUMP_ACTIVE_INTERVAL_MS: u64 = 50;
+/// Relaxed extension-pump cadence used when idle or while a turn is streaming.
+/// This doubles as a cheap safety poll: newly-created background work (e.g. a
+/// fire-and-forget scheduled by a just-finished tool call) is picked up within
+/// this window, so the pump never has to be explicitly "kicked" back to life.
+const PUMP_IDLE_INTERVAL_MS: u64 = 400;
+
 /// Run the interactive mode.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_interactive(
@@ -1804,6 +1814,11 @@ pub enum PiMsg {
     UiShutdown,
     /// Periodic autocomplete refresh tick (background file index).
     AutocompleteRefresh,
+    /// Periodic extension-runtime pump tick. Advances fire-and-forget /
+    /// un-awaited background JS work (e.g. detached `pi.exec` children or
+    /// `pi.sendMessage()` continuations) between host frames so extensions can
+    /// deliver results autonomously — including while the session is idle.
+    PumpExtensions,
     /// Text delta from assistant.
     TextDelta(String),
     /// Thinking delta from assistant.
@@ -2305,6 +2320,13 @@ pub struct PiApp {
     // Extension session state
     extension_streaming: Arc<AtomicBool>,
     extension_compacting: Arc<AtomicBool>,
+
+    // Extension background-pump coordination. `pump_in_flight` guards against
+    // overlapping pumps (a single long fire-and-forget dispatch must not stack
+    // up a backlog of pumps behind it); `pump_has_pending` carries the last
+    // pump's "work remained" signal so the timer can adapt its cadence.
+    pump_in_flight: Arc<AtomicBool>,
+    pump_has_pending: Arc<AtomicBool>,
     extension_ui_queue: VecDeque<ExtensionUiRequest>,
     active_extension_ui: Option<ExtensionUiRequest>,
     extension_custom_overlay: Option<ExtensionCustomOverlay>,
@@ -2411,12 +2433,28 @@ impl PiApp {
         }))
     }
 
+    /// Self-clocking timer that re-fires [`PiMsg::PumpExtensions`] after `delay`.
+    /// The interval is chosen by the handler (fast while background work is
+    /// pending, relaxed when idle/streaming), so the pump adapts without a
+    /// separate scheduler. Disabled under `PI_TEST_MODE` so unit tests don't
+    /// spin the extension worker.
+    fn pump_extensions_cmd(delay: std::time::Duration) -> Option<Cmd> {
+        if std::env::var_os("PI_TEST_MODE").is_some() {
+            return None;
+        }
+        Some(Cmd::new(move || {
+            std::thread::sleep(delay);
+            Message::new(PiMsg::PumpExtensions)
+        }))
+    }
+
     fn startup_init_cmd(input_cmd: Option<Cmd>, pending_cmd: Option<Cmd>) -> Option<Cmd> {
         let startup_cmd = sequence(vec![Some(Self::initial_window_size_cmd()), pending_cmd]);
         batch(vec![
             input_cmd,
             startup_cmd,
             Self::autocomplete_refresh_cmd(),
+            Self::pump_extensions_cmd(std::time::Duration::from_millis(PUMP_IDLE_INTERVAL_MS)),
         ])
     }
 
@@ -2617,6 +2655,8 @@ impl PiApp {
             runtime_handle,
             extension_streaming: extension_streaming.clone(),
             extension_compacting: extension_compacting.clone(),
+            pump_in_flight: Arc::new(AtomicBool::new(false)),
+            pump_has_pending: Arc::new(AtomicBool::new(false)),
             extension_ui_queue: VecDeque::new(),
             active_extension_ui: None,
             extension_custom_overlay: None,

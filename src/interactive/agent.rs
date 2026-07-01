@@ -391,6 +391,71 @@ impl PiApp {
                 self.autocomplete.provider.refresh_background();
                 return Self::autocomplete_refresh_cmd();
             }
+            PiMsg::PumpExtensions => {
+                // Advance the extension runtime between host frames so detached
+                // background JS (un-awaited `pi.exec`, fire-and-forget
+                // `pi.sendMessage`) makes progress and can deliver autonomously.
+                //
+                // Gating: never pump while a turn is streaming, an extension tool
+                // is executing, or a session compaction is in flight — each would
+                // contend for the single-threaded extension worker (and could
+                // queue a pump behind a long ExecuteTool for up to
+                // EXTENSION_QUERY_BUDGET_MS, or race a compaction that is rewriting
+                // session state on the same runtime). The `extension_streaming`
+                // flag is set for the whole turn (AgentStart..AgentDone), which is
+                // exactly when tools run; `extension_compacting` is held for the
+                // duration of a `/compact`. Also skip if a previous pump is still
+                // in flight so a single slow fire-and-forget dispatch can't stack
+                // up a backlog of pumps.
+                let streaming = self.extension_streaming.load(Ordering::SeqCst);
+                let compacting = self.extension_compacting.load(Ordering::SeqCst);
+                let idle = !streaming && !compacting;
+                if idle && !self.pump_in_flight.load(Ordering::SeqCst) {
+                    if let Some(runtime) =
+                        self.extensions.as_ref().and_then(ExtensionManager::runtime)
+                    {
+                        // RAII reset: if `pump_once().await` panics or the spawned
+                        // task is cancelled, the guard's Drop still clears
+                        // `pump_in_flight`, so a single failed pump can never wedge
+                        // the pump off for the rest of the session.
+                        struct InFlightGuard(Arc<std::sync::atomic::AtomicBool>);
+                        impl Drop for InFlightGuard {
+                            fn drop(&mut self) {
+                                self.0.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        self.pump_in_flight.store(true, Ordering::SeqCst);
+                        let in_flight = Arc::clone(&self.pump_in_flight);
+                        let has_pending = Arc::clone(&self.pump_has_pending);
+                        self.runtime_handle.spawn(async move {
+                            let _guard = InFlightGuard(in_flight);
+                            let pending = match runtime.pump_once().await {
+                                Ok(pending) => pending,
+                                Err(err) => {
+                                    tracing::debug!(
+                                        event = "pi.pump.error",
+                                        error = %err,
+                                        "extension pump failed"
+                                    );
+                                    false
+                                }
+                            };
+                            has_pending.store(pending, Ordering::SeqCst);
+                            // `_guard` drops here (or on unwind) → clears the flag.
+                        });
+                    }
+                }
+                // Fast cadence only while there is outstanding background work to
+                // advance and we are otherwise idle; otherwise relax to a cheap
+                // idle poll (which also re-detects newly-created work without an
+                // explicit kick).
+                let delay = if idle && self.pump_has_pending.load(Ordering::SeqCst) {
+                    std::time::Duration::from_millis(PUMP_ACTIVE_INTERVAL_MS)
+                } else {
+                    std::time::Duration::from_millis(PUMP_IDLE_INTERVAL_MS)
+                };
+                return Self::pump_extensions_cmd(delay);
+            }
             PiMsg::TextDelta(text) => {
                 self.current_response.push_str(&text);
                 // While tail-following, `view()` computes the bottom slice
@@ -2471,6 +2536,50 @@ mod stream_delta_batcher_tests {
                 }),
             ])))
         }
+    }
+
+    #[test]
+    fn pump_extensions_without_runtime_never_strands_in_flight_flag() {
+        // Invariant guard for the background-pump wiring: the handler must only
+        // set `pump_in_flight` when it actually spawns a pump (which resets the
+        // flag on completion via the RAII `InFlightGuard`). With no extension
+        // runtime present there is nothing to pump, so the flag must stay false
+        // in every gating state — otherwise a stuck flag would permanently
+        // disable all future pumps.
+        use std::sync::atomic::Ordering;
+        let mut app = build_test_app();
+        assert!(app.extensions.is_none(), "test app has no extensions");
+
+        // Idle (would-pump) path: no runtime -> no spawn -> flag stays clear.
+        app.extension_streaming.store(false, Ordering::SeqCst);
+        app.extension_compacting.store(false, Ordering::SeqCst);
+        let _ = app.handle_pi_message(PiMsg::PumpExtensions);
+        assert!(!app.pump_in_flight.load(Ordering::SeqCst));
+
+        // Streaming (gated) path: pump is skipped -> flag stays clear.
+        app.extension_streaming.store(true, Ordering::SeqCst);
+        app.extension_compacting.store(false, Ordering::SeqCst);
+        let _ = app.handle_pi_message(PiMsg::PumpExtensions);
+        assert!(!app.pump_in_flight.load(Ordering::SeqCst));
+
+        // Compacting (gated) path: a `/compact` in flight must also suppress the
+        // pump so it can't race the compaction task on the shared runtime.
+        app.extension_streaming.store(false, Ordering::SeqCst);
+        app.extension_compacting.store(true, Ordering::SeqCst);
+        let _ = app.handle_pi_message(PiMsg::PumpExtensions);
+        assert!(!app.pump_in_flight.load(Ordering::SeqCst));
+
+        // In-flight gate: with a pump already marked in flight, the handler must
+        // NOT clear the flag (the running pump's guard owns that reset) and must
+        // not re-enter — it leaves the flag exactly as it found it.
+        app.extension_streaming.store(false, Ordering::SeqCst);
+        app.extension_compacting.store(false, Ordering::SeqCst);
+        app.pump_in_flight.store(true, Ordering::SeqCst);
+        let _ = app.handle_pi_message(PiMsg::PumpExtensions);
+        assert!(
+            app.pump_in_flight.load(Ordering::SeqCst),
+            "handler must not clear an in-flight flag it did not set"
+        );
     }
 
     #[test]
